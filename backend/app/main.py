@@ -84,26 +84,31 @@ async def lifespan(app: FastAPI):
         _run_premarket_with_status,
         CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Shanghai'),
         id='premarket', name='盘前AI辩论+策略推送', replace_existing=True,
+        misfire_grace_time=3600,  # 错过1小时内自动补跑
     )
     scheduler.add_job(
         _run_midday_with_status,
         CronTrigger(hour=11, minute=35, day_of_week='mon-fri', timezone='Asia/Shanghai'),
         id='midday', name='午盘快速分析', replace_existing=True,
+        misfire_grace_time=2700,  # 错过45分钟内自动补跑
     )
     scheduler.add_job(
         _run_afternoon_with_status,
         CronTrigger(hour=14, minute=0, day_of_week='mon-fri', timezone='Asia/Shanghai'),
         id='afternoon', name='午后风险检查', replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         _run_review_with_status,
         CronTrigger(hour=15, minute=5, day_of_week='mon-fri', timezone='Asia/Shanghai'),
         id='review', name='收盘复盘', replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         _run_daily_report_with_status,
         CronTrigger(hour=15, minute=35, day_of_week='mon-fri', timezone='Asia/Shanghai'),
         id='daily_report', name='系统日报', replace_existing=True,
+        misfire_grace_time=3600,
     )
     scheduler.add_job(
         _poll_bot_messages,
@@ -541,7 +546,7 @@ async def _startup_health_check():
         issues.append(f"行情: {e}")
 
     if issues:
-        _feishu_webhook_push("旺财V6 启动告警", f"{NL}".join(f"- {i}" for i in issues))
+        _feishu_webhook_push("旺财V6 启动告警", "\n".join(f"- {i}" for i in issues))
 
 
 def _poll_bot_messages():
