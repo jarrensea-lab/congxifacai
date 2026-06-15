@@ -1,4 +1,4 @@
-"""FastAPI 主应用 — V6: DeepSeek云端AI + 飞书全通道 + 定时调度"""
+"""FastAPI 主应用 — V7: DeepSeek云端AI + 飞书全通道 + 定时调度"""
 import asyncio
 import os
 import json
@@ -68,7 +68,7 @@ class FeishuNotifier:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("恭喜发财 V6 应用启动中...")
+    logger.info("恭喜发财 V7 应用启动中...")
     init_db()
     logger.info("数据库初始化完成")
 
@@ -117,7 +117,7 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.start()
-    logger.info("旺财V6 调度器已启动 (5个交易时段 + Bot轮询)")
+    logger.info("旺财V7 调度器已启动 (5个交易时段 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -133,7 +133,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
-    version="6.0.0",
+    version="7.0.0",
     lifespan=lifespan,
 )
 
@@ -288,7 +288,7 @@ async def _run_premarket_with_status():
     gs["running"] = True
     gs["started_at"] = str(datetime.now())
     try:
-        logger.info("=== 旺财V6 盘前任务启动 ===")
+        logger.info("=== 旺财V7 盘前任务启动 ===")
         market_data = await _fetch_market_data()
         sh = market_data["indices"].get("sh000001", {}).get("price", 3350)
         sz = market_data["indices"].get("sz399001", {}).get("price", 10800)
@@ -305,7 +305,7 @@ async def _run_premarket_with_status():
         report_md = strategy_report_md(decision)
         extra = f"\n\n...\n\n*[完整报告已推送]*"
         summary = report_md[:2800] + (extra if len(report_md) > 2800 else "")
-        _feishu_webhook_push(f"旺财V6 盘前策略 [R{risk}]", summary)
+        _feishu_webhook_push(f"旺财V7 盘前策略 [R{risk}]", summary)
 
         db = SessionLocal()
         try:
@@ -502,7 +502,7 @@ async def _run_daily_report_with_status():
         return
     try:
         logger.info("=== 系统日报 ===")
-        content = f"**旺财V6 系统日报**\n日期: {date.today()}\n\n"
+        content = f"**旺财V7 系统日报**\n日期: {date.today()}\n\n"
 
         try:
             deepseek_ok = await cloud.is_available()
@@ -519,7 +519,7 @@ async def _run_daily_report_with_status():
         jobs = [j for j in scheduler.get_jobs()]
         content += f"\n定时任务: {len(jobs)}个 ({', '.join(j.name for j in jobs)})"
 
-        _feishu_webhook_push("旺财V6 系统日报", content)
+        _feishu_webhook_push("旺财V7 系统日报", content)
     except Exception as e:
         logger.error(f"日报异常: {e}", exc_info=True)
 
@@ -546,7 +546,7 @@ async def _startup_health_check():
         issues.append(f"行情: {e}")
 
     if issues:
-        _feishu_webhook_push("旺财V6 启动告警", "\n".join(f"- {i}" for i in issues))
+        _feishu_webhook_push("旺财V7 启动告警", "\n".join(f"- {i}" for i in issues))
 
 
 def _poll_bot_messages():

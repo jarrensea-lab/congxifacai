@@ -1,4 +1,4 @@
-"""V6 报告模板 — 飞书消息卡片 + Markdown 报告格式"""
+"""V7 报告模板 — 飞书消息卡片 + Markdown 报告格式"""
 from datetime import datetime
 
 
@@ -10,7 +10,7 @@ def daily_report_md(date: str, api_health: bool, deepseek_health: bool,
     ds_icon = "✅" if deepseek_health else "⚠️"
 
     lines = [
-        f"📊 **恭喜发财 V6 运行日报**",
+        f"📊 **恭喜发财 V7 运行日报**",
         f"📅 {date}",
         "",
         f"**运行状态**",
@@ -51,7 +51,7 @@ def strategy_report_md(decision: dict, backtests: dict = None) -> str:
                 counter_lines.append(f"  反方自检: {line.strip()[:200]}")
 
     lines = [
-        f"# 🎯 恭喜发财 V6 每日策略报告",
+        f"# 🎯 恭喜发财 V7 每日策略报告",
         f"📅 {datetime.now().strftime('%Y-%m-%d')}",
         "",
         f"## ⚠️ 风险预警（首要关注）",
@@ -135,7 +135,7 @@ def strategy_report_md(decision: dict, backtests: dict = None) -> str:
     lines.extend([
         "",
         "---",
-        f"*报告由 恭喜发财 V6 自动生成 | {datetime.now().strftime('%Y-%m-%d %H:%M')}*",
+        f"*报告由 恭喜发财 V7 自动生成 | {datetime.now().strftime('%Y-%m-%d %H:%M')}*",
     ])
     return "\n".join(lines)
 
@@ -155,5 +155,5 @@ def backtest_card_md(backtests: dict) -> str:
             f"最大回撤{bt.get('max_drawdown_pct', 0)}%"
         )
     lines.append("")
-    lines.append(f"*回测引擎: V6 backtest_engine | {datetime.now().strftime('%H:%M')}*")
+    lines.append(f"*回测引擎: V7 backtest_engine | {datetime.now().strftime('%H:%M')}*")
     return "\n".join(lines)

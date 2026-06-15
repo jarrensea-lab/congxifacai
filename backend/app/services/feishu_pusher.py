@@ -1,4 +1,4 @@
-"""V6 飞书双通道推送 — Webhook卡片 + lark-cli IM文本"""
+"""V7 飞书双通道推送 — Webhook卡片 + lark-cli IM文本"""
 import subprocess
 import json
 import os
