@@ -18,12 +18,13 @@ class TieredCache:
         2: {"ttl": 600,  "label": "L2日内"},
     }
 
-    def __init__(self, max_size: int = 2000):
-        self.max_size = max_size
-        self._store: OrderedDict = OrderedDict()
-        self._meta: Dict[str, tuple] = {}  # key -> (value, tier, timestamp)
-        self._hits: int = 0
-        self._lock = threading.Lock()
+   def __init__(self, max_size: int = 2000):
+       self.max_size = max_size
+       self._store: OrderedDict = OrderedDict()
+       self._meta: Dict[str, tuple] = {}  # key -> (value, tier, timestamp)
+       self._hits: int = 0
+        self._misses: int = 0
+       self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[Any]:
         with self._lock:

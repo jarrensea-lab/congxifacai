@@ -102,16 +102,16 @@ async def main():
         import matplotlib.pyplot as plt
         import matplotlib.font_manager as fm
         # Try Arial Unicode MS first (best CJK support on macOS), then others
-zh_font = None
-for fname in fm.findSystemFonts():
-    fl = fname.lower()
-    if any(k in fl for k in ['arial unicod', 'pingfang', 'heiti', 'stheit', 'songti']):
-        zh_font = fm.FontProperties(fname=fname)
-        break
-if zh_font is None:
-    zh_font = next((fm.FontProperties(fname=f) for f in fm.findSystemFonts()
-                   if any(k in f.lower() for k in ['noto sans cjk','simhei','wqy'])), None)
-        pos_plan = decision.get("position_plan", {})
+        # Try Arial Unicode MS first (best CJK support on macOS), then others
+        zh_font = None
+        for fname in fm.findSystemFonts():
+            fl = fname.lower()
+            if any(k in fl for k in ["arial unicod", "pingfang", "heiti", "stheit", "songti"]):
+                zh_font = fm.FontProperties(fname=fname)
+                break
+        if zh_font is None:
+            zh_font = next((fm.FontProperties(fname=f) for f in fm.findSystemFonts()
+                           if any(k in f.lower() for k in ["noto sans cjk","simhei","wqy"])), None)
         entries = pos_plan.get("entries", [])
         cash_pct = pos_plan.get("suggested_cash_pct", 20)
 

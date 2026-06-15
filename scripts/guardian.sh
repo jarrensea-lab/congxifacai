@@ -3,25 +3,25 @@
 # 恭喜发财 V6 交易日守护进程
 # 
 # 功能:
-#   1. 进程守护 — FastAPI 挂了自动重启
-#   2. 健康检查 — 每30分钟检查 API/DeepSeek/数据源
-#   3. 异常自修复 — 重启/降级/缓存清理
-#   4. 每日日报 — 收盘后生成运行报告
+#   1. 健康检查 — 每30分钟检查 API/DeepSeek/数据源
+#   2. 告警通知 — API或数据源异常时记录并上报
+#   3. 每日日报 — 收盘后生成运行报告
 #
 # 使用:
 #   chmod +x scripts/guardian.sh
 #   ./scripts/guardian.sh &
 #   或通过 launchd 守护: cp scripts/guardian.plist ~/Library/LaunchAgents/
+# 
+# ⚠️ 重要：此脚本不再管理 API 进程。
+#   API 进程由 launchd (com.zhuchenyuan.congxicai-v6) 的 KeepAlive=true 自动守护。
+#   双重管理会导致进程反复崩溃，冲突已修正。
 # ============================================================
 
 PORT=${PORT:-8001}
 HOST=${HOST:-"127.0.0.1"}
 HEALTH_URL="http://${HOST}:${PORT}/api/health"
 LOG_DIR="${HOME}/cong-xi-fa-cai-logs"
-PID_FILE="/tmp/cong-xi-fa-cai-v6.pid"
 CHECK_INTERVAL=1800  # 30分钟
-MAX_RESTARTS=5
-RESTART_COUNT=0
 
 # 加载 .env.local（如果存在）
 ENV_FILE="$(dirname "$0")/../.env.local"
@@ -54,37 +54,6 @@ check_deepseek() {
     return 1
 }
 
-# ═══ 自修复 ═══
-
-restart_api() {
-    log "⚠️  FastAPI 无响应，尝试重启..."
-    # 杀掉旧进程
-    if [ -f "$PID_FILE" ]; then
-        OLD_PID=$(cat "$PID_FILE")
-        if kill -0 "$OLD_PID" 2>/dev/null; then
-            kill -15 "$OLD_PID" 2>/dev/null
-            sleep 3
-            kill -9 "$OLD_PID" 2>/dev/null
-        fi
-    fi
-
-    RESTART_COUNT=$((RESTART_COUNT + 1))
-    if [ $RESTART_COUNT -gt $MAX_RESTARTS ]; then
-        log "❌ 已达最大重启次数($MAX_RESTARTS)，停止守护。请手动检查。"
-        exit 1
-    fi
-
-    # 重启
-    PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-    cd "$PROJECT_DIR"
-    export PYTHONPATH="$PROJECT_DIR/backend"
-    nohup python3 -m uvicorn app.main:app --host $HOST --port $PORT > "$LOG_DIR/api.log" 2>&1 &
-    NEW_PID=$!
-    echo $NEW_PID > "$PID_FILE"
-    log "✅ API 已重启, PID=$NEW_PID (第${RESTART_COUNT}次)"
-    sleep 5
-}
-
 # ═══ 日报 ═══
 
 generate_daily_report() {
@@ -95,7 +64,7 @@ generate_daily_report() {
         echo " 日期: $(date '+%Y-%m-%d %H:%M')"
         echo "========================================"
         echo ""
-        echo "🔄 重启次数: $RESTART_COUNT"
+        echo "⚠️  进程管理: launchd (KeepAlive=true) — guardian 仅监控"
         echo ""
 
         # API 状态
@@ -133,18 +102,19 @@ main() {
     log "   检查间隔: ${CHECK_INTERVAL}s"
     log "   日志目录: $LOG_DIR"
 
-    # 检查初始状态
-    if ! check_api; then
-        restart_api
+    # 初始状态检查（仅记录，不管理进程 — launchd 已负责 KeepAlive）
+    if check_api; then
+        log "✅ API 初始状态: 正常"
+    else
+        log "❌ API 初始状态: 无响应（launchd 会自动重启，等待下次巡检）"
     fi
 
-    # 主循环（监控+日报，不管理进程 — launchd 已负责 KeepAlive）
+    # 主循环（仅监控+日报，不管理进程 — launchd 已负责 KeepAlive）
     while true; do
         sleep "$CHECK_INTERVAL"
 
         # 健康检查
         if check_api; then
-            RESTART_COUNT=0
             log "✅ API 健康检查通过"
         else
             log "❌ API 无响应（launchd 会自动重启）"
