@@ -15,7 +15,10 @@ class RiskGuard:
     DAILY_LOSS_LIMIT_PCT = 0.05
     MAX_DRAWDOWN_PCT = 0.20
     MAX_DAILY_TRADES_PER_STOCK = 3
-    MIN_CASH_FEN = 500000  # 最低保留现金5000元
+    # 最低保留现金 = max(总资产的 30%, ¥500)
+    # 修复: 固定¥5000对小账户(¥3000)永远无法满足，改为动态比例
+    MIN_CASH_RESERVE_PCT = 0.30
+    MIN_CASH_FEN_ABSOLUTE = 50000  # 绝对底线 ¥500
     MAX_STAR_BOARD_PCT = 0.50  # 科创板总仓位上限50%
     MAX_LOSS_PER_TRADE_PCT = 0.03  # 单笔最大可承受损失3%
 
@@ -131,10 +134,28 @@ class RiskGuard:
             return False, f"同股同日交易{count}次已达上限{self.MAX_DAILY_TRADES_PER_STOCK}"
         return True, ""
 
-    # ===== Gate 8: 可用资金 =====
+    # ===== Gate 8: 可用资金（动态计算现金底线） =====
     def check_cash_available(self, cash_fen: int, amount_fen: int) -> Tuple[bool, str]:
-        if cash_fen - amount_fen < self.MIN_CASH_FEN:
-            return False, f"剩余现金不足: 需保留¥{self.MIN_CASH_FEN/100:.0f}"
+        """动态计算最低保留现金 = max(总资产30%, ¥500)
+        修复: 固定¥5,000底线对小账户(如¥3,000总资产)永远无法满足。
+        改为按比例保留，适配任意规模账户，避免系统自锁。
+        """
+        from app.database import SessionLocal
+        from app.models import SimAccount
+        db = SessionLocal()
+        try:
+            acc = db.query(SimAccount).first()
+            total_equity = acc.total_value if acc else cash_fen + amount_fen
+        finally:
+            db.close()
+
+        min_cash = max(
+            int(total_equity * self.MIN_CASH_RESERVE_PCT),
+            self.MIN_CASH_FEN_ABSOLUTE
+        )
+        if cash_fen - amount_fen < min_cash:
+            remain = (cash_fen - amount_fen) / 100
+            return False, f"剩余现金不足: 需保留>=¥{min_cash/100:.0f} (总资产{total_equity/100:.0f}的{self.MIN_CASH_RESERVE_PCT*100:.0f}%), 当前仅剩¥{remain:.0f}"
         return True, ""
 
     # ===== Gate 9: 板块集中度 =====
