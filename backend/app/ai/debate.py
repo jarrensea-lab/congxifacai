@@ -314,8 +314,8 @@ class AIDebateEngine:
         """V6: 调用 AI 角色 — cloud-* 走云端 API (DeepSeek/Qwen), 其他走 llama.cpp 本地"""
         import json as _json
         try:
-            # === DeepSeek 云端路由 ===
-            if model.startswith("cloud-"):
+            # === DeepSeek/Qwen 云端路由 ===
+            if model.startswith("cloud-") or model.startswith("qwen-"):
                 from app.ai.cloud_client import cloud
                 role_map = {
                     "cloud-hunter": "analyst",
