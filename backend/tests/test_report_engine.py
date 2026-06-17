@@ -198,10 +198,6 @@ class TestFeishuDoc:
 class TestPushTracker:
     """测试推送状态追踪器"""
 
-    def setup_method(self):
-        """在每个测试前初始化数据库表（确保 PushRecord 表存在）"""
-        from app.database import init_db
-        init_db()
 
     def test_compute_retry_delay_increasing(self):
         """指数退避延迟随重试次数递增"""
