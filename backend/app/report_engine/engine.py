@@ -1,6 +1,4 @@
 """报告引擎调度器 — 串联模板+渲染+渠道输出"""
-from datetime import date as dt_date
-from app.report_engine.report_schema import ReportData
 from app.report_engine.templates.premarket import build_premarket_report_data
 from app.report_engine.templates.closing import build_closing_report_data
 from app.report_engine.templates.midday import build_midday_report_data
@@ -66,7 +64,7 @@ class ReportEngine:
 
             # 1. 飞书消息卡片
             card_md = build_closing_card(data)
-            self._webhook_push(f"📊 旺财V7 收盘全景报告", card_md)
+            self._webhook_push("📊 旺财V7 收盘全景报告", card_md)
 
             # 2. 生成飞书云文档
             doc_md = f"""# 收盘全景报告 - {date}
@@ -106,7 +104,7 @@ class ReportEngine:
         try:
             data = build_midday_report_data(date, market_summary, positions, afternoon_tip)
             card_md = build_midday_card(data)
-            self._webhook_push(f"🌤️ 旺财V7 午盘快报", card_md)
+            self._webhook_push("🌤️ 旺财V7 午盘快报", card_md)
 
             if bitable_writer._available():
                 pos_dicts = [{
@@ -130,7 +128,7 @@ class ReportEngine:
 
             if has_alerts:
                 card_md = build_afternoon_risk_card(data)
-                self._webhook_push(f"🛡️ 旺财V7 午后风控告警", card_md)
+                self._webhook_push("🛡️ 旺财V7 午后风控告警", card_md)
 
             if bitable_writer._available():
                 for a in data.alerts:

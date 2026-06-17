@@ -1,6 +1,4 @@
 """tests for serenity_analyst module"""
-import json
-import pytest
 from app.ai.serenity_analyst import (
     score_company, score_summary_table, check_red_flags, summarize_red_flags,
     get_theme_chokepoints, get_chokepoint_prompt, evidence_summary,

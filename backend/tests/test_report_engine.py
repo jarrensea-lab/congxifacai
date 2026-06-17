@@ -1,5 +1,4 @@
 """测试报告引擎 — 数据模型构建 + 卡片渲染"""
-import pytest
 from datetime import datetime
 from app.report_engine.report_schema import ReportData, Recommendation, PositionItem, SystemHealth, PerformanceData
 from app.report_engine.renderers.markdown_card import build_premarket_card, build_closing_card, build_midday_card

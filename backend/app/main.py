@@ -649,7 +649,7 @@ def _poll_bot_messages():
 # 别名: strategy.py 使用的旧名称
 _run_intraday_with_status = _run_midday_with_status
 async def _check_qwen() -> bool:
-    """检查 Qwen API 连通性"
+    """检查 Qwen API 连通性"""
     qwen_key = getattr(settings, "QWEN_API_KEY", "")
     if not qwen_key:
         return False
@@ -665,7 +665,7 @@ async def _check_qwen() -> bool:
 
 
 async def _check_data_source(name: str) -> bool:
-    """检查数据源连通性"
+    """检查数据源连通性"""
     try:
         if name == "tencent":
             result = await tencent_client.fetch("sh000001")
