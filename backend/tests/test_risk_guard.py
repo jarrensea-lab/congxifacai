@@ -1,5 +1,6 @@
 """RiskGuard 9-Gate Pipeline 单元测试"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from datetime import datetime

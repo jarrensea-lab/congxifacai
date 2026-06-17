@@ -1,9 +1,8 @@
 """FastAPI 主应用 — V7: DeepSeek云端AI + 飞书全通道 + 定时调度"""
 import asyncio
-import os
 import json
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 
 import httpx
 from fastapi import FastAPI
@@ -13,19 +12,16 @@ from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
-from app.database import get_db, init_db, SessionLocal
-from app.models import (RiskAlert, AIStrategy, TradingSignal, TradingOrder, TradeLog,
-                         SimAccount, StrategyInstance, ReviewLog, UserPreference, Position)
-from app.engine.lifecycle import StrategyLifecycle
+from app.database import init_db, SessionLocal
+from app.models import (RiskAlert, AIStrategy, SimAccount, Position)
 from app.services.feishu_channels import feishu_channels
 from app.services.bot_commands import check_and_process_new_messages
 from app.engine.analysis import run_analysis
 from app.engine.debate_tracker import DebateTracker
-from app.engine.workshop import run_debate, ask_role, RISK_LEVELS
+from app.engine.workshop import run_debate
 from app.ai.debate import AIDebateEngine
 from app.ai.cloud_client import cloud
 from app.utils.logger import logger
-from app.utils.tiered_cache import tiered_cache
 from app.utils.trading_calendar import is_trading_day
 from app.data_sources.tencent_client import TencentDataSource
 from app.data_sources.eastmoney_client import EastmoneyDataSource
@@ -169,8 +165,6 @@ from app.trading_engine.signal_engine import SignalEngine
 from app.trading_engine.order_manager import OrderManager
 from app.trading_engine.risk_guard import RiskGuard
 from app.trading_engine.performance import PerformanceAnalyzer
-from app.trading_engine.position import PositionManager
-from app.trading_engine.fee_schedule import round_lot, get_board_type
 
 account_mgr = SimAccountManager()
 sim_broker = SimBroker()
@@ -307,7 +301,7 @@ async def _run_premarket_with_status():
 
         from app.services.report_templates import strategy_report_md
         report_md = strategy_report_md(decision)
-        extra = f"\n\n...\n\n*[完整报告已推送]*"
+        extra = "\n\n...\n\n*[完整报告已推送]*"
         summary = report_md[:2800] + (extra if len(report_md) > 2800 else "")
         # 使用报告引擎全渠道推送
         holdings_data = {
@@ -518,7 +512,7 @@ async def _run_review_with_status():
             for v in violations:
                 content += f"- {v.get('rule','?')}: {v.get('detail','?')}\n"
         else:
-            content += f"无违规项\n"
+            content += "无违规项\n"
 
         db = SessionLocal()
         try:

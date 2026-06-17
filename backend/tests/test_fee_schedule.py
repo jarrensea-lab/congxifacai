@@ -1,5 +1,6 @@
 """费率引擎单元测试"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from app.trading_engine.fee_schedule import (
     get_board_type, get_price_limit_pct, calc_fees, apply_slippage, get_lot_size

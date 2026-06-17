@@ -1,7 +1,6 @@
 """日志工具"""
 import logging
 import sys
-from pathlib import Path
 
 
 def setup_logger(name: str = "congxi", log_file: str = None) -> logging.Logger:

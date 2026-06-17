@@ -10,10 +10,10 @@ def daily_report_md(date: str, api_health: bool, deepseek_health: bool,
     ds_icon = "✅" if deepseek_health else "⚠️"
 
     lines = [
-        f"📊 **恭喜发财 V7 运行日报**",
+        "📊 **恭喜发财 V7 运行日报**",
         f"📅 {date}",
         "",
-        f"**运行状态**",
+        "**运行状态**",
         f"- API 服务: {status_icon}",
         f"- DeepSeek: {ds_icon}",
         f"- 定时任务: {tasks_run}/{tasks_run + tasks_fail} 完成",
@@ -31,7 +31,7 @@ def daily_report_md(date: str, api_health: bool, deepseek_health: bool,
 
     lines.extend([
         "",
-        f"---",
+        "---",
         f"🕐 报告生成时间: {datetime.now().strftime('%H:%M:%S')}",
     ])
     return "\n".join(lines)
@@ -51,10 +51,10 @@ def strategy_report_md(decision: dict, backtests: dict = None) -> str:
                 counter_lines.append(f"  反方自检: {line.strip()[:200]}")
 
     lines = [
-        f"# 🎯 恭喜发财 V7 每日策略报告",
+        "# 🎯 恭喜发财 V7 每日策略报告",
         f"📅 {datetime.now().strftime('%Y-%m-%d')}",
         "",
-        f"## ⚠️ 风险预警（首要关注）",
+        "## ⚠️ 风险预警（首要关注）",
     ]
 
     # 收集所有风险点
@@ -76,7 +76,7 @@ def strategy_report_md(decision: dict, backtests: dict = None) -> str:
 
     # 市场背景（风险之后）
     lines.extend([
-        f"## 市场背景",
+        "## 市场背景",
         f"- **方向**: {decision.get('final_decision', 'N/A')}",
         f"- **置信度**: {decision.get('confidence', 0)}/10",
     ])
@@ -88,7 +88,7 @@ def strategy_report_md(decision: dict, backtests: dict = None) -> str:
     # 仓位管理
     pos_plan = decision.get("position_plan", {})
     if pos_plan.get("entries"):
-        lines.append(f"## 仓位管理")
+        lines.append("## 仓位管理")
         lines.append(f"- 建议保留现金: {pos_plan.get('suggested_cash_pct', 20)}%")
         lines.append(f"- 看好板块: {', '.join(decision.get('top_sectors', [])) or 'N/A'}")
         lines.append("")

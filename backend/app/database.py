@@ -38,7 +38,6 @@ def get_db():
 
 def init_db():
     """初始化数据库"""
-    import app.models
     Base.metadata.create_all(bind=engine)
     # 自动初始化模拟账户（仅当不存在时）
     from sqlalchemy.orm import Session

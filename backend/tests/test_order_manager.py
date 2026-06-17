@@ -1,5 +1,6 @@
 """订单管理器单元测试 — OrderManager 事务回滚 + 全流程"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from unittest.mock import MagicMock

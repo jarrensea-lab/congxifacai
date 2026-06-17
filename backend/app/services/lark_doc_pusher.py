@@ -2,7 +2,6 @@
 import subprocess
 import json
 import os
-import asyncio
 from datetime import datetime
 from app.utils.logger import logger
 
@@ -198,7 +197,7 @@ async def push_strategy_chart(decision: dict) -> bool:
     wedges, texts, autotexts = ax1.pie(sizes, labels=None, autopct='%1.1f%%',
                                         colors=colors[:len(sizes)],
                                         startangle=90, pctdistance=0.85)
-    ax1.set_title(f'仓位分配建议', fontproperties=zh_font, fontsize=14, pad=20)
+    ax1.set_title('仓位分配建议', fontproperties=zh_font, fontsize=14, pad=20)
     ax1.legend(wedges, labels, title="标的", loc="center left",
               bbox_to_anchor=(1, 0, 0.5, 1), prop=zh_font)
 
@@ -233,7 +232,7 @@ async def push_strategy_chart(decision: dict) -> bool:
     plt.close()
 
     logger.info(f"策略图表已生成: {chart_path}")
-    return await push_chart_image(chart_path, f"仓位分配 & 止盈止损")
+    return await push_chart_image(chart_path, "仓位分配 & 止盈止损")
     return True
 
 

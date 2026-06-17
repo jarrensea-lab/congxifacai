@@ -1,5 +1,5 @@
 """费用引擎 — 按板块/方向查表计算完整交易费用"""
-from typing import Dict, Tuple
+from typing import Dict
 
 # 费率配置 (分, 1元=100分)
 FEE_SCHEDULE = {

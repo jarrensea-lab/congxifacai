@@ -1,8 +1,7 @@
 """AI 辩论引擎 — 多模型分工：猎手(35B)/账房(9B)/守夜人(9B)/裁判(R1推理) """
 import json
 import asyncio
-from typing import Dict, Any, List
-from app.config import settings
+from typing import Dict, Any
 from app.utils.logger import logger
 
 # ===== 提示词模板 =====
@@ -404,7 +403,7 @@ class AIDebateEngine:
         if not any([hunter_view, accountant_view, guardian_view, researcher_view]):
             logger.error("所有角色调用均失败")
             return {"debate": {}, "final": {"final_decision": "AI 服务暂时不可用", "confidence": 0, "reasoning": "所有 AI 角色调用失败"}, "judge_thinking": ""}
-        logger.info(f"辩论引擎: 4个角色全部并行调用完成")
+        logger.info("辩论引擎: 4个角色全部并行调用完成")
 
         # 裁判聚合 — 使用推理模型 (R1 需要更多 token 用于内部推理)
         agg_prompt = AGGREGATOR_PROMPT.format(

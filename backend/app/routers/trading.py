@@ -1,11 +1,11 @@
 """模拟交易路由 — 信号/订单/账户/绩效"""
-from datetime import datetime, date, timedelta
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import get_db, SessionLocal
-from app.models import TradingSignal, TradingOrder, TradeLog, SimAccount, AIStrategy, Position
+from app.models import TradingSignal, TradingOrder, TradeLog, SimAccount, AIStrategy
 from app.utils.logger import logger
 from app.ai.cloud_client import cloud
 from app.trading_engine.position import PositionManager

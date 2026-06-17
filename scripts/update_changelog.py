@@ -315,7 +315,7 @@ def main():
 
     # 检查项目根目录下 CHANGELOG.md 是否存在
     if not (project_root / "CHANGELOG.md").exists() and not args.dry_run:
-        print(f"ℹ️  未找到 CHANGELOG.md，将自动创建")
+        print("ℹ️  未找到 CHANGELOG.md，将自动创建")
 
     # 交互模式
     if args.interactive:

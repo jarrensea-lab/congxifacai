@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """🎯 5支标的 AI 辩论 — 调用恭喜发财辩论引擎"""
-import sys, os, json, asyncio
+import sys
+import os
+import json
+import asyncio
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 os.environ['DOTENV_PATH'] = os.path.join(os.path.dirname(__file__), '..', '.env.local')
@@ -13,7 +16,6 @@ async def main():
     print("  恭喜发财 AI 辩论 — 5支低价股专场", flush=True)
     print("=" * 60, flush=True)
 
-    from app.config import settings
     from app.data_sources.tencent_client import TencentDataSource
     from app.data_sources.akshare_news import AKShareNewsClient
 
@@ -87,7 +89,7 @@ async def main():
     }, ensure_ascii=False)
 
     print(f"📰 新闻: {len(news_lines)}条", flush=True)
-    print(f"💵 现金: ¥3,165.72", flush=True)
+    print("💵 现金: ¥3,165.72", flush=True)
 
     # 6. 调用辩论引擎
     print("\n🧠 启动 AI 辩论 (DeepSeek)...", flush=True)

@@ -1,5 +1,5 @@
 """辩论质量追踪 — 记录五角色快照 + 回填实际收益 + 绩效摘要"""
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, List
 from app.database import SessionLocal
 from app.models import DebateResult
