@@ -68,3 +68,14 @@ frontend/dist/
  # Test cache
  .pytest_cache/
  
+
+# Generated output
+infographic/
+comic/
+
+# Local agent files
+.baoyu-skills/
+.superpowers/
+
+# Tmp charts
+/tmp/congxi_v6_charts/
