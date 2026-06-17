@@ -193,3 +193,104 @@ class TestFeishuDoc:
         assert callable(upload_image_to_drive)
         assert callable(create_doc_from_markdown)
         assert callable(create_doc_with_image)
+
+
+class TestPushTracker:
+    """测试推送状态追踪器"""
+
+
+    def test_compute_retry_delay_increasing(self):
+        """指数退避延迟随重试次数递增"""
+        from app.services.push_tracker import compute_retry_delay
+        d1 = compute_retry_delay(1, base_delay=10, max_delay=600)
+        d2 = compute_retry_delay(2, base_delay=10, max_delay=600)
+        d3 = compute_retry_delay(3, base_delay=10, max_delay=600)
+        assert d2 > d1  # 2^1=20 > 10
+        assert d3 > d2  # 2^2=40 > 20
+
+    def test_compute_retry_delay_max_cap(self):
+        """延迟不超过 max_delay"""
+        from app.services.push_tracker import compute_retry_delay
+        d = compute_retry_delay(10, base_delay=10, max_delay=60)
+        assert d <= 66  # 60 + 10% jitter
+
+    def test_compute_retry_delay_has_jitter(self):
+        """两次相同参数的结果带抖动（大概率不等）"""
+        from app.services.push_tracker import compute_retry_delay
+        results = {compute_retry_delay(1, base_delay=30, max_delay=600) for _ in range(5)}
+        assert len(results) > 1  # 抖动导致结果不全相同
+
+    def test_push_tracker_record_and_mark(self):
+        """记录推送 → 标记成功 全流程"""
+        from app.services.push_tracker import push_tracker
+        from app.database import SessionLocal
+        from app.models import PushRecord
+
+        record_id = push_tracker.record(
+            push_type="test", push_date="2026-06-17", status="pending", max_retries=2,
+        )
+        assert record_id is not None
+
+        db = SessionLocal()
+        try:
+            record = db.query(PushRecord).filter(PushRecord.id == record_id).first()
+            assert record is not None
+            assert record.push_type == "test"
+            assert record.status == "pending"
+            assert record.max_retries == 2
+
+            ok = push_tracker.mark_success(record_id)
+            assert ok is True
+            db.refresh(record)
+            assert record.status == "success"
+        finally:
+            db.query(PushRecord).filter(PushRecord.id == record_id).delete()
+            db.commit()
+            db.close()
+
+    def test_push_tracker_mark_failed_and_retry_count(self):
+        """标记失败 → 重试计数增加"""
+        from app.services.push_tracker import push_tracker
+        from app.database import SessionLocal
+        from app.models import PushRecord
+
+        record_id = push_tracker.record(
+            push_type="test_fail", push_date="2026-06-17", status="pending", max_retries=3,
+        )
+        assert record_id is not None
+
+        push_tracker.mark_failed(record_id, "第一次超时")
+        push_tracker.mark_failed(record_id, "第二次超时")
+
+        db = SessionLocal()
+        try:
+            record = db.query(PushRecord).filter(PushRecord.id == record_id).first()
+            assert record.status == "failed"
+            assert record.retry_count == 2
+        finally:
+            db.query(PushRecord).filter(PushRecord.id == record_id).delete()
+            db.commit()
+            db.close()
+
+    def test_get_today_summary_format(self):
+        """获取今日推送摘要格式正确"""
+        from app.services.push_tracker import push_tracker
+        from app.database import SessionLocal
+        from app.models import PushRecord
+
+        db = SessionLocal()
+        try:
+            r1 = PushRecord(push_type="premarket", push_date="2026-06-17", status="success")
+            r2 = PushRecord(push_type="midday", push_date="2026-06-17", status="failed",
+                            error_message="连接超时", retry_count=2)
+            db.add(r1); db.add(r2); db.commit()
+
+            summary = push_tracker.get_today_summary("2026-06-17")
+            assert "今日推送状态" in summary
+            assert "成功" in summary
+            assert "失败" in summary
+
+            db.query(PushRecord).filter(PushRecord.push_date == "2026-06-17").delete()
+            db.commit()
+        finally:
+            db.close()

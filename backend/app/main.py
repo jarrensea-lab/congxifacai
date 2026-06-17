@@ -29,6 +29,7 @@ from app.data_sources.akshare_news import AKShareNewsClient
 from app.data_sources.akshare_market import AKShareMarketClient
 from app.data_sources.data_router import DataSourceRouter
 from app.services.monitor import MonitorService
+from app.services.push_tracker import push_tracker, compute_retry_delay
 
 # 报告引擎
 from app.report_engine.engine import report_engine
@@ -253,6 +254,54 @@ async def _fetch_market_data() -> dict:
 
 def _feishu_webhook_push(title: str, content: str) -> bool:
     """同步飞书 webhook 推送（供 scheduler 线程使用）"""
+    """同步飞书 webhook 推送 + 指数退避重试（供 APScheduler 线程使用）"""
+    MAX_RETRIES = 3
+    BASE_DELAY = 10  # 秒
+
+    webhook_url = settings.FEISHU_WEBHOOK_URL
+    if not webhook_url or "YOUR_WEBHOOK" in webhook_url:
+        logger.warning("飞书Webhook未配置，跳过推送")
+        return False
+
+    for attempt in range(1 + MAX_RETRIES):
+        try:
+            import requests
+            template = "red"
+            if "风险" not in title and "熔断" not in title and "告警" not in title:
+                template = "green" if any(kw in title for kw in ("检查", "无忧", "空仓")) else "blue"
+            payload = {
+                "msg_type": "interactive",
+                "card": {
+                    "header": {"title": {"tag": "plain_text", "content": title},
+                               "template": template},
+                    "elements": [{"tag": "markdown", "content": content[:3000]}],
+                },
+            }
+            resp = requests.post(webhook_url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                logger.info(f"Webhook OK (attempt {attempt+1}): {title}")
+                return True
+            logger.warning(f"Webhook FAIL (attempt {attempt+1}/{MAX_RETRIES+1}): {resp.status_code} - {title}")
+            if 400 <= resp.status_code < 500:
+                logger.warning(f"Webhook 4xx 不重试: {resp.status_code}")
+                return False
+        except requests.exceptions.Timeout:
+            logger.warning(f"Webhook 超时 (attempt {attempt+1}): {title}")
+        except requests.exceptions.ConnectionError as e:
+            logger.warning(f"Webhook 连接失败 (attempt {attempt+1}): {e}")
+        except Exception as e:
+            logger.warning(f"Webhook 异常 (attempt {attempt+1}): {e}")
+
+        if attempt == MAX_RETRIES:
+            logger.error(f"Webhook 已达最大重试次数 ({MAX_RETRIES})，放弃: {title}")
+            return False
+
+        delay = compute_retry_delay(attempt + 1, BASE_DELAY, 120)
+        logger.info(f"Webhook 将在 {delay:.0f}s 后重试...")
+        import time
+        time.sleep(delay)
+
+    return False
     webhook_url = settings.FEISHU_WEBHOOK_URL
     if not webhook_url or "YOUR_WEBHOOK" in webhook_url:
         logger.warning("飞书Webhook未配置，跳过推送")
@@ -360,6 +409,18 @@ async def _run_midday_with_status():
             news_context="午间市场概览",
         )
         final = debate_summary.get("final", {})
+
+        holdings = market_data.get("holdings", [])
+        if not holdings:
+            # 空仓精简模式：仅推送盘面概况，不做完整 AI 辩论
+            await report_engine.push_midday(
+                date=str(date.today()),
+                market_summary="🪹 **当前空仓观望中**\n\n无持仓压力，下午保持观察即可。",
+                positions=[], afternoon_tip="空仓是策略，耐心等待高确定性机会。",
+            )
+            logger.info("--- 午盘快报完成（空仓精简模式） ---")
+            return
+
         snapshot = final.get("market_snapshot", "N/A")
         action = final.get("overall_action", "观望")
         confidence = final.get("confidence", 5)
@@ -407,9 +468,20 @@ async def _run_afternoon_with_status():
         db = SessionLocal()
         try:
             positions = db.query(Position).filter(Position.quantity > 0).all()
+            today_str = str(date.today())
+
+            # 空仓智能：推送精简版风控检查，而非完全静默
             if not positions:
-                logger.info("无持仓，跳过午后检查")
+                logger.info("空仓：推送精简午后检查")
+                acc = db.query(SimAccount).first()
+                cash = acc.cash / 100 if acc else 0
+                await report_engine.push_afternoon_risk(
+                    date=today_str,
+                    positions=[], alerts=[],
+                    performance={"total_assets": cash, "available_cash": cash},
+                )
                 return
+
 
             alerts = []
             for p in positions:
@@ -454,36 +526,24 @@ async def _run_afternoon_with_status():
 
             db.commit()
 
-            if alerts:
-                content = "**午后多维度风控告警**\n\n" + "\n".join(alerts[:10])
-                if len(alerts) > 10:
-                    content += f"\n... 共 {len(alerts)} 条"
-                acc = db.query(SimAccount).first()
-                cash = acc.cash / 100 if acc else 0
-                mv = sum(p.market_value for p in positions) / 100
-                content += f"\n\n现金: {cash:,.0f} | 持仓市值: {mv:,.0f}"
-                # 使用报告引擎推送午后风控
-                pos_list = []
-                for p in positions:
-                    pos_list.append({
-                        "stock_code": p.stock_code, "stock_name": p.stock_name,
-                        "quantity": p.quantity,
-                        "avg_cost": p.avg_cost, "market_price": p.market_price,
-                    })
-                alert_list = []
-                for alert_str in alerts:
-                    parts = alert_str.split(": ", 1)
-                    alert_list.append({
-                        "level": "high" if "HIGH" in parts[0].upper() else "mid",
-                        "message": alert_str[:200],
-                        "stock_name": parts[1].split("(")[0] if len(parts) > 1 else "",
-                    })
-                await report_engine.push_afternoon_risk(
-                    date=str(date.today()),
-                    positions=pos_list,
-                    alerts=alert_list,
-                    performance={"total_assets": cash + mv, "available_cash": cash},
-                )
+            # 统一推送午后风控（有警告红色/无警告绿色）
+            acc = db.query(SimAccount).first()
+            cash = acc.cash / 100 if acc else 0
+            mv = sum(p.market_value for p in positions) / 100
+            pos_list = [{
+                "stock_code": p.stock_code, "stock_name": p.stock_name,
+                "quantity": p.quantity, "avg_cost": p.avg_cost, "market_price": p.market_price,
+            } for p in positions]
+            alert_list = [{
+                "level": "high" if "HIGH" in a.split(": ", 1)[0].upper() else "mid",
+                "message": a[:200],
+                "stock_name": a.split("(")[0].split(": ")[-1] if ": " in a else "",
+            } for a in alerts]
+            await report_engine.push_afternoon_risk(
+                date=today_str,
+                positions=pos_list, alerts=alert_list,
+                performance={"total_assets": cash + mv, "available_cash": cash},
+            )
         finally:
             db.close()
     except Exception as e:
