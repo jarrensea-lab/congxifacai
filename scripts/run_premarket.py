@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """V6 盘前任务 — DeepSeek辩论 → 双通道飞书推送"""
-import sys, os, asyncio, json, subprocess
+import sys
+import os
+import asyncio
+import json
+import subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 os.chdir(os.path.join(os.path.dirname(__file__), '..', 'backend'))
 os.environ['DOTENV_PATH'] = os.path.join(os.path.dirname(__file__), '..', '.env.local')
@@ -32,7 +36,6 @@ async def main():
     from app.config import settings
     from app.database import SessionLocal, init_db
     from app.models import SimAccount, Position
-    from app.utils.logger import logger
 
     print("=" * 60, flush=True)
     print("  恭喜发财 V6 盘前任务", flush=True)
@@ -102,16 +105,16 @@ async def main():
         import matplotlib.pyplot as plt
         import matplotlib.font_manager as fm
         # Try Arial Unicode MS first (best CJK support on macOS), then others
-zh_font = None
-for fname in fm.findSystemFonts():
-    fl = fname.lower()
-    if any(k in fl for k in ['arial unicod', 'pingfang', 'heiti', 'stheit', 'songti']):
-        zh_font = fm.FontProperties(fname=fname)
-        break
-if zh_font is None:
-    zh_font = next((fm.FontProperties(fname=f) for f in fm.findSystemFonts()
-                   if any(k in f.lower() for k in ['noto sans cjk','simhei','wqy'])), None)
-        pos_plan = decision.get("position_plan", {})
+        # Try Arial Unicode MS first (best CJK support on macOS), then others
+        zh_font = None
+        for fname in fm.findSystemFonts():
+            fl = fname.lower()
+            if any(k in fl for k in ["arial unicod", "pingfang", "heiti", "stheit", "songti"]):
+                zh_font = fm.FontProperties(fname=fname)
+                break
+        if zh_font is None:
+            zh_font = next((fm.FontProperties(fname=f) for f in fm.findSystemFonts()
+                           if any(k in f.lower() for k in ["noto sans cjk","simhei","wqy"])), None)
         entries = pos_plan.get("entries", [])
         cash_pct = pos_plan.get("suggested_cash_pct", 20)
 
