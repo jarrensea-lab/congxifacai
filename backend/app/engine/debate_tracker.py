@@ -1,5 +1,5 @@
-"""辩论质量追踪 — 记录四角色快照 + 回填实际收益 + 绩效摘要"""
-from datetime import datetime, timedelta
+"""辩论质量追踪 — 记录五角色快照 + 回填实际收益 + 绩效摘要"""
+from datetime import datetime
 from typing import Optional, List
 from app.database import SessionLocal
 from app.models import DebateResult
@@ -22,7 +22,7 @@ class DebateTracker:
     @staticmethod
     def save(strategy_type: str, engine_result: dict,
              sh_change_pct: float = 0) -> Optional[int]:
-        """辩论结束后保存四角色快照
+        """辩论结束后保存五角色快照
 
         Args:
             strategy_type: premarket / midday / review
@@ -43,6 +43,13 @@ class DebateTracker:
             guardian_risk = guardian_raw.get("risk_appetite", "")
         else:
             guardian_risk = ""
+        researcher_raw = debate.get("researcher", {})
+        if isinstance(researcher_raw, dict):
+            researcher_dec = researcher_raw.get("analysis", "")[:10] if isinstance(researcher_raw.get("analysis"), str) else ""
+            researcher_conv = researcher_raw.get("conviction", 0) or 0
+        else:
+            researcher_dec = ""
+            researcher_conv = 0
 
         db = SessionLocal()
         try:
@@ -58,6 +65,8 @@ class DebateTracker:
                 guardian_risk_appetite=guardian_risk,
                 judge_decision=final.get("final_decision", "hold"),
                 judge_confidence=final.get("confidence", 5),
+                researcher_decision=researcher_dec,
+                researcher_conviction=researcher_conv,
                 short_term_codes=short_codes,
                 mid_term_codes=mid_codes,
             )
