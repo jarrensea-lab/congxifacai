@@ -1,0 +1,12 @@
+[tool.ruff.lint]
+select = ["F", "E4", "E7", "E9"]
+ignore = ["F401", "F841", "E402", "E501", "E722", "E741", "E711", "E701", "E702"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["F821"]
+"backend/test_reports.py" = ["F821", "F841"]
+"backend/tests/*" = ["F401", "F841"]
+"backend/app/utils/tiered_cache.py" = ["E999"]
+
+[tool.ruff.format]
+exclude = ["backend/app/utils/tiered_cache.py"]

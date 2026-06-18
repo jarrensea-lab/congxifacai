@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(update-config)",
+      "Skill(update-config:*)",
+      "Bash(bash -c ' *)",
+      "Bash(rm -f /tmp/test-settings.vue)",
+      "Bash(curl -s http://localhost:11434/api/tags)",
+      "Bash(ollama --version)",
+      "Bash(curl -s -X POST http://localhost:11434/api/generate -H \"Content-Type: application/json\" -d '{\"model\":\"deepseek-r1:14b\",\"prompt\":\"你好，请用一句话介绍你自己\",\"stream\":false,\"options\":{\"num_predict\":100}}')",
+      "Bash(python3 -c \"import sys,json; d=json.load\\(sys.stdin\\); print\\('response:', d.get\\('response',''\\)[:200]\\); print\\('thinking:', d.get\\('thinking',''\\)[:200] if d.get\\('thinking'\\) else '\\(empty\\)'\\); print\\('done:', d.get\\('done'\\)\\); print\\('error:', d.get\\('error','none'\\)\\)\")",
+      "Read(//Users/zhuchenyuan/.claude/**)"
+    ],
+    "additionalDirectories": [
+      "/private/tmp"
+    ]
+  }
+}

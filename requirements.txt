@@ -1,0 +1,35 @@
+# ============================================================
+# 恭喜发财 V6 — 精简依赖
+# ============================================================
+
+# Web 框架 (仅 API 服务，无前端)
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# 数据库
+sqlalchemy>=2.0.36
+aiosqlite
+
+# HTTP 客户端
+httpx>=0.26.0
+
+# 异步任务
+apscheduler>=3.10.4
+
+# 工具
+python-dotenv>=1.0.0
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# 数据源
+tushare>=1.4.0
+akshare>=1.17.0
+
+# AI 客户端 (DeepSeek API 为主, Ollama 仅 fallback)
+ollama>=0.4.0
+
+# 工具
+jieba>=0.42.0
+
+# 飞书 CLI
+# 通过 lark-cli brew 安装，不在此处管理
