@@ -1,0 +1,37 @@
+{
+  "name": "knowX",
+  "profile": "baobao",
+  "chat_id": "oc_82a46b190f223590dfbbd0709b527758",
+  "chat_name": "内阁",
+  "poll_interval_seconds": 5,
+  "message_filter": "knowX",
+  "briefing_time": "07:00",
+  "timezone": "Asia/Shanghai",
+  "news_sources": {
+    "github_trending": {
+      "url": "https://github.com/trending/python?since=daily",
+      "enabled": true,
+      "translate": true
+    },
+    "hackernews": {
+      "url": "https://news.ycombinator.com/",
+      "enabled": true,
+      "translate": true
+    },
+    "zhihu_hot": {
+      "enabled": false,
+      "note": "待确认中文源"
+    },
+    "juejin": {
+      "enabled": false,
+      "note": "待确认中文源"
+    },
+    "feishu_dev": {
+      "enabled": false,
+      "note": "飞书开发者社区"
+    }
+  },
+  "domains": ["engineering", "agent", "ai_creation"],
+  "data_dir": "data",
+  "graph_db": "data/graph.db"
+}
