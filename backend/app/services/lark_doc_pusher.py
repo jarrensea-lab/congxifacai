@@ -1,8 +1,7 @@
-"""V6 飞书全通道推送 — lark-cli 驱动文档/画板/Base/任务"""
+"""V7 飞书全通道推送 — lark-cli 驱动文档/画板/Base/任务"""
 import subprocess
 import json
 import os
-import asyncio
 from datetime import datetime
 from app.utils.logger import logger
 
@@ -35,7 +34,7 @@ async def push_strategy_doc(decision: dict, debate_result: dict = None):
     from app.services.report_templates import strategy_report_md
 
     today = datetime.now().strftime("%Y-%m-%d")
-    doc_title = f"恭喜发财V6 策略报告 {today}"
+    doc_title = f"恭喜发财V7 策略报告 {today}"
 
     # 生成 Markdown 报告
     report = strategy_report_md(decision)
@@ -51,7 +50,7 @@ async def push_strategy_doc(decision: dict, debate_result: dict = None):
                 report += f"\n### {role_label}\n{view}\n"
 
     # 先写临时 md 文件
-    md_path = f"/tmp/congxi_v6_report_{today.replace('-', '')}.md"
+    md_path = f"/tmp/congxi_v7_report_{today.replace('-', '')}.md"
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(report)
 
@@ -198,7 +197,7 @@ async def push_strategy_chart(decision: dict) -> bool:
     wedges, texts, autotexts = ax1.pie(sizes, labels=None, autopct='%1.1f%%',
                                         colors=colors[:len(sizes)],
                                         startangle=90, pctdistance=0.85)
-    ax1.set_title(f'仓位分配建议', fontproperties=zh_font, fontsize=14, pad=20)
+    ax1.set_title('仓位分配建议', fontproperties=zh_font, fontsize=14, pad=20)
     ax1.legend(wedges, labels, title="标的", loc="center left",
               bbox_to_anchor=(1, 0, 0.5, 1), prop=zh_font)
 
@@ -225,7 +224,7 @@ async def push_strategy_chart(decision: dict) -> bool:
     plt.tight_layout()
 
     # 保存
-    chart_dir = "/tmp/congxi_v6_charts"
+    chart_dir = "/tmp/congxi_v7_charts"
     os.makedirs(chart_dir, exist_ok=True)
     today = datetime.now().strftime("%Y%m%d")
     chart_path = f"{chart_dir}/strategy_{today}.png"
@@ -233,7 +232,7 @@ async def push_strategy_chart(decision: dict) -> bool:
     plt.close()
 
     logger.info(f"策略图表已生成: {chart_path}")
-    return await push_chart_image(chart_path, f"仓位分配 & 止盈止损")
+    return await push_chart_image(chart_path, "仓位分配 & 止盈止损")
     return True
 
 
@@ -262,7 +261,7 @@ def _get_or_create_stock_base() -> str:
                     return tokens[0]
 
     # 创建新的 Base
-    ok, out, err = _run_lark("base", "create", "--title", "恭喜发财V6 选股池", "--fields",
+    ok, out, err = _run_lark("base", "create", "--title", "恭喜发财V7 选股池", "--fields",
                              "股票代码,股票名称,推荐理由,买入区间,止损价,目标价,日期", timeout=30)
     if ok:
         logger.info("飞书多维表格「选股池」已创建")
