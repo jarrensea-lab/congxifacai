@@ -1,11 +1,11 @@
-# 恭喜发财 V6 — Codex 自动化 A 股智能助手
+# 恭喜发财 V7 — Codex 自动化 A 股智能助手
 
 > 基于 DeepSeek 云端 AI + 飞书全通道交互的个人量化交易助手
 
-## V6 核心变化
+## V7 核心变化
 
-| V5 | V6 |
-|----|----|
+| V6 | V7 |
+|-----|-----|
 | Vue3 Web 前端 | ❌ 砍掉，全部交互走飞书 |
 | Ollama 本地 35B 模型 | DeepSeek v4-pro 云端 API (月均 ¥2.2) |
 | AKShare 爬虫阻塞 | Tushare + a-stock-data 多源 |
