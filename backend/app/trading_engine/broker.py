@@ -1,7 +1,7 @@
 """模拟撮合引擎 — 市价/限价成交 + 滑点 + 完整费用 + T+1"""
 from datetime import date
 from typing import Optional
-from app.trading_engine.fee_schedule import calc_fees, apply_slippage, get_lot_size, get_price_limit_pct
+from app.trading_engine.fee_schedule import calc_fees, apply_slippage, get_lot_size
 from app.utils.logger import logger
 
 

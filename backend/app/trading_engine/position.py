@@ -2,7 +2,7 @@
 from datetime import datetime, date
 from typing import Optional, List
 from sqlalchemy.orm import Session
-from app.models import Position, TradeLog
+from app.models import Position
 from app.utils.logger import logger
 
 

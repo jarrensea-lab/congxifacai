@@ -1,8 +1,6 @@
 """AKShare 新闻数据源 — 财经早餐 + 全球资讯 + 个股新闻"""
 import asyncio
-import os
-from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List, Optional
 
 
 class AKShareNewsClient:

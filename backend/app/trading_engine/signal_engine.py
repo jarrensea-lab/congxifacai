@@ -4,7 +4,7 @@ from datetime import datetime, date
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
-from app.models import TradingSignal, TradeLog
+from app.models import TradingSignal
 from app.utils.logger import logger
 
 
