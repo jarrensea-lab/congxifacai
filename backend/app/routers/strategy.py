@@ -22,11 +22,10 @@ _get_holdings_data_fn = None  # 函数引用，避免循环导入
 router = APIRouter(prefix="/api", tags=["策略生命周期"])
 
 
-def init_strategy_router(de, fs, tc, mc, nc, gen_status, get_hd_fn):
+def init_strategy_router(de, tc, mc, nc, gen_status, get_hd_fn):
     """由 main.py 调用，注入共享实例"""
-    global debate_engine, feishu, tencent_client, market_client, news_client, generation_status, _get_holdings_data_fn
+    global debate_engine, tencent_client, market_client, news_client, generation_status, _get_holdings_data_fn
     debate_engine = de
-    feishu = fs
     tencent_client = tc
     market_client = mc
     news_client = nc

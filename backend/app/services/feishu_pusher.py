@@ -1,8 +1,11 @@
 """V7 飞书双通道推送 — Webhook卡片 + lark-cli IM文本"""
 import subprocess
 import json
+import time
 import httpx
+import requests as sync_requests
 from app.utils.logger import logger
+from app.services.push_tracker import compute_retry_delay
 
 LARK_CLI = "/Users/zhuchenyuan/.npm-global/bin/lark-cli"
 CONGXI_CHAT_ID = "oc_c51ef6103f2e0b5b9ed9c40ab86b3e45"
@@ -79,3 +82,62 @@ def push_report_to_feishu(webhook_url: str, title: str, report_md: str, chat_id:
         logger.warning(f"lark IM failed: {e}")
 
     return results
+
+
+def push_webhook_retry(title: str, content: str, webhook_url: str = None) -> bool:
+    """同步飞书 webhook 推送 + 指数退避重试（供 APScheduler 线程使用）
+
+    Args:
+        title: 消息标题
+        content: 消息内容
+        webhook_url: 可选覆盖 webhook URL，默认使用 settings.FEISHU_WEBHOOK_URL
+
+    Returns:
+        是否推送成功
+    """
+    from app.config import settings
+    url = webhook_url or settings.FEISHU_WEBHOOK_URL
+    if not url or "YOUR_WEBHOOK" in url:
+        logger.warning("飞书Webhook未配置，跳过推送")
+        return False
+
+    MAX_RETRIES = 3
+    BASE_DELAY = 10
+
+    for attempt in range(1 + MAX_RETRIES):
+        try:
+            template = "red"
+            if "风险" not in title and "熔断" not in title and "告警" not in title:
+                template = "green" if any(kw in title for kw in ("检查", "无忧", "空仓")) else "blue"
+            payload = {
+                "msg_type": "interactive",
+                "card": {
+                    "header": {"title": {"tag": "plain_text", "content": title},
+                               "template": template},
+                    "elements": [{"tag": "markdown", "content": content[:3000]}],
+                },
+            }
+            resp = sync_requests.post(url, json=payload, timeout=15)
+            if resp.status_code == 200:
+                logger.info(f"Webhook OK (attempt {attempt+1}): {title}")
+                return True
+            logger.warning(f"Webhook FAIL (attempt {attempt+1}/{MAX_RETRIES+1}): {resp.status_code} - {title}")
+            if 400 <= resp.status_code < 500:
+                logger.warning(f"Webhook 4xx 不重试: {resp.status_code}")
+                return False
+        except sync_requests.exceptions.Timeout:
+            logger.warning(f"Webhook 超时 (attempt {attempt+1}): {title}")
+        except sync_requests.exceptions.ConnectionError as e:
+            logger.warning(f"Webhook 连接失败 (attempt {attempt+1}): {e}")
+        except Exception as e:
+            logger.warning(f"Webhook 异常 (attempt {attempt+1}): {e}")
+
+        if attempt == MAX_RETRIES:
+            logger.error(f"Webhook 已达最大重试次数 ({MAX_RETRIES})，放弃: {title}")
+            return False
+
+        delay = compute_retry_delay(attempt + 1, BASE_DELAY, 120)
+        logger.info(f"Webhook 将在 {delay:.0f}s 后重试...")
+        time.sleep(delay)
+
+    return False
