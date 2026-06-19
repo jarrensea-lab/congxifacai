@@ -2,9 +2,8 @@
 from datetime import datetime
 from typing import Optional
 from sqlalchemy.orm import Session
-from sqlalchemy import func as sql_func
 from app.database import SessionLocal
-from app.models import SimAccount, Position, TradeLog
+from app.models import SimAccount, Position
 from app.utils.logger import logger
 
 

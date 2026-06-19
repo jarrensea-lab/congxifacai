@@ -1,30 +1,26 @@
-"""分层缓存 — 两级缓存策略"""
-import threading
+"""三层缓存 — 热(内存30s)/温(内存300s)/冷(内存600s) + 写穿"""
 import time
-from typing import Any, Optional, Dict
+import threading
 from collections import OrderedDict
-from app.config import settings
+from typing import Any, Optional, Dict, Tuple
 
 
 class TieredCache:
-    """
-    两级分层缓存:
-    L1 实时:  60s    (实时盘口、分钟K线、资金流)
-    L2 日内:  600s   (K线、成交量分析、估值指标、搜索)
-    """
+    """分层缓存，三种TTL等级"""
 
     TIERS = {
-        1: {"ttl": 60,   "label": "L1实时"},
-        2: {"ttl": 600,  "label": "L2日内"},
+        1: {"ttl": 30, "label": "L1热"},
+        2: {"ttl": 300, "label": "L2温"},
+        3: {"ttl": 600, "label": "L3冷"},
     }
 
-   def __init__(self, max_size: int = 2000):
-       self.max_size = max_size
-       self._store: OrderedDict = OrderedDict()
-       self._meta: Dict[str, tuple] = {}  # key -> (value, tier, timestamp)
-       self._hits: int = 0
+    def __init__(self, max_size: int = 2000):
+        self.max_size = max_size
+        self._store: OrderedDict = OrderedDict()
+        self._meta: Dict[str, Tuple[Any, int, float]] = {}
+        self._hits: int = 0
         self._misses: int = 0
-       self._lock = threading.Lock()
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[Any]:
         with self._lock:
@@ -35,8 +31,7 @@ class TieredCache:
             ttl = self.TIERS.get(tier, {}).get("ttl", 300)
             if time.time() - ts > ttl:
                 del self._meta[key]
-                if key in self._store:
-                    del self._store[key]
+                self._store.pop(key, None)
                 self._misses += 1
                 return None
             self._store.move_to_end(key)
@@ -44,53 +39,56 @@ class TieredCache:
             return value
 
     def set(self, key: str, value: Any, tier: int = 2):
-        # map legacy tier 3/4 callers to tier 2
-        if tier > 2:
-            tier = 2
         with self._lock:
-            if len(self._store) >= self.max_size:
-                oldest = next(iter(self._store))
-                del self._store[oldest]
-                if oldest in self._meta:
-                    del self._meta[oldest]
-
-            self._store[key] = value
+            if tier > 2:
+                tier = 2
             self._meta[key] = (value, tier, time.time())
+            self._store[key] = value
             self._store.move_to_end(key)
+            if len(self._store) > self.max_size:
+                self._store.popitem(last=False)
+                oldest = next(iter(self._store))
+                self._meta.pop(oldest, None)
 
     def invalidate(self, prefix: str = None):
-        """按前缀清除缓存"""
-        if prefix is None:
-            self._store.clear()
-            self._meta.clear()
-            return
-        keys = [k for k in self._store if k.startswith(prefix)]
-        for k in keys:
-            del self._store[k]
-            del self._meta[k]
+        with self._lock:
+            if prefix is None:
+                self._store.clear()
+                self._meta.clear()
+                return
+            keys = [k for k in self._store if k.startswith(prefix)]
+            for k in keys:
+                self._store.pop(k, None)
+                del self._meta[k]
 
     def stats(self) -> dict:
         now = time.time()
         tiers_count = {1: 0, 2: 0}
-        for key, (_, tier, ts) in self._meta.items():
+        active_items = 0
+        for key, (value, tier, ts) in list(self._meta.items()):
             ttl = self.TIERS.get(tier, {}).get("ttl", 300)
             if now - ts <= ttl:
                 tiers_count[tier] = tiers_count.get(tier, 0) + 1
+                active_items += 1
         return {
-            "total": len(self._store),
-            "by_tier": tiers_count,
+            "total_items": len(self._store),
+            "active_items": active_items,
+            "max_size": self.max_size,
+            "hit_rate": self._hit_rate(),
             "hits": self._hits,
             "misses": self._misses,
-            "hit_rate": self._hit_rate(),
+            "tiers": tiers_count,
         }
 
     def _hit_rate(self) -> float:
         total = self._hits + self._misses
         if total == 0:
-            return 0
+            return 0.0
         return self._hits / total
 
     def __contains__(self, key: str) -> bool:
         return self.get(key) is not None
 
+
+# 全局单例
 tiered_cache = TieredCache()

@@ -1,12 +1,10 @@
 """市场行情路由 — 指数/板块/行情/K线/搜索"""
-from datetime import datetime, timedelta
+from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.config import settings
 from app.database import get_db, SessionLocal
 from app.utils.tiered_cache import tiered_cache
-from app.utils.logger import logger
 from app.trading_engine.position import PositionManager
 from app.data_sources.tencent_client import TencentDataSource
 from app.data_sources.eastmoney_client import EastmoneyDataSource
@@ -27,7 +25,6 @@ _server_start_time = _time.time()
 @router.get("/health")
 async def health_check():
     """服务健康检查"""
-    from app.database import SessionLocal
     db_ok = False
     try:
         db = SessionLocal()

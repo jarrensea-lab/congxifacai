@@ -4,9 +4,13 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 
+# 支持 CONGXI_DATABASE_PATH 环境变量覆盖（CI/测试环境使用临时数据库）
+import os
+_db_path = os.environ.get("CONGXI_DATABASE_PATH") or settings.DATABASE_PATH
+
 # 创建数据库引擎
 engine = create_engine(
-    f"sqlite:///{settings.DATABASE_PATH}",
+    f"sqlite:///{_db_path}",
     connect_args={"check_same_thread": False, "timeout": 30}
 )
 
@@ -38,11 +42,14 @@ def get_db():
 
 def init_db():
     """初始化数据库"""
-    import app.models
+    # 先导入所有模型，确保 Base.metadata 完成注册再建表
+    from app.models import (SimAccount, Position, TradingOrder, TradeLog,
+                            TradingSignal, RiskAlert, AIStrategy, StrategyInstance,
+                            ReviewLog, DebateResult, UserPreference, PushRecord)
+
     Base.metadata.create_all(bind=engine)
     # 自动初始化模拟账户（仅当不存在时）
     from sqlalchemy.orm import Session
-    from app.models import SimAccount
     with Session(engine) as session:
         if not session.query(SimAccount).first():
             session.add(SimAccount())

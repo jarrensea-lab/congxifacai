@@ -4,7 +4,6 @@ from typing import Optional, Tuple
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import TradeLog, Position
-from app.trading_engine.fee_schedule import get_price_limit_pct
 from app.utils.logger import logger
 
 

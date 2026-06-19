@@ -7,7 +7,7 @@ V6 新增: 为每支持仓股和推荐股提供历史回测指标，包括胜率
     result = await run_backtest(stock_code, period_days=180)
     # result: {total_trades, win_rate_pct, avg_profit_pct, ...}
 """
-from typing import Optional, Dict, Any
+from typing import Dict, Any
 from app.utils.logger import logger
 
 
@@ -36,9 +36,6 @@ async def run_backtest(
             "trades": [{"date": "...", "action": "buy/sell", "price": ..., "pnl_pct": ...}],
         }
     """
-    from app.data_sources.tushare_client import TushareDataSource
-    from app.data_sources.tencent_client import TencentDataSource
-    from app.data_sources.data_router import DataSourceRouter
 
     # 1. 获取历史K线数据
     bars = await _fetch_kline(stock_code, period_days)

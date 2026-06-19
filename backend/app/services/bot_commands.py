@@ -101,7 +101,8 @@ def _query_holdings(db: Session) -> Dict[str, Any]:
 
 def _generate_strategy(db: Session) -> Dict[str, Any]:
     """触发AI策略生成并返回结果"""
-    import asyncio, time
+    import asyncio
+    import time
     from app.ai.debate import AIDebateEngine
     from app.models import Position, SimAccount
     
@@ -137,7 +138,8 @@ def _generate_strategy(db: Session) -> Dict[str, Any]:
                 'level': r.get('level','中'), 'source': 'DeepSeek+R1辩论引擎'
             })
         if recs:
-            import subprocess, json as j
+            import subprocess
+            import json as j
             from app.config import get_settings
             s = get_settings()
             rows = [[r['code'],r['name'],r['direction'],r['type'],
@@ -289,8 +291,8 @@ def check_and_process_new_messages() -> Optional[Dict]:
     from app.config import get_settings
 
     s = get_settings()
-    bridge = os.path.join(s.FEISHU_BRIDGE_PATH, "check_inbox.py")
     import os as _os
+    bridge = _os.path.join(s.FEISHU_BRIDGE_PATH, "check_inbox.py")
 
     if not _os.path.exists(bridge):
         return None
@@ -324,7 +326,7 @@ def check_and_process_new_messages() -> Optional[Dict]:
             try:
                 subprocess.run(
                     ["python3", bridge, "reply", chat_id or "default",
-                     f"❌ 未授权的用户，无法执行交易指令"],
+                     "❌ 未授权的用户，无法执行交易指令"],
                     capture_output=True, timeout=10
                 )
                 subprocess.run(

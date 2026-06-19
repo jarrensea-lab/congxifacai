@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 """V6 盘前任务 — DeepSeek辩论 → 双通道飞书推送"""
-import sys, os, asyncio, json, subprocess
+import sys
+import os
+import asyncio
+import json
+import subprocess
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
 os.chdir(os.path.join(os.path.dirname(__file__), '..', 'backend'))
 os.environ['DOTENV_PATH'] = os.path.join(os.path.dirname(__file__), '..', '.env.local')
@@ -32,7 +36,6 @@ async def main():
     from app.config import settings
     from app.database import SessionLocal, init_db
     from app.models import SimAccount, Position
-    from app.utils.logger import logger
 
     print("=" * 60, flush=True)
     print("  恭喜发财 V6 盘前任务", flush=True)

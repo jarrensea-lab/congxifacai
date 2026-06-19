@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     # 飞书 Bot 授权 — 仅允许列表中的 open_id 执行交易指令
     FEISHU_ALLOWED_USERS: str = "[]"  # JSON 字符串，如 ["ou_xxx", "ou_yyy"]
 
+    # 飞书多维表格配置
+    FEISHU_BITABLE_APP_TOKEN: str = ""
+    FEISHU_TABLE_STRATEGY: str = ""
+    FEISHU_TABLE_STOCK_POOL: str = ""
+    FEISHU_TABLE_POSITIONS: str = ""
+    FEISHU_TABLE_INDICES: str = ""
+    FEISHU_TABLE_RISK: str = ""
+    FEISHU_TABLE_PERFORMANCE: str = ""
+
     # 服务配置
     SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000

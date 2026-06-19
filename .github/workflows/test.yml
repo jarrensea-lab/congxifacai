@@ -34,7 +34,7 @@ jobs:
       - name: Test with pytest
         working-directory: ./backend
         run: |
-          python -m pytest tests/ -k "not test_cash_insufficient" -v --tb=short -q
+          python -m pytest tests/ -v --tb=short -q
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY || '' }}
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}

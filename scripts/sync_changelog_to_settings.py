@@ -177,7 +177,7 @@ def rebuild_frontend():
     if not (frontend_dir / "package.json").exists():
         return
 
-    print(f"\n🔨 重新构建前端（避免 dist/ 过期导致信息误导）...")
+    print("\n🔨 重新构建前端（避免 dist/ 过期导致信息误导）...")
     import subprocess
     result = subprocess.run(
         ["npm", "run", "build"],
@@ -191,7 +191,7 @@ def rebuild_frontend():
         for line in result.stdout.split("\n"):
             if "building" in line or "built" in line or "dist/" in line:
                 print(f"   {line.strip()}")
-        print(f"✅ 前端构建完成")
+        print("✅ 前端构建完成")
     else:
         print(f"❌ 前端构建失败: {result.stderr[:200]}")
 
