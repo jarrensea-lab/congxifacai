@@ -9,7 +9,7 @@
 """
 import subprocess
 import json
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 from app.utils.logger import logger
 import os
 from app.config import settings
@@ -53,7 +53,8 @@ class FeishuBridge:
     def _load_default_chat(self) -> Optional[str]:
         """从 bridge 状态文件中获取默认群聊 chat_id"""
         try:
-            import os, json
+            import os
+            import json
             # 优先从 conversation.jsonl 中获取最近活跃的 chat_id
             conv_file = os.path.join(settings.FEISHU_BRIDGE_PATH, "conversation.jsonl")
             if os.path.exists(conv_file):
@@ -131,7 +132,8 @@ class FeishuBridge:
 
 async def send_via_lark_cli(text: str, chat_id: str = None) -> bool:
     """通过 lark-cli 直接发送消息到飞书群聊"""
-    import subprocess, json
+    import subprocess
+    import json
     cid = chat_id or "oc_c51ef6103f2e0b5b9ed9c40ab86b3e45"
     try:
         r = subprocess.run(
@@ -143,7 +145,7 @@ async def send_via_lark_cli(text: str, chat_id: str = None) -> bool:
         if output:
             data = json.loads(output.split("\n")[-1])
             ok = data.get("ok", False)
-            if ok: logger.info(f"lark IM 发送成功")
+            if ok: logger.info("lark IM 发送成功")
             return ok
         return False
     except Exception as e:

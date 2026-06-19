@@ -2,7 +2,6 @@
 import asyncio
 import time
 import json
-import httpx
 
 # Data source tests
 async def test_data_sources():

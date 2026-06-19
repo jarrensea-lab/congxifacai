@@ -1,9 +1,9 @@
 """订单管理器 — 状态机 + Position同步"""
-from datetime import datetime, date
+from datetime import datetime
 from typing import Optional, List
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
-from app.models import TradingOrder, TradingSignal, TradeLog, SimAccount, Position
+from app.models import TradingOrder, TradingSignal, TradeLog, SimAccount
 from app.trading_engine.account import SimAccountManager
 from app.trading_engine.broker import SimBroker
 from app.trading_engine.position import PositionManager

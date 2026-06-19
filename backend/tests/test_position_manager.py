@@ -1,5 +1,6 @@
 """持仓管理器单元测试 — PositionManager 所有公开方法"""
-import sys, os
+import sys
+import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from sqlalchemy import create_engine

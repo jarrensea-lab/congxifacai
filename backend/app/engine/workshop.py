@@ -25,7 +25,7 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
         辩论摘要 + 决策卡参数
     """
     from app.ai.debate import AIDebateEngine
-    from app.engine.debate_tracker import DebateTracker, classify_market
+    from app.engine.debate_tracker import DebateTracker
 
     # 从分析报告提取数据
     market = analysis_report.get("market", analysis_report)
@@ -117,7 +117,6 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
 async def ask_role(role: str, question: str, context: str) -> dict:
     """追问特定角色 — V6: DeepSeek 云端"""
     from app.ai.debate import AIDebateEngine
-    from app.engine.debate_tracker import DebateTracker, classify_market
 
     role_personas = {
         "hunter": ("猎手", "短线技术分析师，风格偏向进攻"),

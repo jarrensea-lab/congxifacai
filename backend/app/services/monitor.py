@@ -3,13 +3,11 @@ import json
 from datetime import datetime, timedelta
 from typing import List, Optional, Dict, Any, Set
 from fastapi import WebSocket
-from sqlalchemy.orm import Session
-from app.models import TradeLog, RiskAlert
+from app.models import TradeLog
 from app.database import SessionLocal
 from app.data_sources.data_router import DataSourceRouter
 from app.trading_engine.position import PositionManager
 from app.utils.tiered_cache import tiered_cache
-from app.utils.logger import logger
 
 
 RISK_WEIGHTS = {
