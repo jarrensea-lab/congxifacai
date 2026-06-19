@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 
-def setup_logger(name: str = "congxi", log_file: str = None) -> logging.Logger:
+def setup_logger(name: str = "恭喜发财", log_file: str = None) -> logging.Logger:
     """设置日志配置"""
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)

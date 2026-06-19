@@ -68,3 +68,6 @@ frontend/dist/
  # Test cache
  .pytest_cache/
  
+
+# Tmp charts
+/tmp/恭喜发财_charts/
