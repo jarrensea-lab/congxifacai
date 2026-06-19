@@ -62,12 +62,11 @@ frontend/dist/
 *.temp
 *.db-shm
 *.db-wal
- # Virtual environments
- .venv/
- 
- # Test cache
- .pytest_cache/
- 
+# Virtual environments
+.venv/
+
+# Test cache
+.pytest_cache/
 
 # Tmp charts
 /tmp/恭喜发财_charts/

@@ -59,7 +59,7 @@ class TestRiskGuard:
         assert ok
 
     def test_cash_insufficient(self):
-        ok, reason = self.guard.check_cash_available(500000, 100000)
+        ok, reason = self.guard.check_cash_available(300000, 250000)
         assert not ok
         assert '不足' in reason
 
