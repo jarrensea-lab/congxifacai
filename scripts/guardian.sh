@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 恭喜发财 V6 交易日守护进程
+# 恭喜发财 交易日守护进程
 # 
 # 功能:
 #   1. 健康检查 — 每30分钟检查 API/DeepSeek/数据源
@@ -20,7 +20,7 @@
 PORT=${PORT:-8001}
 HOST=${HOST:-"127.0.0.1"}
 HEALTH_URL="http://${HOST}:${PORT}/api/health"
-LOG_DIR="${HOME}/cong-xi-fa-cai-logs"
+LOG_DIR="${HOME}/恭喜发财-logs"
 CHECK_INTERVAL=1800  # 30分钟
 
 # 加载 .env.local（如果存在）
@@ -60,7 +60,7 @@ generate_daily_report() {
     local report_file="$LOG_DIR/daily-$(date '+%Y%m%d').log"
     {
         echo "========================================"
-        echo " 恭喜发财 V6 运行日报"
+        echo " 恭喜发财 运行日报"
         echo " 日期: $(date '+%Y-%m-%d %H:%M')"
         echo "========================================"
         echo ""
@@ -98,7 +98,7 @@ generate_daily_report() {
 # ═══ 主循环 ═══
 
 main() {
-    log "🚀 恭喜发财 V6 交易日守护启动"
+    log "🚀 恭喜发财 交易日守护启动"
     log "   检查间隔: ${CHECK_INTERVAL}s"
     log "   日志目录: $LOG_DIR"
 

@@ -67,19 +67,19 @@ def get_settings() -> Settings:
     # 安全检查: 密钥未配置或使用示例值时警告
     if not s.DEEPSEEK_API_KEY:
         import logging
-        logging.getLogger("cong-xi-fa-cai").warning(
+        logging.getLogger("恭喜发财").warning(
             "DEEPSEEK_API_KEY 未配置，云端 AI 分析将不可用。"
             " 请在 .env.local 中设置 DEEPSEEK_API_KEY"
         )
     if not s.QWEN_API_KEY:
         import logging
-        logging.getLogger("cong-xi-fa-cai").warning(
+        logging.getLogger("恭喜发财").warning(
             "QWEN_API_KEY 未配置，Qwen-Plus 裁判将不可用，会自动回退到 DeepSeek。"
             " 如需多模型多样性请在 .env.local 中设置 QWEN_API_KEY"
         )
     if not s.FEISHU_WEBHOOK_URL or "YOUR_WEBHOOK_ID" in s.FEISHU_WEBHOOK_URL:
         import logging
-        logging.getLogger("cong-xi-fa-cai").warning(
+        logging.getLogger("恭喜发财").warning(
             "FEISHU_WEBHOOK_URL 未配置或使用示例值，飞书推送将不可用。"
             " 请在 .env.local 中设置正确的 Webhook URL"
         )

@@ -1,6 +1,23 @@
 .DS_Store
 *.db
-__pycache__/
-*.pyc
-config/cookies.json
-output/
+*.sqlite
+*.sqlite3
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Temporary files
+*.tmp
+*.temp
+*.db-shm
+*.db-wal
+ # Virtual environments
+ .venv/
+ 
+ # Test cache
+ .pytest_cache/
+ 
+
+# Tmp charts
+/tmp/恭喜发财_charts/
