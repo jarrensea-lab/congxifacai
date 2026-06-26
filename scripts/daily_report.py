@@ -4,21 +4,179 @@ import sys
 import os
 import json
 import asyncio
+from datetime import datetime
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'backend'))
 os.chdir(PROJECT_ROOT)
 
-ARCHIVE_DIR = "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告"
+DEFAULT_ARCHIVE_DIR = "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告"
+ARCHIVE_DIR = os.getenv("CONGXI_REPORT_ARCHIVE_DIR", DEFAULT_ARCHIVE_DIR)
+INDEX_FILENAME = "日报索引.md"
+DELIVERY_STATUS_FILENAME = "delivery_status.json"
+
+
+def build_feishu_summary(md_content: str, limit: int = 2500) -> str:
+    """Build a short Feishu card body while pointing to the local full report."""
+    if len(md_content) <= limit:
+        return md_content
+    return md_content[:limit].rstrip() + "\n\n...*(完整报告已保存至 Obsidian 报告目录)*"
+
+
+def build_execution_guard(positions: list[dict], available_cash: float, total_assets: float) -> str:
+    """Create deterministic execution constraints for small A-share accounts."""
+    lines = []
+    reserve_cash = round(total_assets * 0.30, 2) if total_assets else 0
+    small_account_limit = round(total_assets * 0.10, 2) if total_assets and total_assets < 5000 else round(total_assets * 0.20, 2)
+    buy_budget = max(0.0, min(available_cash - reserve_cash, small_account_limit))
+    max_affordable_price = round(buy_budget / 100, 2)
+
+    lines.append(f"- 账户可用现金 ¥{available_cash:,.2f}，30%现金底线约 ¥{reserve_cash:,.2f}。")
+    if buy_budget <= 0:
+        lines.append("- 机器校验: 不新增买入；先恢复现金安全垫。")
+    else:
+        lines.append(
+            f"- 机器校验: 原则上不新增买入；若新增，必须买得起一手100股，当前单笔预算约 ¥{buy_budget:,.2f}，"
+            f"只考虑股价不高于 ¥{max_affordable_price:.2f} 的标的；其余只放观察名单。"
+        )
+
+    for p in positions:
+        shares = int(p.get("shares", p.get("position", 0)) or 0)
+        price = float(p.get("current_price", 0) or 0)
+        value = float(p.get("current_value", shares * price) or 0)
+        if not shares or not price or not total_assets:
+            continue
+        ratio = value / total_assets * 100
+        target_shares = int((small_account_limit / price) // 1)
+        if ratio > 10 and total_assets < 5000:
+            if shares <= 100:
+                lines.append(
+                    f"- {p.get('name', p.get('code', '持仓'))}: 当前{shares}股，占总资产约{ratio:.1f}%，"
+                    f"超过小账户10%上限；若要立刻合规，机器可执行方案是清仓{shares}股，"
+                    "否则只能继续持有观察，不能执行非整手减仓后留下零碎仓的方案。"
+                )
+            else:
+                sell_qty = max(0, shares - target_shares)
+                sell_qty = ((sell_qty + 99) // 100) * 100
+                sell_qty = min(sell_qty, shares)
+                lines.append(
+                    f"- {p.get('name', p.get('code', '持仓'))}: 当前{shares}股，占总资产约{ratio:.1f}%；"
+                    f"若按10%上限降仓，优先卖出约{sell_qty}股。"
+                )
+
+    return "\n".join(lines)
+
+
+def build_final_action_summary(positions: list[dict], available_cash: float, total_assets: float) -> str:
+    """Deterministic final action summary that overrides inconsistent AI quantities."""
+    if not positions:
+        return "当前无持仓；原则上不新增买入，等待报告给出可买得起且通过风险过滤的一手标的。"
+    actions = ["今日最终动作以机器校验为准，不直接执行 AI 原始文字中的零碎股数。"]
+    for p in positions:
+        shares = int(p.get("shares", 0) or 0)
+        price = float(p.get("current_price", 0) or 0)
+        value = float(p.get("current_value", shares * price) or 0)
+        ratio = value / total_assets * 100 if total_assets else 0
+        if total_assets < 5000 and ratio > 10 and shares <= 100:
+            actions.append(
+                f"{p.get('name', p.get('code', '持仓'))}当前{shares}股，市值约¥{value:,.2f}，"
+                f"占总资产约{ratio:.1f}%；若要马上合规，只能清仓{shares}股，"
+                "否则继续持有观察但不加仓。"
+            )
+    actions.append("新标的只进观察名单，不新增买入，除非一手金额和风险过滤同时通过。")
+    return " ".join(actions)
+
+
+def save_report_to_obsidian(
+    md_content: str,
+    report_date: str,
+    archive_dir: str = ARCHIVE_DIR,
+    title: str = "每日综合策略报告",
+    push_status: dict | None = None,
+) -> dict:
+    """Write the markdown report, update the Obsidian index, and persist delivery state."""
+    os.makedirs(archive_dir, exist_ok=True)
+    filename = f"{report_date}_{title}.md"
+    filepath = os.path.join(archive_dir, filename)
+
+    with open(filepath, 'w', encoding='utf-8') as f:
+        f.write(md_content)
+
+    index_path = os.path.join(archive_dir, INDEX_FILENAME)
+    index_line = f"- {report_date}: [[{filename[:-3]}]] ({filename})"
+    existing_index = ""
+    if os.path.exists(index_path):
+        with open(index_path, 'r', encoding='utf-8') as f:
+            existing_index = f.read()
+    if index_line not in existing_index:
+        with open(index_path, 'a', encoding='utf-8') as f:
+            if not existing_index:
+                f.write("# 恭喜发财日报索引\n\n")
+            elif not existing_index.endswith("\n"):
+                f.write("\n")
+            f.write(index_line + "\n")
+
+    status_path = os.path.join(archive_dir, DELIVERY_STATUS_FILENAME)
+    status = {"history": []}
+    if os.path.exists(status_path):
+        try:
+            with open(status_path, 'r', encoding='utf-8') as f:
+                status = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            status = {"history": []}
+
+    latest = {
+        "report_date": report_date,
+        "title": title,
+        "report_path": filepath,
+        "index_path": index_path,
+        "obsidian_report": True,
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    if push_status:
+        latest.update(push_status)
+
+    history = [item for item in status.get("history", []) if item.get("report_date") != report_date]
+    history.append(latest)
+    status = {"latest": latest, "history": history[-60:]}
+    with open(status_path, 'w', encoding='utf-8') as f:
+        json.dump(status, f, ensure_ascii=False, indent=2)
+
+    return {
+        "report_path": filepath,
+        "index_path": index_path,
+        "status_path": status_path,
+    }
+
+
+async def push_daily_report_to_feishu(title: str, md_content: str) -> dict:
+    """Push the daily report summary to Feishu and return a delivery status dict."""
+    webhook_url = os.environ.get('FEISHU_WEBHOOK_URL')
+    if not webhook_url or 'YOUR_WEBHOOK' in webhook_url:
+        return {"feishu_webhook": False, "error": "FEISHU_WEBHOOK_URL 未配置"}
+
+    try:
+        from app.services.feishu_pusher import send_webhook_card
+
+        ok = await send_webhook_card(
+            webhook_url,
+            title,
+            build_feishu_summary(md_content),
+        )
+        if ok:
+            return {"feishu_webhook": True, "error": ""}
+        return {"feishu_webhook": False, "error": "Webhook 推送失败"}
+    except Exception as e:
+        return {"feishu_webhook": False, "error": f"飞书推送异常: {e}"}
 
 
 async def main():
     import httpx
-    from datetime import datetime
     from app.config import settings
     from app.data_sources.tencent_client import TencentDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
+    from app.services.portfolio_store import recalculate_portfolio, sync_db_from_user_portfolio
 
     now = datetime.now()
     today = now.strftime('%Y-%m-%d')
@@ -36,6 +194,17 @@ async def main():
 
     with open(portfolio_path, 'r', encoding='utf-8') as f:
         portfolio = json.load(f)
+    portfolio = recalculate_portfolio(portfolio)
+    try:
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            sync_result = sync_db_from_user_portfolio(db, portfolio_path)
+            portfolio.setdefault("available_cash", sync_result.get("available_cash", 0))
+        finally:
+            db.close()
+    except Exception as e:
+        print(f"   ⚠️ 持仓同步数据库失败: {e}", flush=True)
 
     positions = portfolio.get("positions", [])
     closed = portfolio.get("closed_positions", [])
@@ -43,7 +212,15 @@ async def main():
     # ===== 2. 获取行情 =====
     print("📊 获取实时行情...", flush=True)
     tc = TencentDataSource()
-    market_data = {"indices": {}, "sectors": [], "holdings": [], "holdings_str": "空仓", "news": []}
+    available_cash = float(portfolio.get("available_cash", portfolio.get("cash", 0)) or 0)
+    market_data = {
+        "indices": {},
+        "sectors": [],
+        "holdings": [],
+        "holdings_str": "空仓",
+        "news": [],
+        "available_cash": available_cash,
+    }
 
     try:
         indices = await tc.fetch_batch(["sh000001", "sz399001", "sz399006"])
@@ -84,6 +261,8 @@ async def main():
     portfolio["total_value"] = sum(p["current_value"] for p in positions)
     portfolio["total_pnl"] = sum(p["pnl"] for p in positions)
     portfolio["total_pnl_all"] = portfolio.get("total_pnl", 0) + portfolio.get("realized_pnl", 0)
+    portfolio["total_assets"] = round(available_cash + portfolio["total_value"], 2)
+    market_data["total_assets"] = portfolio["total_assets"]
 
     # ===== 3. 分析 + 辩论 =====
     print("📊 构建市场数据摘要...", flush=True)
@@ -93,6 +272,7 @@ async def main():
     try:
         debate_result = await run_debate(report)
         decision = debate_result.get("decision", {})
+        roles = debate_result.get("roles", {})
         risk_level = debate_result.get("recommended_risk_level", 3)
         final_view = decision.get("final_view", decision.get("final_decision", "待分析"))
         confidence = decision.get("confidence", "N/A")
@@ -103,6 +283,7 @@ async def main():
         risk_level = 3
         final_view = "分析失败"
         confidence = "N/A"
+        roles = {}
 
     # ===== 4. 构建综合Markdown报告 =====
     lines = []
@@ -143,6 +324,8 @@ async def main():
     lines.append(f"|------|:----:|")
     lines.append(f"| 总投入成本 | ¥{total_cost:,.2f} |")
     lines.append(f"| 当前市值 | ¥{total_value:,.2f} |")
+    lines.append(f"| 可用现金 | ¥{available_cash:,.2f} |")
+    lines.append(f"| 估算总资产 | ¥{portfolio.get('total_assets', total_value + available_cash):,.2f} |")
     lines.append(f"| 浮动盈亏 | ¥{total_pnl:+,.2f} ({pnl_pct:+.2f}%) |")
     lines.append(f"| 已实现盈亏 | ¥{realized_pnl:+,.2f} |")
     lines.append(f"| 总盈亏 | ¥{total_all:+,.2f} |")
@@ -214,6 +397,28 @@ async def main():
         lines.append(f"{reasoning}")
         lines.append(f"")
 
+    lines.append(f"### 今日行动清单")
+    lines.append(f"")
+    lines.append(f"- **总体动作**: {decision.get('final_decision', final_view)}")
+    lines.append(f"- **风险等级**: R{risk_level}")
+    final_action = build_final_action_summary(
+        positions,
+        available_cash,
+        portfolio.get("total_assets", total_value + available_cash),
+    )
+    lines.append(f"- **最终可执行动作**: {final_action}")
+    stop_loss = decision.get("stop_loss_pct")
+    if stop_loss is not None:
+        lines.append(f"- **组合止损参考**: {stop_loss}%")
+    lines.append(f"")
+
+    guard = build_execution_guard(positions, available_cash, portfolio.get("total_assets", total_value + available_cash))
+    if guard:
+        lines.append(f"### 机器可执行校验")
+        lines.append(f"")
+        lines.append(guard)
+        lines.append(f"")
+
     # 各角色策略详情
     role_keys = {
         "🎯 猎手（短线技术）": "short_term",
@@ -235,10 +440,48 @@ async def main():
                 lines.append(f"**持仓建议**: {advice}")
             lines.append(f"")
 
+    researcher = roles.get("researcher", {}) if isinstance(roles, dict) else {}
+    if researcher:
+        lines.append(f"## 🧬 五、Serenity 产业链瓶颈视角")
+        lines.append(f"")
+        summary = researcher.get("industry_chain_summary") or researcher.get("analysis", "")
+        if summary:
+            lines.append(summary[:1200])
+            lines.append(f"")
+
+        bottlenecks = researcher.get("true_bottlenecks", [])
+        if bottlenecks:
+            lines.append(f"### 真实稀缺环节")
+            lines.append(f"")
+            for item in bottlenecks[:5]:
+                if isinstance(item, dict):
+                    sector = item.get("sector", "未知赛道")
+                    scarce = item.get("scarce_resource", item.get("bottleneck", "未知卡点"))
+                    note = item.get("beginner_note", item.get("why_overlooked", ""))
+                    lines.append(f"- **{sector}**: {scarce}。{note}")
+            lines.append(f"")
+
+        overheated = researcher.get("overheated_sectors", [])
+        if overheated:
+            lines.append(f"### 过热/规避方向")
+            lines.append(f"")
+            for item in overheated[:5]:
+                if isinstance(item, dict):
+                    lines.append(f"- **{item.get('sector', '未知方向')}**: {item.get('reason', '')} {item.get('risk', '')}".strip())
+            lines.append(f"")
+
+        chain_risks = researcher.get("key_chain_risks", [])
+        if chain_risks:
+            lines.append(f"### 产业链风险")
+            lines.append(f"")
+            for risk in chain_risks[:5]:
+                lines.append(f"- {risk}")
+            lines.append(f"")
+
     # ── 五、个股操作建议（含辩论完整信息）──
     pool = decision.get("stock_pool", [])
     if positions or pool:
-        lines.append(f"## 🎯 五、个股操作建议")
+        lines.append(f"## 🎯 六、个股操作建议")
         lines.append(f"")
 
         # 当前持仓操作建议
@@ -293,19 +536,11 @@ async def main():
                 if guide: lines.append(f"  - 新手指南: {guide}")
                 lines.append(f"")
 
-    # ── 六、仓位建议 ──
-    pos_advice = decision.get("position_advice", "")
-    if pos_advice:
-        lines.append(f"## 💡 六、仓位建议")
-        lines.append(f"")
-        lines.append(f"{pos_advice}")
-        lines.append(f"")
-
     # ── 七、风险提示 ──
     risk_summary = decision.get("risk_summary", "")
     key_risks = report.get("key_risks", [])
     if risk_summary or key_risks:
-        lines.append(f"## ⚠️ 七、风险提示")
+        lines.append(f"## ⚠️ 八、风险提示")
         lines.append(f"")
         if risk_summary:
             lines.append(f"{risk_summary}")
@@ -318,7 +553,7 @@ async def main():
     # ── 八、市场焦点 ──
     top_sectors = decision.get("top_sectors", [])
     if top_sectors:
-        lines.append(f"## 🔍 八、市场焦点与关注板块")
+        lines.append(f"## 🔍 九、市场焦点与关注板块")
         lines.append(f"")
         for s in top_sectors:
             if isinstance(s, dict):
@@ -330,7 +565,7 @@ async def main():
     # ── 九、知识角 ──
     knowledge = decision.get("knowledge_corner", "")
     if knowledge:
-        lines.append(f"## 📚 九、知识角")
+        lines.append(f"## 📚 十、知识角")
         lines.append(f"")
         lines.append(f"{knowledge}")
         lines.append(f"")
@@ -341,12 +576,16 @@ async def main():
 
     md_content = '\n'.join(lines)
 
-    # ===== 写入文件 =====
-    os.makedirs(ARCHIVE_DIR, exist_ok=True)
-    filename = f"{today}_每日综合策略报告.md"
-    filepath = os.path.join(ARCHIVE_DIR, filename)
-    with open(filepath, 'w', encoding='utf-8') as f:
-        f.write(md_content)
+    # ===== 写入 Obsidian 报告目录 =====
+    title = "每日综合策略报告"
+    delivery = save_report_to_obsidian(
+        md_content,
+        report_date=today,
+        archive_dir=ARCHIVE_DIR,
+        title=title,
+        push_status={"feishu_webhook": False, "error": "pending"},
+    )
+    filepath = delivery["report_path"]
     print(f"✅ 报告已保存: {filepath}", flush=True)
     print(f"   📄 共 {len(lines)} 行 / {os.path.getsize(filepath)} 字节", flush=True)
 
@@ -358,26 +597,22 @@ async def main():
 
     # ===== 推送飞书 =====
     print("📤 推送飞书...", flush=True)
-    try:
-        from app.services.feishu_pusher import send_webhook_card
-        webhook_url = os.environ.get('FEISHU_WEBHOOK_URL')
-        if webhook_url and 'YOUR_WEBHOOK' not in webhook_url:
-            summary = md_content[:2500] + "
+    push_status = await push_daily_report_to_feishu(
+        f"📊 恭喜发财 — {today} 每日综合策略报告",
+        md_content,
+    )
+    if push_status.get("feishu_webhook"):
+        print(f"   ✅ Webhook 卡片推送成功", flush=True)
+    else:
+        print(f"   ⚠️ {push_status.get('error', 'Webhook 推送失败')}", flush=True)
 
-...*(完整报告已保存至本地)*"
-            ok = await send_webhook_card(
-                webhook_url,
-                f"📊 恭喜发财 — {today} 每日综合策略报告",
-                summary
-            )
-            if ok:
-                print(f"   ✅ Webhook 卡片推送成功", flush=True)
-            else:
-                print(f"   ⚠️ Webhook 推送失败", flush=True)
-        else:
-            print(f"   ⚠️ 未配置 FEISHU_WEBHOOK_URL，跳过飞书推送", flush=True)
-    except Exception as e:
-        print(f"   ⚠️ 飞书推送异常: {e}", flush=True)
+    save_report_to_obsidian(
+        md_content,
+        report_date=today,
+        archive_dir=ARCHIVE_DIR,
+        title=title,
+        push_status=push_status,
+    )
 
     print("=" * 60, flush=True)
     print(f"📋 每日综合报告完成", flush=True)
