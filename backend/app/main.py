@@ -30,6 +30,7 @@ from app.data_sources.akshare_market import AKShareMarketClient
 from app.data_sources.data_router import DataSourceRouter
 from app.services.monitor import MonitorService
 from app.services.push_tracker import push_tracker, compute_retry_delay
+from app.services.portfolio_store import sync_db_from_user_portfolio
 
 # 报告引擎
 from app.report_engine.engine import report_engine
@@ -189,6 +190,11 @@ generation_status = {
 
 def _get_holdings_data(db: Session) -> dict:
     """从 Position 表获取持仓数据，用于分析引擎和规划引擎。"""
+    try:
+        sync_db_from_user_portfolio(db)
+    except Exception as e:
+        logger.warning(f"用户持仓JSON同步到数据库失败，继续使用数据库现状: {e}")
+
     positions = db.query(Position).filter(Position.quantity > 0).all()
     holdings = []
     total_cost = 0.0
@@ -207,10 +213,13 @@ def _get_holdings_data(db: Session) -> dict:
         for h in holdings
     ) or "无持仓"
     account = db.query(SimAccount).first()
-    available_cash = float(account.cash) if account else 100000.0
+    available_cash = float(account.cash) / 100 if account else 100000.0
+    total_assets = available_cash + sum(h["position"] * h["current_price"] for h in holdings)
     return {
         "holdings": holdings, "holdings_str": holdings_str,
-        "total_cost": round(total_cost, 2), "available_cash": round(available_cash, 2),
+        "total_cost": round(total_cost, 2),
+        "available_cash": round(available_cash, 2),
+        "total_assets": round(total_assets, 2),
     }
 
 strategy.init_strategy_router(debate_engine, feishu, tencent_client, market_client, news_client,
@@ -250,7 +259,21 @@ async def _fetch_market_data() -> dict:
 
     return {"indices": indices, "sectors": [], "holdings": hd["holdings"],
             "holdings_str": hd["holdings_str"], "news": [],
-            "available_cash": hd.get("available_cash", 0)}
+            "available_cash": hd.get("available_cash", 0),
+            "total_assets": hd.get("total_assets", 0)}
+
+
+def _get_today_risk_alerts(db: Session, today: datetime | None = None) -> list[RiskAlert]:
+    """Return risk alerts created since local midnight."""
+    now = today or datetime.now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (
+        db.query(RiskAlert)
+        .filter(RiskAlert.timestamp >= start)
+        .order_by(RiskAlert.timestamp.desc())
+        .all()
+    )
+
 
 def _feishu_webhook_push(title: str, content: str) -> bool:
     """同步飞书 webhook 推送（供 scheduler 线程使用）"""
@@ -627,9 +650,7 @@ async def _run_daily_report_with_status():
             cash = acc.cash / 100 if acc else 0
             mv = sum(p.market_value for p in positions) / 100 if positions else 0
 
-            risk_alerts = db.query(RiskAlert).filter(
-                RiskAlert.created_at >= datetime.now().replace(hour=0, minute=0, second=0)
-            ).all()
+            risk_alerts = _get_today_risk_alerts(db)
             alert_list = []
             for a in risk_alerts:
                 alert_list.append({

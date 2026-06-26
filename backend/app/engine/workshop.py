@@ -1,6 +1,7 @@
 """② 策略工坊引擎 — AI 辩论 + 风险定级 + 策略决策卡 — V6: DeepSeek 云端"""
 import logging
 import json
+import re
 from datetime import datetime
 
 logger = logging.getLogger("congxi")
@@ -40,9 +41,14 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
     if not available_cash:
         raw_market = analysis_report.get("_market_data_raw", {})
         available_cash = raw_market.get("available_cash", 0)
+    total_assets = _extract_total_assets(analysis_report, available_cash)
     holdings_data = holdings_str
     if available_cash and available_cash > 0:
-        holdings_data += f"\n\n【账户资金】\n总资产: ¥{float(available_cash):,.2f}\n可用现金: ¥{float(available_cash):,.2f}\n"
+        holdings_data += (
+            f"\n\n【账户资金】\n"
+            f"总资产: ¥{float(total_assets):,.2f}\n"
+            f"可用现金: ¥{float(available_cash):,.2f}\n"
+        )
     news_str = json.dumps(analysis_report.get("news", []), ensure_ascii=False)
 
     engine = AIDebateEngine()
@@ -61,12 +67,13 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
 
     result = await engine.debate(market_data_str, holdings_data, news_str, role_performance=role_perf)
 
-    final = result.get("final", {})
+    final = _repair_final_decision(result)
     short_term = final.get("short_term", {})
     mid_low = final.get("mid_low_freq", {})
 
     stock_pool = short_term.get("recommendations", []) + mid_low.get("recommendations", [])
 
+    holdings_codes = _extract_holding_codes(analysis_report)
     decision = {
         "final_view": final.get("final_decision", "N/A"),
         "final_decision": final.get("final_decision", "N/A"),
@@ -85,9 +92,17 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
         "risk_summary": final.get("risk_summary", ""),
         "knowledge_corner": final.get("knowledge_corner", ""),
     }
+    decision = _apply_account_constraints(
+        decision,
+        available_cash=available_cash,
+        holdings_codes=holdings_codes,
+        total_assets=total_assets,
+    )
 
-    confidence = final.get("confidence", 5)
-    risk_level = min(5, max(1, 6 - confidence))
+    risk_level = max(
+        _derive_risk_level(decision, available_cash=available_cash),
+        _derive_portfolio_risk(analysis_report),
+    )
 
     # 保存辩论快照用于质量追踪
     try:
@@ -152,10 +167,258 @@ def _extract_limit(final: dict) -> int:
     return 30
 
 
-def _extract_stop_loss(final: dict) -> int:
+def _repair_final_decision(result: dict) -> dict:
+    """Return a usable final decision even when the judge emits invalid JSON."""
+    final = result.get("final", {}) or {}
+    if final.get("final_decision") and final.get("final_decision") != "N/A":
+        return final
+
+    debate = result.get("debate", {}) or {}
+    hunter = debate.get("hunter", {}) if isinstance(debate.get("hunter", {}), dict) else {}
+    accountant = debate.get("accountant", {}) if isinstance(debate.get("accountant", {}), dict) else {}
+    guardian = debate.get("guardian", {}) if isinstance(debate.get("guardian", {}), dict) else {}
+    researcher = debate.get("researcher", {}) if isinstance(debate.get("researcher", {}), dict) else {}
+
+    advice_items = []
+    for role_data in (hunter, accountant, researcher):
+        items = role_data.get("holdings_advice", [])
+        if isinstance(items, list):
+            advice_items.extend(items)
+
+    action_text = json.dumps(advice_items, ensure_ascii=False) + str(guardian.get("position_advice", ""))
+    if any(word in action_text for word in ("清仓", "卖出", "减仓", "降仓")):
+        decision = "减仓"
+    elif any(word in action_text for word in ("买入", "加仓")):
+        decision = "买入"
+    elif advice_items:
+        decision = "持有"
+    else:
+        decision = "观望"
+
+    convictions = []
+    for role_data in (hunter, accountant, guardian, researcher):
+        try:
+            convictions.append(float(role_data.get("conviction", 0) or 0))
+        except (TypeError, ValueError):
+            pass
+    confidence = int(round(sum(convictions) / len(convictions))) if convictions else 5
+    confidence = min(8, max(4, confidence))
+
+    bottlenecks = researcher.get("true_bottlenecks", [])
+    top_sectors = []
+    if isinstance(bottlenecks, list):
+        top_sectors = [
+            item.get("sector", "") for item in bottlenecks
+            if isinstance(item, dict) and item.get("sector")
+        ][:3]
+
+    guardian_risks = guardian.get("systemic_risks", []) or guardian.get("short_term_risks", [])
+    if isinstance(guardian_risks, list):
+        risk_summary = "；".join(str(r) for r in guardian_risks[:3])
+    else:
+        risk_summary = str(guardian_risks or "")
+
+    return {
+        "final_decision": decision,
+        "confidence": confidence,
+        "reasoning": (
+            "裁判输出未形成可解析JSON，系统根据四角色结构化观点生成保守决策。"
+            f"守夜人仓位意见: {guardian.get('position_advice', '暂无')}；"
+            f"Serenity产业链关注: {', '.join(top_sectors) or '暂无明确卡点'}。"
+        ),
+        "short_term": {
+            "strategy": hunter.get("market_view", hunter.get("analysis", "")),
+            "action": decision,
+            "holdings_advice": hunter.get("holdings_advice", []),
+            "recommendations": hunter.get("recommendations", []),
+            "key_risks": hunter.get("key_risks", []),
+        },
+        "mid_low_freq": {
+            "strategy": accountant.get("market_view", accountant.get("analysis", "")),
+            "action": decision,
+            "holdings_advice": accountant.get("holdings_advice", []),
+            "recommendations": accountant.get("recommendations", []),
+            "key_risks": accountant.get("key_risks", []),
+        },
+        "position_advice": guardian.get("position_advice", ""),
+        "top_sectors": top_sectors,
+        "position_plan": {"entries": []},
+        "risk_summary": risk_summary,
+        "knowledge_corner": "",
+    }
+
+
+def _derive_risk_level(final: dict, available_cash: float = 0) -> int:
+    """Derive strategy risk level from confidence, data quality, and account constraints."""
+    try:
+        confidence = float(final.get("confidence", 5) or 5)
+    except (TypeError, ValueError):
+        confidence = 5
+
+    risk_level = min(5, max(1, int(round(6 - confidence))))
+
+    text = json.dumps(final, ensure_ascii=False)
+    data_sparse_terms = ("数据不足", "证据不足", "无法验证", "待验证", "建议观望")
+    if any(term in text for term in data_sparse_terms):
+        risk_level = max(risk_level, 4)
+
+    entries = final.get("position_plan", {}).get("entries", [])
+    has_actionable_entries = bool(entries)
+    if available_cash and available_cash < 5000 and has_actionable_entries:
+        risk_level = max(risk_level, 4)
+
+    for entry in entries:
+        try:
+            weight = float(str(entry.get("weight_pct", 0)).replace("%", "").strip() or 0)
+        except (TypeError, ValueError):
+            weight = 0
+        if weight > 20:
+            risk_level = max(risk_level, 4)
+        if weight > 50:
+            risk_level = 5
+
+    return min(5, max(1, risk_level))
+
+
+def _derive_portfolio_risk(analysis_report: dict) -> int:
+    """Raise risk for concentrated positions in small accounts."""
+    try:
+        total_assets = float(analysis_report.get("total_assets", 0) or 0)
+    except (TypeError, ValueError):
+        total_assets = 0
+    if total_assets <= 0:
+        return 1
+    risk = 1
+    for item in analysis_report.get("holdings", []) or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            value = float(item.get("current_value") or item.get("market_value") or 0)
+        except (TypeError, ValueError):
+            value = 0
+        ratio = value / total_assets if total_assets else 0
+        if total_assets < 5000 and ratio > 0.10:
+            risk = max(risk, 4)
+        if ratio > 0.50:
+            risk = max(risk, 5)
+    return risk
+
+
+def _extract_holding_codes(analysis_report: dict) -> set[str]:
+    holdings = analysis_report.get("holdings", [])
+    codes = set()
+    if isinstance(holdings, list):
+        for item in holdings:
+            if isinstance(item, dict):
+                code = item.get("code") or item.get("stock_code")
+                if code:
+                    codes.add(str(code))
+    return codes
+
+
+def _extract_total_assets(analysis_report: dict, available_cash: float = 0) -> float:
+    if analysis_report.get("total_assets"):
+        try:
+            return float(analysis_report["total_assets"])
+        except (TypeError, ValueError):
+            pass
+    total = float(available_cash or 0)
+    for item in analysis_report.get("holdings", []) or []:
+        if not isinstance(item, dict):
+            continue
+        total += float(item.get("current_value") or item.get("market_value") or 0)
+    return total
+
+
+def _extract_first_price(text: str) -> float | None:
+    if not text:
+        return None
+    match = re.search(r"(\d+(?:\.\d+)?)", str(text).replace(",", ""))
+    if not match:
+        return None
+    try:
+        return float(match.group(1))
+    except ValueError:
+        return None
+
+
+def _apply_account_constraints(
+    decision: dict,
+    available_cash: float = 0,
+    holdings_codes: set[str] | None = None,
+    total_assets: float = 0,
+) -> dict:
+    """Filter actionable stock pool by current cash and A-share lot size."""
+    holdings_codes = holdings_codes or set()
+    available_cash = round(float(available_cash or 0), 2)
+    total_assets = round(float(total_assets or available_cash or 0), 2)
+    reserve_cash = round(total_assets * 0.30, 2) if total_assets else 0
+    executable_cash = max(0.0, min(available_cash, available_cash - reserve_cash))
+    small_account_single_limit = round(total_assets * 0.10, 2) if total_assets and total_assets < 5000 else None
+    max_new_ticket = executable_cash
+    if small_account_single_limit is not None:
+        max_new_ticket = min(max_new_ticket, small_account_single_limit)
+
+    watchlist = []
+    stock_pool = []
+    for bucket in ("short_term", "mid_low_freq"):
+        section = decision.get(bucket, {})
+        if not isinstance(section, dict):
+            continue
+        kept = []
+        for rec in section.get("recommendations", []) or []:
+            if not isinstance(rec, dict):
+                continue
+            code = str(rec.get("code", ""))
+            price = _extract_first_price(rec.get("buy_range", "") or rec.get("price", ""))
+            min_lot_amount = round(price * 100, 2) if price else None
+            is_existing = code in holdings_codes
+            if (
+                code
+                and not is_existing
+                and min_lot_amount is not None
+                and (min_lot_amount > max_new_ticket or min_lot_amount > available_cash)
+            ):
+                moved = dict(rec)
+                moved["reason_unaffordable"] = (
+                    f"一手约需¥{min_lot_amount:,.2f}，当前可用现金¥{available_cash:,.2f}，"
+                    f"按保留现金后可执行预算约¥{max_new_ticket:,.2f}"
+                )
+                watchlist.append(moved)
+                continue
+            kept.append(rec)
+            stock_pool.append(rec)
+        section["recommendations"] = kept
+
+    decision["stock_pool"] = stock_pool
+    decision["unaffordable_watchlist"] = watchlist
+    decision["account_constraints"] = {
+        "available_cash": available_cash,
+        "total_assets": total_assets,
+        "reserve_cash": reserve_cash,
+        "executable_cash": round(max_new_ticket, 2),
+        "lot_size": 100,
+    }
+    if watchlist:
+        suffix = f" 已将 {len(watchlist)} 个一手买不起的新标的移入观察名单。"
+        decision["position_advice"] = (decision.get("position_advice") or "").rstrip() + suffix
+    return decision
+
+
+def _extract_stop_loss(final: dict) -> float:
     pos_plan = final.get("position_plan", {})
+    stops = []
     if pos_plan and pos_plan.get("entries"):
-        stops = [e.get("stop_loss", {}).get("pct", -5) for e in pos_plan["entries"] if "stop_loss" in e]
-    if pos_plan and pos_plan.get("entries"):
-        stops_raw = [e.get("stop_loss", {}).get("pct", -5) for e in pos_plan["entries"] if "stop_loss" in e]
-    return -5
+        for entry in pos_plan["entries"]:
+            raw_pct = entry.get("stop_loss", {}).get("pct")
+            if raw_pct is None:
+                continue
+            try:
+                pct = float(str(raw_pct).replace("%", "").strip())
+            except (TypeError, ValueError):
+                continue
+            stops.append(pct if pct <= 0 else -pct)
+    if not stops:
+        return -5
+    stop = min(stops)
+    return int(stop) if stop.is_integer() else stop

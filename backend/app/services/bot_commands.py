@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import SimAccount, Position, TradeLog
 from app.trading_engine.position import PositionManager
+from app.services.portfolio_store import apply_trade_to_user_portfolio
 from app.utils.logger import logger
 
 
@@ -228,6 +229,7 @@ def _execute_buy(db: Session, code: str, name: str, qty: int, cost: float) -> Di
     db.add(log)
 
     logger.info(f"机器人指令-BUY: {name}({code}) {qty}股 @¥{cost:.3f} 金额¥{amount_fen/100:.2f}")
+    apply_trade_to_user_portfolio(None, "buy", code, name, qty, cost)
     return {"ok": True, "action": "buy", "code": code, "name": name, "qty": qty, "cost": cost}
 
 
@@ -272,6 +274,7 @@ def _execute_sell(db: Session, code: str, name: str, qty: int, price: float) -> 
     db.add(log)
 
     logger.info(f"机器人指令-SELL: {name}({code}) {sell_qty}股 @¥{price:.2f} PnL=¥{pnl_fen/100:.2f}")
+    apply_trade_to_user_portfolio(None, "sell", code, name, sell_qty, price)
     return {"ok": True, "action": "sell", "code": code, "name": name, "qty": sell_qty, "price": price, "pnl": round(pnl_fen/100, 2)}
 
 
@@ -371,4 +374,3 @@ def _format_reply(result: Dict) -> str:
     elif action == "sell":
         return f"✅ 卖出: {result['name']}({result['code']}) {result['qty']}股 @¥{result['price']:.2f} PnL=¥{result.get('pnl',0):.2f}"
     return "✅ 操作完成"
-

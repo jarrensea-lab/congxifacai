@@ -76,6 +76,7 @@ async def main():
     debate_result = await run_debate(report)
     decision = debate_result.get("decision", {})
     risk = debate_result.get("recommended_risk_level", 3)
+    pos_plan = decision.get("position_plan", {})
     pool = decision.get("stock_pool", [])
     print(f"辩论: R{risk}, {len(pool)}支标的, {decision.get('final_view','?')}", flush=True)
 

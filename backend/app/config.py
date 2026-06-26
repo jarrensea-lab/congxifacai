@@ -1,9 +1,15 @@
 """应用配置"""
 import os
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+# 将 .env.local 加载到 os.environ，供 os.getenv() 使用（如 tushare_client）
+_env_path = os.path.join(PROJECT_ROOT, "..", ".env.local")
+if os.path.exists(_env_path):
+    load_dotenv(_env_path)
 
 # v6: 云端模型 (全功能通过 DeepSeek, 可扩展 Qwen)
 CLOUD_MODELS = {

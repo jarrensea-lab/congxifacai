@@ -45,7 +45,9 @@ async def run_analysis(market_data: dict) -> dict:
         "generated_at": str(datetime.now()),
         # 透传原始市场数据供下游辩论使用
         "holdings_str": market_data.get("holdings_str", "无持仓"),
+        "holdings": market_data.get("holdings", []),
         "available_cash": market_data.get("available_cash", 0),
+        "total_assets": market_data.get("total_assets", 0),
         "news": market_data.get("news", []),
     }
 
