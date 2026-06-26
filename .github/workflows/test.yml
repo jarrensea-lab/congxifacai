@@ -32,9 +32,8 @@ jobs:
         uses: chartboost/ruff-action@v1
 
       - name: Test with pytest
-        working-directory: ./backend
         run: |
-          python -m pytest tests/ -v --tb=short -q
+          PYTHONPATH=backend python -m pytest backend/tests/ -v --tb=short -q
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY || '' }}
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL || '' }}
