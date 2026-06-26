@@ -113,4 +113,4 @@
 - [x] 已检查日报历史日志：`/tmp/congxi-daily-report.log` 中有旧版 `scripts/daily_report.py` 语法错误记录；当前文件已通过 `py_compile`，该日志不能代表当前代码仍有语法错误。
 - [x] 已运行当前代码语法检查：`py_compile` 覆盖 `scripts/daily_report.py`、`backend/app/engine/workshop.py`、`backend/app/main.py`、`backend/app/services/portfolio_store.py`。
 - [x] 已准备进入 PR 流程：本 PR 只包含 reporting/portfolio state 相关工作，不包含 Serenity 提交。
-- [x] 已尝试推送 PR 分支：`git push -u origin codex/reporting-portfolio-state-pr` 被 GitHub HTTPS 认证拦截，当前机器 `gh auth status` 显示未登录。
+- [x] 已检查 GitHub 认证：首次推送被 HTTPS 认证拦截；随后 `gh auth status` 已确认登录 `jarrensea-lab`，可以继续推送并创建 PR。
