@@ -262,6 +262,19 @@ async def _fetch_market_data() -> dict:
             "available_cash": hd.get("available_cash", 0),
             "total_assets": hd.get("total_assets", 0)}
 
+
+def _get_today_risk_alerts(db: Session, today: datetime | None = None) -> list[RiskAlert]:
+    """Return risk alerts created since local midnight."""
+    now = today or datetime.now()
+    start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    return (
+        db.query(RiskAlert)
+        .filter(RiskAlert.timestamp >= start)
+        .order_by(RiskAlert.timestamp.desc())
+        .all()
+    )
+
+
 def _feishu_webhook_push(title: str, content: str) -> bool:
     """同步飞书 webhook 推送（供 scheduler 线程使用）"""
     """同步飞书 webhook 推送 + 指数退避重试（供 APScheduler 线程使用）"""
@@ -637,9 +650,7 @@ async def _run_daily_report_with_status():
             cash = acc.cash / 100 if acc else 0
             mv = sum(p.market_value for p in positions) / 100 if positions else 0
 
-            risk_alerts = db.query(RiskAlert).filter(
-                RiskAlert.created_at >= datetime.now().replace(hour=0, minute=0, second=0)
-            ).all()
+            risk_alerts = _get_today_risk_alerts(db)
             alert_list = []
             for a in risk_alerts:
                 alert_list.append({

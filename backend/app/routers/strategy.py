@@ -255,7 +255,7 @@ async def get_review_logs(days: int = 7):
         logs = (
             db.query(ReviewLog)
             .filter(ReviewLog.review_date >= date.today() - timedelta(days=days))
-            .order_by(ReviewLog.created_at.desc())
+            .order_by(ReviewLog.review_date.desc(), ReviewLog.id.desc())
             .limit(30)
             .all()
         )
