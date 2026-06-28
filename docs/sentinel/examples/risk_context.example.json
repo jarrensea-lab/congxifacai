@@ -1,0 +1,10 @@
+{
+  "trade_allowed": false,
+  "constraints": [
+    {
+      "id": "research_only",
+      "level": "hard",
+      "message": "Sentinel 只输出研究证据，不输出交易指令。"
+    }
+  ]
+}

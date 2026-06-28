@@ -18,6 +18,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Any
 
+from app.ai.serenity_financial_evidence import (
+    adjust_scores_with_financial_evidence,
+    build_financial_evidence,
+    fetch_financial_evidence,
+    run_optional_fetcher as run_financial_fetcher,
+)
 from app.ai.serenity_evidence import build_quote_evidence, build_verification_tasks
 
 # ============================================================
@@ -1035,6 +1041,7 @@ def run_serenity_pipeline(
     report_date: Optional[str] = None,
     context: str = "",
     quote_fetcher: Optional[Callable[[List[str]], Any]] = None,
+    financial_fetcher: Optional[Callable[[List[str]], Any]] = None,
 ) -> Dict[str, Any]:
     """Run a reusable Serenity bottleneck research pipeline for one theme."""
     normalized_theme = _normalize_theme(theme)
@@ -1049,6 +1056,21 @@ def run_serenity_pipeline(
         except Exception as exc:
             quote_status = {"status": "failed", "error": str(exc)}
 
+    financials: Dict[str, Dict[str, Any]] = {}
+    financial_status = {"status": "skipped", "error": ""}
+    if financial_fetcher and candidates:
+        codes = [candidate.get("code", "") for candidate in candidates if candidate.get("code")]
+        try:
+            financials = run_financial_fetcher(financial_fetcher, codes)
+            success_count = sum(1 for item in financials.values() if item.get("status") == "success")
+            financial_status = {
+                "status": "success" if success_count else "unavailable",
+                "error": "",
+                "success_count": success_count,
+            }
+        except Exception as exc:
+            financial_status = {"status": "failed", "error": str(exc), "success_count": 0}
+
     scored = []
     verification_tasks = []
     for candidate in candidates:
@@ -1059,18 +1081,28 @@ def run_serenity_pipeline(
         if quote:
             quote_evidence = build_quote_evidence(candidate, quote, available_cash=available_cash)
             evidence_items.append(quote_evidence)
+        financial_evidence = None
+        financial_snapshot = financials.get(candidate.get("code", ""))
+        if financial_snapshot:
+            financial_evidence = build_financial_evidence(candidate, financial_snapshot)
+            evidence_items.append(financial_evidence)
         score_adjustment = adjust_scores_with_quote_evidence(
             candidate.get("scores", {}),
             quote_evidence,
         )
+        financial_adjustment = adjust_scores_with_financial_evidence(
+            score_adjustment["scores"],
+            financial_evidence,
+        )
         red_flag_signals = dict(candidate.get("red_flag_signals", {}))
         red_flag_signals.update(score_adjustment["red_flag_signals"])
+        red_flag_signals.update(financial_adjustment["red_flag_signals"])
         scored_candidate = score_company_v2(
             name=candidate["name"],
             code=candidate["code"],
             chokepoint=candidate.get("chokepoint", ""),
             chain_position=candidate.get("chain_position", ""),
-            scores=score_adjustment["scores"],
+            scores=financial_adjustment["scores"],
             evidence_items=evidence_items,
             red_flag_signals=red_flag_signals,
             notes=candidate.get("notes", ""),
@@ -1078,8 +1110,11 @@ def run_serenity_pipeline(
         )
         scored_candidate["verification_tasks"] = candidate_tasks
         scored_candidate["score_adjustments"] = score_adjustment["reasons"]
+        scored_candidate["financial_adjustments"] = financial_adjustment["reasons"]
         if quote_evidence:
             scored_candidate["quote_evidence"] = quote_evidence
+        if financial_evidence:
+            scored_candidate["financial_evidence"] = financial_evidence
         scored.append(scored_candidate)
         verification_tasks.extend(candidate_tasks)
     scored.sort(key=lambda item: item["score"], reverse=True)
@@ -1097,6 +1132,7 @@ def run_serenity_pipeline(
         "top_candidates": scored[:5],
         "verification_tasks": verification_tasks,
         "quote_status": quote_status,
+        "financial_status": financial_status,
         "available_cash": round(float(available_cash or 0), 2),
         "total_assets": round(float(total_assets or 0), 2),
         "account_constraint": _account_constraint(
@@ -1105,6 +1141,13 @@ def run_serenity_pipeline(
         ),
         "method": "产业链 -> 瓶颈 -> A股候选 -> 8维评分 -> 红旗过滤 -> 研究报告",
         "disclaimer": "仅用于研究学习，不构成投资建议。",
+        "metadata": {
+            "source": "congxifacai-serenity",
+            "collection": "数据采集",
+            "target_dir": "量化投资/Serenity研究",
+            "tags": ["Serenity", "产业链瓶颈", normalized_theme],
+            "verification_status": financial_status.get("status", "skipped"),
+        },
     }
 
 
@@ -1122,7 +1165,22 @@ def build_serenity_research_report(pipeline: Dict[str, Any]) -> str:
     candidates = pipeline.get("candidates", [])
     chokepoints = pipeline.get("chokepoints", [])
     title_theme = pipeline.get("theme") or pipeline.get("normalized_theme", "未命名主题")
+    metadata = pipeline.get("metadata", {})
+    tags = metadata.get("tags", [])
     lines = [
+        "---",
+        f"source: {metadata.get('source', 'congxifacai-serenity')}",
+        "report_type: serenity_research",
+        f"collection: {metadata.get('collection', '数据采集')}",
+        f"target_dir: {metadata.get('target_dir', '量化投资/Serenity研究')}",
+        f"theme: {title_theme}",
+        f"normalized_theme: {pipeline.get('normalized_theme', title_theme)}",
+        f"date: {pipeline.get('report_date', '')}",
+        f"verification_status: {metadata.get('verification_status', '')}",
+        "tags:",
+        *[f"  - {tag}" for tag in tags],
+        "---",
+        "",
         f"# Serenity瓶颈选股报告：{title_theme}",
         "",
         f"- 日期: {pipeline.get('report_date', '')}",
@@ -1187,6 +1245,44 @@ def build_serenity_research_report(pipeline: Dict[str, Any]) -> str:
             "|---|---|:---:|---|",
         ])
         for item, adjustment in score_adjustment_rows:
+            lines.append(
+                f"| {item['name']}({item['code']}) | {adjustment.get('dimension', '')} "
+                f"| {adjustment.get('before', '')} -> {adjustment.get('after', '')} "
+                f"| {adjustment.get('reason', '')} |"
+            )
+
+    financial_rows = [
+        item for item in candidates
+        if item.get("financial_evidence")
+    ]
+    if financial_rows:
+        lines.extend([
+            "",
+            "## 财务证据摘要",
+            "",
+            "| 标的 | 证据强度 | 财务事实 |",
+            "|---|:---:|---|",
+        ])
+        for item in financial_rows:
+            evidence = item["financial_evidence"]
+            lines.append(
+                f"| {item['name']}({item['code']}) | {evidence.get('strength', '')} "
+                f"| {evidence.get('fact', '')} |"
+            )
+
+    financial_adjustment_rows = []
+    for item in candidates:
+        for adjustment in item.get("financial_adjustments", []):
+            financial_adjustment_rows.append((item, adjustment))
+    if financial_adjustment_rows:
+        lines.extend([
+            "",
+            "## 财务评分调整原因",
+            "",
+            "| 标的 | 维度 | 调整 | 原因 |",
+            "|---|---|:---:|---|",
+        ])
+        for item, adjustment in financial_adjustment_rows:
             lines.append(
                 f"| {item['name']}({item['code']}) | {adjustment.get('dimension', '')} "
                 f"| {adjustment.get('before', '')} -> {adjustment.get('after', '')} "

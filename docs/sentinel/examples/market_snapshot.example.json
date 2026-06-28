@@ -1,0 +1,30 @@
+{
+  "trade_date": "2026-06-27",
+  "indices": [
+    {
+      "symbol": "000001.SH",
+      "name": "上证指数",
+      "change_pct": 0.0,
+      "source": "tencent"
+    }
+  ],
+  "sectors": [
+    {
+      "name": "电网设备",
+      "change_pct": 0.0,
+      "amount_yi": 0,
+      "source": "eastmoney"
+    }
+  ],
+  "symbols": [
+    {
+      "symbol": "000400.SZ",
+      "name": "许继电气",
+      "price": 0,
+      "change_pct": 0,
+      "amount_wan": 0,
+      "turnover_rate": 0,
+      "source": "tencent"
+    }
+  ]
+}

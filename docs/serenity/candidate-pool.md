@@ -50,6 +50,25 @@ PYTHONPATH=backend .venv/bin/python scripts/validate_serenity_candidates.py
 PYTHONPATH=backend .venv/bin/python -m pytest backend/tests/test_serenity_analyst.py -q
 ```
 
+## 安全添加命令
+
+优先使用 `scripts/add_serenity_candidate.py` 添加主题别名或候选。它会：
+
+- 读取现有 JSON。
+- 先校验现有候选池，失败则不写入。
+- 按主题和代码去重。
+- 写入临时文件并再次校验。
+- 校验通过后替换原文件。
+
+示例：
+
+```bash
+PYTHONPATH=backend .venv/bin/python scripts/add_serenity_candidate.py \
+  --theme AI基建/电力 \
+  --alias 电网设备 \
+  --candidate-json '{"name":"测试电气","code":"300001","chokepoint":"测试瓶颈","chain_position":"测试位置","scores":{"需求确定性":7,"瓶颈强度":8,"传导清晰度":7,"业务纯度":6,"证据强度":5,"市场忽视度":5,"验证速度":6,"下行安全":5},"evidence_items":[{"fact":"测试证据待核验","strength":"medium","source":"手工维护"}],"verify_next":"核验公告、财报和订单。"}'
+```
+
 ## 边界
 
 - 候选池只维护研究线索，不写买入、卖出、仓位或目标价。
