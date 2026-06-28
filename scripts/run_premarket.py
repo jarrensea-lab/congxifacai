@@ -96,8 +96,11 @@ async def main():
 
     # 4b. lark-cli IM 全文推送
     full_text = f"**🐕 旺财V6 盘前策略 [R{risk}]**\n\n{report_md[:7500]}"
-    im_ok = lark_send(full_text)
-    print(f"💬 lark IM 全文: {'✅' if im_ok else '⚠️'}", flush=True)
+    if getattr(settings, "FEISHU_WEBHOOK_ONLY", False):
+        print("💬 lark IM 全文: ⏭️ Webhook-only 模式已跳过", flush=True)
+    else:
+        im_ok = lark_send(full_text)
+        print(f"💬 lark IM 全文: {'✅' if im_ok else '⚠️'}", flush=True)
 
     # 5. 策略图表
     print("生成图表...", flush=True)

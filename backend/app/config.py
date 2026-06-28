@@ -31,8 +31,12 @@ class Settings(BaseSettings):
     QWEN_API_BASE: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     QWEN_MODEL: str = "qwen-plus"
 
+    # Tushare 数据源
+    TUSHARE_TOKEN: str = ""
+
     # 飞书机器人
     FEISHU_WEBHOOK_URL: str = ""
+    FEISHU_WEBHOOK_ONLY: bool = False
     FEISHU_BRIDGE_PATH: str = os.path.expanduser("~/.codex/feishu-bridge")
     LARK_CLI_PATH: str = "/Users/zhuchenyuan/.npm-global/bin/lark-cli"
 

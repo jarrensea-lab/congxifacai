@@ -1,4 +1,6 @@
 """tests for serenity_analyst module"""
+from pathlib import Path
+
 from app.ai.serenity_analyst import (
     score_company, score_summary_table, check_red_flags, summarize_red_flags,
     get_theme_chokepoints, get_chokepoint_prompt, evidence_summary,
@@ -588,10 +590,10 @@ class TestSerenityEvidenceCollector:
             total_assets=3085.61,
             quote_fetcher=fake_fetcher,
         )
-        report = (tmp_path / "2026-06-26_Serenity瓶颈选股报告-电网设备.md").read_text(
-            encoding="utf-8"
-        )
+        report_path = Path(result["report_path"])
+        report = report_path.read_text(encoding="utf-8")
 
         assert result["report_path"].endswith("2026-06-26_Serenity瓶颈选股报告-电网设备.md")
+        assert report_path.parent == tmp_path / "2026" / "06" / "2026-06-26"
         assert "行情核验" in report
         assert "一手金额 1000.00 元" in report

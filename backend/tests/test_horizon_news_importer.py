@@ -94,3 +94,47 @@ def test_write_sentinel_news_events_outputs_jsonl(tmp_path):
     lines = output_path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 1
     assert json.loads(lines[0])["id"] == "cls-1"
+
+
+def test_default_tushare_news_root_points_to_siku_archive(monkeypatch):
+    from app.data_sources.horizon_news_importer import default_tushare_news_root
+
+    monkeypatch.delenv("CONGXI_TUSHARE_NEWS_ROOT", raising=False)
+
+    root = str(default_tushare_news_root())
+
+    assert root.endswith("Serenity研究/数据采集/tushare-news")
+    assert "司库/01-资料采集/量化投资" in root
+
+
+def test_import_default_tushare_news_events_uses_configured_root(tmp_path, monkeypatch):
+    from app.data_sources.horizon_news_importer import import_default_tushare_news_events
+
+    raw_dir = tmp_path / "raw" / "2026-06-28"
+    raw_dir.mkdir(parents=True)
+    (raw_dir / "2026-06-28_cls.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "tushare:cls:1",
+                "source": "财联社",
+                "channel": "加红",
+                "published_at": "2026-06-28T13:13:00+08:00",
+                "fetched_at": "2026-06-28T15:00:00+08:00",
+                "content": "电网设备订单跟踪",
+                "is_key": True,
+                "symbols": [],
+                "themes": [],
+                "dedupe_key": "news-1",
+                "raw_hash": "hash-1",
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONGXI_TUSHARE_NEWS_ROOT", str(tmp_path))
+
+    events = import_default_tushare_news_events("2026-06-28")
+
+    assert len(events) == 1
+    assert events[0]["source"] == "财联社"

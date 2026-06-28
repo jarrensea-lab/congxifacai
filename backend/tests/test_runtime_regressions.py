@@ -1,10 +1,37 @@
 """Regression tests for runtime issues found during project audit."""
 import ast
 import json
+import os
 from pathlib import Path
+import subprocess
+import sys
 from datetime import date, datetime, timedelta
 
 import pytest
+
+
+def test_database_creates_missing_parent_directory(tmp_path):
+    """Runtime SQLite startup should create the parent directory before connecting."""
+    db_path = tmp_path / "missing" / "nested" / "stock_data.db"
+    env = os.environ.copy()
+    env["CONGXI_DATABASE_PATH"] = str(db_path)
+    env["PYTHONPATH"] = "backend"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from app.database import init_db; init_db()",
+        ],
+        cwd=Path.cwd(),
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert db_path.exists()
 
 
 def test_daily_report_queries_risk_alerts_by_timestamp():
@@ -148,6 +175,63 @@ async def test_run_debate_passes_total_assets_separately_from_available_cash(mon
 
     assert "总资产: ¥2,078.89" in captured["holdings_data"]
     assert "可用现金: ¥1,544.89" in captured["holdings_data"]
+
+
+@pytest.mark.asyncio
+async def test_run_analysis_and_debate_propagate_growth_sprint_profile(monkeypatch):
+    """AI role prompts must receive the active high-return risk profile."""
+    from app.engine.analysis import run_analysis
+    from app.engine.workshop import run_debate
+    import app.engine.analysis as analysis_module
+    import app.ai.debate as debate_module
+
+    async def fake_call_model(model_key, prompt):
+        return {
+            "score": 50,
+            "overall_bias": "neutral",
+            "plans": [],
+            "key_risks": [],
+            "market_context": "test",
+        }
+
+    captured = {}
+
+    class FakeEngine:
+        async def debate(self, market_data, holdings_data, news, role_performance=""):
+            captured["holdings_data"] = holdings_data
+            return {
+                "final": {
+                    "final_decision": "观望",
+                    "confidence": 6,
+                    "short_term": {},
+                    "mid_low_freq": {},
+                    "position_plan": {"entries": []},
+                },
+                "debate": {},
+            }
+
+    monkeypatch.setattr(analysis_module, "_call_model", fake_call_model)
+    monkeypatch.setattr(debate_module, "AIDebateEngine", FakeEngine)
+
+    analysis = await run_analysis({
+        "holdings_str": "空仓",
+        "available_cash": 3085.6,
+        "total_assets": 3085.6,
+        "strategy_profile": {
+            "title": "高收益试验模式",
+            "target": "30天内争取 +10%",
+            "max_drawdown_pct": 10,
+            "single_position_limit_pct": 35,
+            "cash_reserve_pct": 10,
+            "stop_loss_pct": 5,
+        },
+    })
+    await run_debate(analysis)
+
+    assert analysis["strategy_profile"]["title"] == "高收益试验模式"
+    assert "高收益试验模式" in captured["holdings_data"]
+    assert "单票上限: 35%" in captured["holdings_data"]
+    assert "现金底线: 10%" in captured["holdings_data"]
 
 
 def test_repair_final_decision_uses_roles_when_judge_json_invalid():

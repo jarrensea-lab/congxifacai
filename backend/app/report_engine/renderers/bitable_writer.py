@@ -23,6 +23,8 @@ class BitableWriter:
         }
 
     def _available(self) -> bool:
+        if getattr(settings, "FEISHU_WEBHOOK_ONLY", False):
+            return False
         return bool(self.app_token) and any(self._tables.values())
 
     def _create_record(self, table_key: str, fields: dict) -> bool:
