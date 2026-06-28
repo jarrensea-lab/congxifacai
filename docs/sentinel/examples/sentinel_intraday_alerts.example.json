@@ -1,0 +1,11 @@
+{
+  "alerts": [
+    {
+      "event_id": "cls-20260627-0933-0001",
+      "theme": "AI电力",
+      "symbols": ["000400.SZ"],
+      "action_type": "watch",
+      "reason": "新闻事件和候选池主题相关，需要等待行情和财务证据确认。"
+    }
+  ]
+}

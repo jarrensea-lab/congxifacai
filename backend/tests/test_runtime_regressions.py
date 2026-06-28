@@ -1,5 +1,7 @@
 """Regression tests for runtime issues found during project audit."""
 import ast
+import json
+from pathlib import Path
 from datetime import date, datetime, timedelta
 
 import pytest
@@ -205,3 +207,43 @@ def test_run_premarket_defines_pos_plan_before_chart_use():
     assert first_assignment is not None
     assert first_use is not None
     assert first_assignment < first_use
+
+
+def test_daily_report_does_not_depend_on_serenity_candidate_pool():
+    """The main daily report should not import the standalone Serenity candidate pool."""
+    source = Path("scripts/daily_report.py").read_text(encoding="utf-8")
+
+    assert "serenity_analyst" not in source
+    assert "theme_candidates" not in source
+
+
+def test_serenity_default_archive_is_research_only_without_feishu_or_quotes(tmp_path):
+    """Standalone Serenity reports should archive locally by default without Feishu push."""
+    from scripts.serenity_research_report import save_serenity_report
+
+    result = save_serenity_report(
+        "电网设备",
+        report_date="2026-06-26",
+        archive_dir=str(tmp_path),
+        available_cash=3085.61,
+        total_assets=3085.61,
+    )
+    status = json.loads((tmp_path / "delivery_status.json").read_text(encoding="utf-8"))
+    report = Path(result["report_path"]).read_text(encoding="utf-8")
+
+    assert status["latest"]["feishu_webhook"] is None
+    assert status["latest"]["error"] == "serenity research archive only"
+    assert "行情核验" not in report
+    assert "买入" not in report
+    assert "卖出" not in report
+
+
+def test_serenity_manual_run_doc_lists_safe_commands():
+    """Operators need explicit no-quotes and with-quotes manual run commands."""
+    doc = Path("docs/serenity/manual-run.md")
+
+    assert doc.exists()
+    content = doc.read_text(encoding="utf-8")
+    assert "scripts/serenity_research_report.py 电网设备" in content
+    assert "--with-quotes" in content
+    assert "默认不推送飞书" in content

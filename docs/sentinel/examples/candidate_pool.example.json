@@ -1,0 +1,15 @@
+{
+  "themes": [
+    {
+      "theme": "AI电力",
+      "candidates": [
+        {
+          "symbol": "000400.SZ",
+          "name": "许继电气",
+          "reason": "电网设备候选，需要结合新闻、行情和财务二次核验。",
+          "source": "serenity_candidate_pool"
+        }
+      ]
+    }
+  ]
+}

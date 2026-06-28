@@ -71,3 +71,23 @@ frontend/dist/
 
 # Tmp charts
 /tmp/恭喜发财_charts/
+
+# Runtime databases and SQLite sidecars
+backend/data/*
+!backend/data/.gitkeep
+
+# Runtime data, logs, generated reports and local datasets
+data/*
+!data/.gitkeep
+!data/serenity/
+!data/serenity/theme_candidates.json
+!data/user_portfolio.example.json
+reports/
+
+# Generated media / unrelated content-production artifacts
+*.mp4
+*.mp3
+*.wav
+
+# n8n local state
+n8n/

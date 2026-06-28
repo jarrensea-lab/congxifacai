@@ -1,0 +1,9 @@
+{
+  "cash": 3085.61,
+  "total_assets": 3085.61,
+  "positions": [],
+  "account_constraints": {
+    "max_single_position_pct": 0.35,
+    "min_lot_size": 100
+  }
+}

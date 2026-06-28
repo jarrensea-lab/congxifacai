@@ -17,9 +17,13 @@ class TushareDataSource(BaseDataSource):
     def __init__(self):
         super().__init__("tushare")
         token = os.getenv("TUSHARE_TOKEN", "")
+        if not token:
+            try:
+                token = ts.get_token() or ""
+            except Exception:
+                token = ""
         if token:
-            ts.set_token(token)
-            self._pro = ts.pro_api()
+            self._pro = ts.pro_api(token)
             self._available = True
             logger.info("Tushare 已配置，数据源可用")
         else:

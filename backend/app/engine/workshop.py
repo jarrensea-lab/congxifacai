@@ -119,6 +119,19 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
     except Exception as e:
         logger.warning(f"辩论快照保存异常（不影响主流程）: {e}")
 
+    # Sentinel 角色绩效评审旁路留痕：失败不影响成熟辩论/日报流程。
+    try:
+        from app.ai import sentinel_role_performance
+
+        sentinel_role_performance.record_debate_predictions(
+            result,
+            decision=decision,
+            strategy_type=strategy_type,
+            source_report=str(analysis_report.get("source_report", "")) if isinstance(analysis_report, dict) else "",
+        )
+    except Exception as e:
+        logger.warning(f"Sentinel角色预测留痕异常（不影响主流程）: {e}")
+
     return {
         "roles": result.get("debate", {}),
         "decision": decision,
