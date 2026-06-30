@@ -7,6 +7,7 @@ from app.config import settings
 # 支持 CONGXI_DATABASE_PATH 环境变量覆盖（CI/测试环境使用临时数据库）
 import os
 _db_path = os.environ.get("CONGXI_DATABASE_PATH") or settings.DATABASE_PATH
+os.makedirs(os.path.dirname(_db_path), exist_ok=True)
 
 # 创建数据库引擎
 engine = create_engine(

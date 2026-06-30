@@ -217,6 +217,19 @@ def test_daily_report_does_not_depend_on_serenity_candidate_pool():
     assert "theme_candidates" not in source
 
 
+def test_default_report_archives_point_to_local_siku_vault():
+    """Recovered local workspace should not keep writing reports to the old flash drive."""
+    import scripts.daily_report as daily_report
+    import scripts.serenity_research_report as serenity_report
+
+    expected_root = Path.home() / "AI/projects/司库/01-资料采集/量化投资"
+
+    assert daily_report.DEFAULT_ARCHIVE_DIR == str(expected_root / "恭喜发财报告")
+    assert serenity_report.DEFAULT_SERENITY_ARCHIVE_DIR == str(expected_root / "Serenity研究")
+    assert "/Volumes/Aino Kishi" not in daily_report.DEFAULT_ARCHIVE_DIR
+    assert "/Volumes/Aino Kishi" not in serenity_report.DEFAULT_SERENITY_ARCHIVE_DIR
+
+
 def test_serenity_default_archive_is_research_only_without_feishu_or_quotes(tmp_path):
     """Standalone Serenity reports should archive locally by default without Feishu push."""
     from scripts.serenity_research_report import save_serenity_report

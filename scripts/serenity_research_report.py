@@ -15,10 +15,13 @@ sys.path.insert(0, PROJECT_ROOT)
 from app.ai.serenity_analyst import build_serenity_research_report, run_serenity_pipeline
 from app.ai.serenity_financial_evidence import fetch_financial_evidence
 from app.data_sources.tencent_client import TencentDataSource
-from daily_report import save_report_to_obsidian
+from daily_report import DEFAULT_SIKU_VAULT_DIR, save_report_to_obsidian
 
-DEFAULT_SERENITY_ARCHIVE_DIR = (
-    "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/Serenity研究"
+DEFAULT_SERENITY_ARCHIVE_DIR = os.path.join(
+    DEFAULT_SIKU_VAULT_DIR,
+    "01-资料采集",
+    "量化投资",
+    "Serenity研究",
 )
 SERENITY_ARCHIVE_DIR = os.getenv("SERENITY_SIKU_ARCHIVE_DIR", DEFAULT_SERENITY_ARCHIVE_DIR)
 

@@ -10,7 +10,16 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'backend'))
 os.chdir(PROJECT_ROOT)
 
-DEFAULT_ARCHIVE_DIR = "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告"
+DEFAULT_SIKU_VAULT_DIR = os.getenv(
+    "SIKU_VAULT_DIR",
+    os.path.join(os.path.expanduser("~"), "AI", "projects", "司库"),
+)
+DEFAULT_ARCHIVE_DIR = os.path.join(
+    DEFAULT_SIKU_VAULT_DIR,
+    "01-资料采集",
+    "量化投资",
+    "恭喜发财报告",
+)
 ARCHIVE_DIR = os.getenv("CONGXI_REPORT_ARCHIVE_DIR", DEFAULT_ARCHIVE_DIR)
 INDEX_FILENAME = "日报索引.md"
 DELIVERY_STATUS_FILENAME = "delivery_status.json"
