@@ -145,6 +145,29 @@ class TestMarkdownCard:
         assert "中科三环" in card
         assert "收盘全景" in card or "📊" in card
 
+    def test_closing_card_displays_growth_sprint_strategy_profile(self):
+        """收盘/主报告卡片显示高收益试验模式边界。"""
+        data = ReportData(
+            report_type="closing",
+            generated_at=datetime.now(),
+            date="2026-06-29",
+            performance=PerformanceData(total_assets=3085.6, available_cash=3085.6),
+            strategy_profile={
+                "title": "高收益试验模式",
+                "target": "30天内争取 +10%",
+                "max_drawdown_pct": 10,
+                "single_position_limit_pct": 35,
+                "cash_reserve_pct": 10,
+            },
+        )
+
+        card = build_closing_card(data)
+
+        assert "高收益试验模式" in card
+        assert "30天内争取 +10%" in card
+        assert "最大回撤 -10%" in card
+        assert "单票 35%" in card
+
     def test_midday_card_basic(self):
         """测试午盘快报卡片"""
         data = ReportData(
@@ -182,6 +205,19 @@ class TestBitableWriter:
         assert "indices" in writer._tables
         assert "risk" in writer._tables
         assert "performance" in writer._tables
+
+    def test_webhook_only_disables_bitable_writer(self, monkeypatch):
+        """Webhook-only 模式下不触发飞书多维表格 API。"""
+        from app.config import settings
+        from app.report_engine.renderers.bitable_writer import BitableWriter
+
+        monkeypatch.setattr(settings, "FEISHU_WEBHOOK_ONLY", True, raising=False)
+        monkeypatch.setattr(settings, "FEISHU_BITABLE_APP_TOKEN", "configured", raising=False)
+        monkeypatch.setattr(settings, "FEISHU_TABLE_STRATEGY", "table", raising=False)
+
+        writer = BitableWriter()
+
+        assert writer._available() is False
 
 
 class TestFeishuDoc:

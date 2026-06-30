@@ -73,8 +73,11 @@ def push_report_to_feishu(webhook_url: str, title: str, report_md: str, chat_id:
 
     # 2. lark-cli IM 文本推送 (完整)
     try:
-        full_text = f"**{title}**\n\n{report_md[:7500]}"
-        results["lark_im"] = send_lark_text(full_text, cid)
+        from app.config import settings
+
+        if not getattr(settings, "FEISHU_WEBHOOK_ONLY", False):
+            full_text = f"**{title}**\n\n{report_md[:7500]}"
+            results["lark_im"] = send_lark_text(full_text, cid)
     except Exception as e:
         logger.warning(f"lark IM failed: {e}")
 

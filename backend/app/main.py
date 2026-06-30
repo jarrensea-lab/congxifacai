@@ -31,6 +31,11 @@ from app.data_sources.data_router import DataSourceRouter
 from app.services.monitor import MonitorService
 from app.services.push_tracker import push_tracker, compute_retry_delay
 from app.services.portfolio_store import sync_db_from_user_portfolio
+from app.services.schedule_policy import (
+    schedule_reason,
+    should_run_main_report,
+    should_run_premarket_calibration,
+)
 
 # 报告引擎
 from app.report_engine.engine import report_engine
@@ -76,15 +81,15 @@ async def lifespan(app: FastAPI):
     if not settings.FEISHU_WEBHOOK_URL or "YOUR_WEBHOOK_ID" in settings.FEISHU_WEBHOOK_URL:
         logger.warning("飞书 Webhook URL 未配置，消息推送将不可用。请在 .env.local 中设置 FEISHU_WEBHOOK_URL")
     else:
-        logger.info(f"飞书 Webhook 已配置: {settings.FEISHU_WEBHOOK_URL[:40]}...")
+        logger.info("飞书 Webhook 已配置")
 
     # ============================================================
-    # V6 定时任务注册 (5个交易时段 + Bot轮询)
+    # V7.3 定时任务注册（主报告服务下一交易日，盘前仅做短校准）
     # ============================================================
     scheduler.add_job(
         _run_premarket_with_status,
-        CronTrigger(hour=9, minute=5, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='premarket', name='盘前AI辩论+策略推送', replace_existing=True,
+        CronTrigger(hour=8, minute=50, day_of_week='mon-fri', timezone='Asia/Shanghai'),
+        id='premarket', name='盘前短策略校准', replace_existing=True,
         misfire_grace_time=3600,  # 错过1小时内自动补跑
     )
     scheduler.add_job(
@@ -107,8 +112,20 @@ async def lifespan(app: FastAPI):
     )
     scheduler.add_job(
         _run_daily_report_with_status,
-        CronTrigger(hour=15, minute=35, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='daily_report', name='系统日报', replace_existing=True,
+        CronTrigger(hour=20, minute=30, day_of_week='mon-fri', timezone='Asia/Shanghai'),
+        id='main_report', name='次日投资策略主报告', replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_daily_report_with_status,
+        CronTrigger(hour=20, minute=30, day_of_week='sun', timezone='Asia/Shanghai'),
+        id='sunday_main_report', name='周日晚次日投资策略主报告', replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_sentinel_review_with_status,
+        CronTrigger(hour=21, minute=0, timezone='Asia/Shanghai'),
+        id='sentinel_review', name='Sentinel绩效回看与归档', replace_existing=True,
         misfire_grace_time=3600,
     )
     scheduler.add_job(
@@ -118,7 +135,13 @@ async def lifespan(app: FastAPI):
     )
 
     scheduler.start()
-    logger.info("旺财V7 调度器已启动 (5个交易时段 + Bot轮询)")
+    for stale_job_id in ("daily_report",):
+        try:
+            scheduler.remove_job(stale_job_id)
+            logger.info(f"已清理旧调度任务: {stale_job_id}")
+        except Exception:
+            pass
+    logger.info("旺财V7.3 调度器已启动 (次日主报告 + 盘前校准 + 盘中/收盘 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -134,7 +157,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
-    version="7.0.0",
+    version="7.3.0",
     lifespan=lifespan,
 )
 
@@ -349,7 +372,8 @@ def _feishu_webhook_push(title: str, content: str) -> bool:
 
 async def _run_premarket_with_status():
     """盘前任务 — AI辩论 + 建仓计划 -> 飞书推送"""
-    if not is_trading_day():
+    if not should_run_premarket_calibration():
+        logger.info(schedule_reason("premarket_calibration"))
         return
     gs = generation_status["premarket"]
     if gs["running"]:
@@ -627,7 +651,8 @@ async def _run_review_with_status():
 
 async def _run_daily_report_with_status():
     """收盘全景报告 — 升级版：交易回顾+持仓+风控+系统健康"""
-    if not is_trading_day():
+    if not should_run_main_report():
+        logger.info(schedule_reason("main_report"))
         return
     try:
         logger.info("=== 收盘全景报告 ===")
@@ -686,6 +711,34 @@ async def _run_daily_report_with_status():
         logger.info("=== 收盘全景报告完成 ===")
     except Exception as e:
         logger.error(f"收盘全景报告异常: {e}", exc_info=True)
+
+
+async def _run_sentinel_review_with_status():
+    """Sentinel role-performance review and archive job."""
+    try:
+        import subprocess
+        import sys
+        from app.config import PROJECT_ROOT
+
+        project_root = f"{PROJECT_ROOT}/.."
+        script_path = f"{project_root}/scripts/run_sentinel.py"
+        report_date = str(date.today())
+        logger.info("=== Sentinel绩效回看启动 ===")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, script_path, "--date", report_date, "--mode", "review"],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            timeout=120,
+        )
+        if result.returncode != 0:
+            logger.warning(f"Sentinel绩效回看失败: {result.stderr[:800]}")
+            return
+        logger.info(f"Sentinel绩效回看完成: {result.stdout[:800]}")
+    except Exception as e:
+        logger.error(f"Sentinel绩效回看异常: {e}", exc_info=True)
+
 
 async def _startup_health_check():
     """启动时连通性检查"""

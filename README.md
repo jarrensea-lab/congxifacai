@@ -1,10 +1,10 @@
 # 恭喜发财 — Codex 自动化 A 股智能助手
 
-> 基于 DeepSeek 云端 AI + 飞书全通道交互的个人量化交易助手
+> 基于 DeepSeek/Qwen 云端 AI + Tushare 数据源 + 飞书 Webhook 群机器人的个人 A 股研究与交易辅助工作流
 
 **恭喜发财**是一个运行在 Codex 之上的自动化 A 股交易智能助手，由多角色 AI 辩论引擎驱动，覆盖盘前策略、盘中监控到收盘复盘的全交易流程。
 
-当前版本 `v7.1.0`，迭代方向见 [ROADMAP.md](ROADMAP.md)。
+当前版本 `v7.3.1`，迭代方向见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -18,6 +18,7 @@ cp .env.example .env.local
 #   DEEPSEEK_API_KEY=sk-xxx
 #   TUSHARE_TOKEN=xxx
 #   FEISHU_WEBHOOK_URL=https://open.feishu.cn/...
+#   FEISHU_WEBHOOK_ONLY=true
 ```
 
 ### 2. 安装依赖
@@ -32,8 +33,8 @@ pip install -r requirements.txt
 # 直接启动
 python backend/app/main.py
 
-# 或通过 launchd 守护（启动后自动运行）
-launchctl load ~/Library/LaunchAgents/com.zhuchenyuan.congxicai-v6.plist
+# 或安装 v7 launchd 守护（启动后自动运行）
+scripts/install-congxicai-v7-launchd.sh
 ```
 
 ---
@@ -41,12 +42,13 @@ launchctl load ~/Library/LaunchAgents/com.zhuchenyuan.congxicai-v6.plist
 ## 每日自动化流程
 
 ```
-08:55 ── 启动检查（API/DeepSeek/飞书连通性）
-09:05 ── 盘前 AI 辩论 + 建仓计划 + 选股池推送至飞书
+周日 20:30 ── 次日投资策略主报告（服务周一）
+08:50 ── 盘前短策略校准
 11:35 ── 午盘快速分析推送至飞书
 14:00 ── 午后风险检查
-15:05 ── 收盘复盘生成飞书文档
-15:35 ── 系统日报推送至飞书消息卡片
+15:05 ── 收盘复盘
+20:30 ── 次日投资策略主报告（服务下一交易日）
+21:00 ── Sentinel 绩效回看与归档
 ```
 
 ---
@@ -60,6 +62,7 @@ launchctl load ~/Library/LaunchAgents/com.zhuchenyuan.congxicai-v6.plist
 │       ├── ai/               # AI 引擎
 │       │   ├── debate.py     # 多角色辩论（猎手/账房/守夜人/产业链研究员）
 │       │   ├── serenity_analyst.py  # 产业链知识引擎（8层价值链）
+│       │   ├── sentinel_research.py # Sentinel 新闻证据包 + Serenity 深挖输入
 │       │   └── cloud_client.py      # DeepSeek + Qwen-Plus 双模型路由
 │       ├── data_sources/     # 多源数据层
 │       │   ├── tushare_client.py    # Tushare 数据
@@ -71,6 +74,9 @@ launchctl load ~/Library/LaunchAgents/com.zhuchenyuan.congxicai-v6.plist
 │       │   └── debate_tracker.py   # 辩论记录追踪
 │       ├── services/         # 飞书通道 & 指令解析
 │       │   ├── feishu_client.py    # 飞书消息卡片推送
+│       │   ├── report_archive.py   # Markdown 日期归档
+│       │   ├── schedule_policy.py  # 主报告/盘前校准交易日规则
+│       │   ├── strategy_profile.py # 保守铁律 / 高收益试验模式
 │       │   └── bot_handler.py      # Bot 指令解析
 │       ├── trading_engine/   # 模拟交易引擎
 │       │   ├── account.py    # 账户管理
@@ -114,13 +120,83 @@ launchctl load ~/Library/LaunchAgents/com.zhuchenyuan.congxicai-v6.plist
 
 仓位约束 → 单票集中度 → 最大回撤 → 波动率过滤 → 流动性格栅 → 黑名单拦截 → 行业偏离度 → 相关性风险
 
+当前支持两套报告期策略 profile：
+
+| 模式 | 定位 | 关键参数 |
+|------|------|----------|
+| `capital_preservation` | 默认保守铁律 | 现金底线 30%，小账户单票 10%，单笔止损 3% |
+| `growth_sprint` | 一周/短期高收益实验 | 现金底线 10%，单票 35%，账户最大回撤 -10%，单笔止损 5% |
+
+`growth_sprint` 只改变报告和人工复核的风险边界，不承诺收益，也不触发自动交易。AI 原文若出现旧仓位或现金规则，以报告中的“机器可执行校验”为准。
+
 ### 飞书全通道
 
-- **消息卡片** — 盘前策略/风险预警/午盘简报/系统日报
-- **多维表格** — 选股池/回测记录/持仓/绩效
-- **飞书文档** — 策略报告/周报复盘
-- **画板** — K 线标注图/收益曲线
-- **任务** — 止盈止损提醒
+当前生产默认仅启用 **Webhook 群机器人消息卡片**，用于盘前策略、风险预警、午盘简报和系统日报摘要。
+
+飞书多维表格、飞书文档、画板、任务和 lark-cli IM 通道暂时关闭，避免报告内容通过 API 通道写入外部表格或文档。需要重新启用时，先关闭 `FEISHU_WEBHOOK_ONLY` 并单独验证权限。
+
+### Sentinel 研究证据层
+
+`v7.3.0` 新增 Sentinel 自动化研究包与绩效回看入口：
+
+- 接入 Tushare 高频滚动新闻原始归档，默认目录：
+  `/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/Serenity研究/数据采集/tushare-news`
+- 支持 `raw/YYYY-MM-DD/*.jsonl` 原始新闻、`index/latest-status.json` 采集状态和 `digest/` 阶段摘要。
+- `scripts/run_sentinel.py` 可生成 `data/sentinel/news_events/`、`research_packages/` 和 Sentinel Markdown 报告。
+- Sentinel 输出仍是研究证据、主题雷达、候选复核和角色绩效旁路，不直接触发真实交易。
+- 一周实验：Sentinel 会从热点主题中选择最多 3 个主题，生成 Serenity 产业链瓶颈深挖。深挖摘要写入 Sentinel 研究包，完整 Markdown 保留在 `恭喜发财报告/历史数据/Serenity深挖/YYYY-MM-DD/`，供学习复盘使用；不单独推送飞书，也不作为买卖指令。
+
+Sentinel 与 Serenity 的边界：
+
+- Sentinel 是新闻证据包、主题雷达和角色绩效复盘层。
+- Serenity 是四人辩论中的产业链瓶颈研究员，也是 Sentinel 一周实验中的深度研究子模块。
+- Serenity 深挖报告可以作为学习档案保留，但最终交易动作仍由四人辩论、裁判、账户约束和风控共同过滤。
+
+### 次日投资策略主报告
+
+主报告定位为盘后或周日晚生成，服务下一交易日盘前决策。报告结构包括：
+
+- 明日总策略。
+- 账户约束。
+- 数据源审计。
+- Sentinel 研究输入。
+- 四人辩论矩阵。
+- 裁判裁决。
+- 明日执行剧本。
+
+盘前只生成短策略校准，不重复生成长报告。
+
+### Tushare 数据增强
+
+Tushare 已购买 2000 积分，数据权限提升后，系统可使用更丰富的行情、新闻、财务和资金面证据。当前用于：
+
+- 高频滚动新闻捕获与去重。
+- Sentinel 研究证据包。
+- Serenity/产业链候选的财务与行情核验。
+- 日报和策略报告中的数据交叉验证。
+
+### Markdown 本地归档
+
+所有交易日报告都会保存 Markdown 到：
+
+`/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告`
+
+目录按交易日组织：
+
+```text
+恭喜发财报告/
+└── 2026/
+    └── 06/
+        └── 2026-06-29/
+            ├── 2026-06-29_日报.md
+            ├── 2026-06-29_盘前策略.md
+            ├── 2026-06-29_盘中分析.md
+            ├── 2026-06-29_收盘复盘.md
+            ├── 2026-06-29_系统状态.md
+            └── 日报索引.md
+```
+
+即使 Webhook 推送失败，本地 Markdown 也必须落地。
 
 ### 飞书对话指令
 

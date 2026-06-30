@@ -62,6 +62,18 @@ def build_closing_card(data: ReportData) -> str:
         "",
         "**📈 今日交易回顾**",
     ]
+    profile = data.strategy_profile or {}
+    if profile:
+        lines.extend([
+            f"- 策略模式: {profile.get('title', '未指定')}",
+            f"- 目标: {profile.get('target', '未指定')}",
+            (
+                f"- 风险边界: 最大回撤 -{profile.get('max_drawdown_pct', '?')}% | "
+                f"单票 {profile.get('single_position_limit_pct', '?')}% | "
+                f"现金底线 {profile.get('cash_reserve_pct', '?')}%"
+            ),
+            "- 验收口径: 不承诺收益，只验证报告、风控、人工复核和复盘是否按规则执行",
+        ])
     if pnl:
         icon = "📈" if pnl.daily_pnl >= 0 else "📉"
         lines.append(f"- 日盈亏: {icon} ¥{pnl.daily_pnl:+,.2f} ({pnl.daily_pnl_pct:+.2f}%)")

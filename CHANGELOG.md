@@ -1,6 +1,70 @@
 # 恭喜发财 更新日志
 
 
+## v7.3.1 (2026-06-29) — 高收益试验模式 + Serenity 历史归档
+
+### 运行策略
+- ✅ **高收益试验模式启用**：新增 `CONGXI_STRATEGY_MODE=growth_sprint`，用于 30 天内争取 +10% 的短期目标；报告明确标注“不承诺收益，只验证规则输出、人工复核和后续复盘”。
+- ✅ **风险边界更新**：账户最大回撤 `-10%`，单票上限 `35%`，现金底线临时降至 `10%`，允许低价高波动标的，但默认排除 ST、退市整理、流动性极差和无明确催化标的。
+- ✅ **保守铁律保留**：`capital_preservation` 仍保留为可恢复模式，资金池扩大或试验期结束后可切回原策略。
+
+### 数据治理
+- ✅ **Serenity 独立报告历史归档**：旧 Serenity 瓶颈选股报告不再作为独立产出模块，根目录历史报告移动到 `恭喜发财报告/历史数据/`。
+- ✅ **Sentinel/Serenity 边界澄清**：Sentinel 是新闻证据包与角色绩效复盘层；Serenity 仍是四人辩论里的产业链瓶颈研究员，不由 Sentinel 替代。
+- ✅ **Serenity 深挖一周实验**：Sentinel 研究包会从热点主题中选取最多 3 个主题生成 Serenity 产业链瓶颈深挖，完整 Markdown 归档到 `恭喜发财报告/历史数据/Serenity深挖/YYYY-MM-DD/`，用于学习复盘，不推送、不直接触发交易。
+
+### 验证
+- `pytest backend/tests/ -q`：`181 passed`。
+- `ruff check backend scripts`：通过。
+
+---
+
+
+## v7.3.0 (2026-06-28) — Sentinel 自动化 + 次日投资策略主报告 + launchd 常驻
+
+### 新功能
+- ✅ **次日投资策略主报告**：主报告从普通日报升级为服务下一交易日的策略剧本，新增明日总策略、账户约束、数据源审计、Sentinel 研究输入、四人辩论矩阵、裁判裁决和明日执行剧本。
+- ✅ **周日晚主报告规则**：周日 20:30 也会生成主报告，用于服务周一交易日。
+- ✅ **盘前短策略校准**：盘前任务调整为 08:50 的短校准，不重复生成长报告。
+- ✅ **Sentinel 自动化研究包**：新增 `backend/app/ai/sentinel_research.py` 与 `scripts/run_sentinel.py`，可从 Tushare 高频新闻生成 Sentinel 研究包。
+- ✅ **launchd v7 常驻服务**：新增 `com.zhuchenyuan.congxicai-v7`、安装脚本和用户本地 wrapper，支持开机/登录后常驻 FastAPI + APScheduler。
+
+### 运行策略
+- ✅ `launchd` 负责常驻运行，FastAPI/APScheduler 负责交易时段任务，手动脚本保留兜底。
+- ✅ 生产仍保持 Webhook-only，不恢复飞书文档、多维表格和 lark-cli API 通道。
+- ✅ 启动时清理旧 `daily_report` APScheduler job，避免旧 15:35 日报与新 20:30 主报告并行运行。
+
+### 验证
+- `2026-06-28` Sentinel 真实导入 Tushare 高频新闻 `5674` 条。
+- `pytest backend/tests/ -q`：`175 passed`。
+- `ruff check backend scripts`：通过。
+- `launchd` 服务 `com.zhuchenyuan.congxicai-v7` 已运行，`/api/health` 返回 `status=ok`、`database=ok`。
+
+---
+
+
+## v7.2.0 (2026-06-28) — Sentinel 研究证据层 + Tushare 权限增强 + Webhook-only 报告归档
+
+### 新功能
+- ✅ **Sentinel 研究证据层落地**：新增角色预测留痕、角色绩效评分、投资建议绩效和执行纪律旁路，不改变真实交易行为。
+- ✅ **Tushare 高频新闻归档接入**：默认读取司库归档目录 `/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/Serenity研究/数据采集/tushare-news`，支持 `raw/YYYY-MM-DD/*.jsonl`、`index/latest-status.json` 和 `digest/`。
+- ✅ **Tushare 2000 积分权限增强入档**：项目文档明确当前数据源能力已提升，可支撑更丰富的行情、新闻、财务和资金面证据。
+- ✅ **交易日报告 Markdown 日期归档**：所有日报、盘前策略、盘中分析、收盘复盘、系统状态报告按 `YYYY/MM/YYYY-MM-DD/` 结构保存到司库 `恭喜发财报告` 目录。
+
+### 运行策略
+- ✅ **账户运行态恢复为空仓小账户**：当前本地运行态为无持仓、可用现金 `3085.6` 元。
+- ✅ **Webhook-only 飞书策略**：生产默认只使用群机器人 Webhook 推送摘要，关闭多维表格、飞书文档、图片上传和 lark-cli IM 等 API 通道。
+- ✅ **配置归位**：`.env.local` 回到恭喜发财项目根目录，不再依赖 OHHF 路径。
+
+### 技术细节
+- `backend/app/services/report_archive.py` — 统一 Markdown 日期归档工具。
+- `backend/app/data_sources/horizon_news_importer.py` — 增加默认 Tushare 新闻归档 root 与环境变量覆盖。
+- `backend/app/report_engine/engine.py` — 推送前先本地归档，Webhook 失败不影响 Markdown 落地。
+- `.env.example` — 新增 `FEISHU_WEBHOOK_ONLY`、`CONGXI_TUSHARE_NEWS_ROOT`、`CONGXI_REPORT_ARCHIVE_DIR`。
+
+---
+
+
 ## v7.1.0 (2026-06-16) — Serenity 产业链研究员实装 + 现金约束 + 推荐优化
 
 ### 新功能
@@ -772,4 +836,3 @@ R1保守(≤10%,-2%) → R2稳健(≤20%,-3%) → R3适中(≤30%,-5%) → R4积
 - [ ] 前端 Dashboard 增加实时风控评分展示
 - [ ] 历史收益曲线和回测功能
 - [ ] 融资融券、北向资金信号集成
-

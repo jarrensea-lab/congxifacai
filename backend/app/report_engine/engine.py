@@ -15,6 +15,8 @@ from app.report_engine.renderers.markdown_card import (
 from app.report_engine.renderers.feishu_doc import create_doc_from_markdown
 from app.report_engine.renderers.bitable_writer import bitable_writer
 from app.services.push_tracker import push_tracker, compute_retry_delay
+from app.services.report_archive import save_markdown_report
+from app.services.strategy_profile import get_strategy_profile
 from app.utils.logger import logger
 
 
@@ -28,6 +30,13 @@ class ReportEngine:
     def __init__(self):
         from app.config import settings
         self.webhook_url = getattr(settings, "FEISHU_WEBHOOK_URL", "")
+        self.webhook_only = getattr(settings, "FEISHU_WEBHOOK_ONLY", False)
+
+    def _archive_report(self, *, date: str, title: str, content_md: str) -> None:
+        try:
+            save_markdown_report(content_md, report_date=date, title=title)
+        except Exception as e:
+            logger.warning(f"{title} 归档异常（不影响推送）: {e}")
 
     async def push_premarket(self, date: str, decision: dict, positions: list[dict],
                              risk_level: int) -> bool:
@@ -38,11 +47,12 @@ class ReportEngine:
 
             # 1. 飞书消息卡片（带重试）
             card_md = build_premarket_card(data)
+            self._archive_report(date=date, title="盘前策略", content_md=card_md)
             webhook_ok = self._webhook_push_with_retry(
                 f"🐕 旺财V7 盘前策略 [R{risk_level}]", card_md,
             )
             if not webhook_ok:
-                logger.warning("盘前策略 webhook 推送失败，继续写入多维表格")
+                logger.warning("盘前策略 webhook 推送失败，本地 MD 已归档")
 
             # 2. 写入多维表格
             if bitable_writer._available():
@@ -80,19 +90,31 @@ class ReportEngine:
         try:
             data = build_closing_report_data(date, positions, alerts, performance,
                                              market_summary, system_health, preview)
+            data.strategy_profile = get_strategy_profile()
 
             # 1. 飞书消息卡片（带重试）
             card_md = build_closing_card(data)
+            self._archive_report(date=date, title="收盘复盘", content_md=card_md)
+            self._archive_report(
+                date=date,
+                title="系统状态",
+                content_md="# 系统状态\n\n" + "\n".join(
+                    f"- {key}: {value}" for key, value in sorted((system_health or {}).items())
+                ) + "\n",
+            )
             webhook_ok = self._webhook_push_with_retry(
                 "📊 旺财V7 收盘全景报告", card_md,
             )
             if not webhook_ok:
-                logger.warning("收盘全景 webhook 推送失败，继续其他渠道")
+                logger.warning("收盘全景 webhook 推送失败，本地 MD 已归档")
 
             # 2. 生成飞书云文档
             doc_md = f"""# 收盘全景报告 - {date}
 
 ## 今日交易回顾
+- 策略模式: {data.strategy_profile.get('title', '未指定')}
+- 目标: {data.strategy_profile.get('target', '未指定')}
+- 风险边界: 最大回撤 -{data.strategy_profile.get('max_drawdown_pct', '?')}% / 单票 {data.strategy_profile.get('single_position_limit_pct', '?')}% / 现金底线 {data.strategy_profile.get('cash_reserve_pct', '?')}%
 - 日盈亏: ¥{performance.get('daily_pnl', 0):+,.2f}
 - 累计盈亏: ¥{performance.get('cumulative_pnl', 0):+,.2f}
 - 持仓数: {performance.get('position_count', 0)}
@@ -108,13 +130,14 @@ class ReportEngine:
 
             doc_md += f"\n## 明日预告\n{preview or '—'}\n"
 
-            # 云文档创建失败不影响主流程
-            try:
-                doc_url = create_doc_from_markdown(f"收盘全景_{date}", doc_md)
-                if doc_url:
-                    logger.info(f"收盘文档已创建: {doc_url}")
-            except Exception as e:
-                logger.warning(f"收盘文档创建异常（不影响主流程）: {e}")
+            if not self.webhook_only:
+                # 云文档创建失败不影响主流程
+                try:
+                    doc_url = create_doc_from_markdown(f"收盘全景_{date}", doc_md)
+                    if doc_url:
+                        logger.info(f"收盘文档已创建: {doc_url}")
+                except Exception as e:
+                    logger.warning(f"收盘文档创建异常（不影响主流程）: {e}")
 
             # 3. 写入多维表格
             if bitable_writer._available():
@@ -136,6 +159,7 @@ class ReportEngine:
         try:
             data = build_midday_report_data(date, market_summary, positions, afternoon_tip)
             card_md = build_midday_card(data)
+            self._archive_report(date=date, title="盘中分析-午后风控", content_md=card_md)
             self._webhook_push_with_retry("🌤️ 旺财V7 午盘快报", card_md)
 
             if bitable_writer._available():
@@ -166,6 +190,7 @@ class ReportEngine:
             # 有预警时红色标题，无预警时绿色标题
             title = "🛡️ 旺财V7 午后风控告警" if has_alerts else "✅ 旺财V7 午后风控检查"
             card_md = build_afternoon_risk_card(data)
+            self._archive_report(date=date, title="盘中分析", content_md=card_md)
             self._webhook_push_with_retry(title, card_md)
 
             if bitable_writer._available():

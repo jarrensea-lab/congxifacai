@@ -49,6 +49,19 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
             f"总资产: ¥{float(total_assets):,.2f}\n"
             f"可用现金: ¥{float(available_cash):,.2f}\n"
         )
+    strategy_profile = analysis_report.get("strategy_profile") or {}
+    if strategy_profile:
+        holdings_data += (
+            f"\n【当前策略模式】\n"
+            f"模式: {strategy_profile.get('title', '未指定')}\n"
+            f"目标: {strategy_profile.get('target', '未指定')}\n"
+            f"账户最大回撤: -{strategy_profile.get('max_drawdown_pct', '?')}%\n"
+            f"单票上限: {strategy_profile.get('single_position_limit_pct', '?')}%\n"
+            f"现金底线: {strategy_profile.get('cash_reserve_pct', '?')}%\n"
+            f"单笔硬止损: {strategy_profile.get('stop_loss_pct', '?')}%\n"
+            "报告中的仓位、止损、现金底线必须以上述当前策略模式为准；"
+            "不要沿用旧的30%现金底线或10%单票上限，除非当前策略模式明确如此。\n"
+        )
     news_str = json.dumps(analysis_report.get("news", []), ensure_ascii=False)
 
     engine = AIDebateEngine()

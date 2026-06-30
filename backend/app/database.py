@@ -1,13 +1,16 @@
 """数据库连接和管理"""
+import os
+from pathlib import Path
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 
 # 支持 CONGXI_DATABASE_PATH 环境变量覆盖（CI/测试环境使用临时数据库）
-import os
 _db_path = os.environ.get("CONGXI_DATABASE_PATH") or settings.DATABASE_PATH
-os.makedirs(os.path.dirname(_db_path), exist_ok=True)
+if _db_path != ":memory:":
+    Path(_db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
 
 # 创建数据库引擎
 engine = create_engine(

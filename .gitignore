@@ -80,6 +80,7 @@ backend/data/*
 data/*
 !data/.gitkeep
 !data/serenity/
+data/serenity/*
 !data/serenity/theme_candidates.json
 !data/user_portfolio.example.json
 reports/

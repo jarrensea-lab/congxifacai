@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zhuchenyuan.congxicai-v7</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/zhuchenyuan/Library/Application Support/congxicai-v7/congxicai-v7-service.sh</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>PYTHONPATH</key>
+        <string>/Volumes/Aino Kishi/AI/workflows/恭喜发财/backend</string>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/zhuchenyuan</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/zhuchenyuan/Library/Logs/congxicai-v7/congxicai-v7.stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/zhuchenyuan/Library/Logs/congxicai-v7/congxicai-v7.stderr.log</string>
+</dict>
+</plist>
