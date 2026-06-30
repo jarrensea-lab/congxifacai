@@ -3,12 +3,20 @@ from __future__ import annotations
 
 import re
 import shutil
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
-DEFAULT_ARCHIVE_DIR = "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告"
+DEFAULT_SIKU_VAULT_DIR = os.getenv(
+    "SIKU_VAULT_DIR",
+    str(Path.home() / "AI/projects/司库"),
+)
+DEFAULT_ARCHIVE_DIR = os.getenv(
+    "CONGXI_REPORT_ARCHIVE_DIR",
+    str(Path(DEFAULT_SIKU_VAULT_DIR) / "01-资料采集/量化投资/恭喜发财报告"),
+)
 INDEX_FILENAME = "日报索引.md"
 
 

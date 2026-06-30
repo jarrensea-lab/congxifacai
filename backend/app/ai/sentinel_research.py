@@ -6,6 +6,7 @@ news density, themes, symbols, and risk signals without emitting trade actions.
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 from datetime import date, datetime
@@ -14,7 +15,11 @@ from typing import Any, Iterable
 
 DEFAULT_OUTPUT_ROOT = Path("data/sentinel")
 DEFAULT_SERENITY_LEARNING_ARCHIVE_DIR = Path(
-    "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告"
+    os.getenv(
+        "CONGXI_REPORT_ARCHIVE_DIR",
+        str(Path(os.getenv("SIKU_VAULT_DIR", str(Path.home() / "AI/projects/司库")))
+            / "01-资料采集/量化投资/恭喜发财报告"),
+    )
 )
 RISK_KEYWORDS = ("风险", "监管", "下跌", "亏损", "减持", "处罚", "退市", "暴雷")
 

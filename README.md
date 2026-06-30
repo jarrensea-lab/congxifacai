@@ -140,7 +140,7 @@ scripts/install-congxicai-v7-launchd.sh
 `v7.3.0` 新增 Sentinel 自动化研究包与绩效回看入口：
 
 - 接入 Tushare 高频滚动新闻原始归档，默认目录：
-  `/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/Serenity研究/数据采集/tushare-news`
+  `/Users/zhuchenyuan/AI/projects/司库/01-资料采集/量化投资/Serenity研究/数据采集/tushare-news`
 - 支持 `raw/YYYY-MM-DD/*.jsonl` 原始新闻、`index/latest-status.json` 采集状态和 `digest/` 阶段摘要。
 - `scripts/run_sentinel.py` 可生成 `data/sentinel/news_events/`、`research_packages/` 和 Sentinel Markdown 报告。
 - Sentinel 输出仍是研究证据、主题雷达、候选复核和角色绩效旁路，不直接触发真实交易。
@@ -179,7 +179,7 @@ Tushare 已购买 2000 积分，数据权限提升后，系统可使用更丰富
 
 所有交易日报告都会保存 Markdown 到：
 
-`/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告`
+`/Users/zhuchenyuan/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告`
 
 目录按交易日组织：
 

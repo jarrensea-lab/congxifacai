@@ -35,7 +35,8 @@ from app.data_sources.horizon_news_importer import (
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "sentinel"
 SERENITY_LEARNING_ARCHIVE_DIR = os.environ.get(
     "CONGXI_REPORT_ARCHIVE_DIR",
-    "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告",
+    str(Path(os.environ.get("SIKU_VAULT_DIR", str(Path.home() / "AI/projects/司库")))
+        / "01-资料采集/量化投资/恭喜发财报告"),
 )
 
 

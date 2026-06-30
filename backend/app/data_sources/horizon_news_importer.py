@@ -13,7 +13,11 @@ from app.ai.sentinel_contracts import SECRET_FIELD_NAMES
 
 CN_TZ = timezone(timedelta(hours=8))
 DEFAULT_TUSHARE_NEWS_ROOT = Path(
-    "/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/Serenity研究/数据采集/tushare-news"
+    os.getenv(
+        "CONGXI_TUSHARE_NEWS_ROOT",
+        str(Path(os.getenv("SIKU_VAULT_DIR", str(Path.home() / "AI/projects/司库")))
+            / "01-资料采集/量化投资/Serenity研究/数据采集/tushare-news"),
+    )
 )
 
 KEYWORD_SYMBOLS = {

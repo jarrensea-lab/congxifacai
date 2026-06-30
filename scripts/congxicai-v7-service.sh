@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-PROJECT_DIR="/Volumes/Aino Kishi/AI/workflows/恭喜发财"
-REPORT_DIR="/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告"
+PROJECT_DIR="${CONGXI_PROJECT_DIR:-/Users/zhuchenyuan/AI/workflows/恭喜发财}"
+REPORT_DIR="${CONGXI_REPORT_ARCHIVE_DIR:-/Users/zhuchenyuan/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告}"
 LOG_DIR="${PROJECT_DIR}/logs/launchd"
 HOST="127.0.0.1"
 PORT="8000"

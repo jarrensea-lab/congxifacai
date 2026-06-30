@@ -47,7 +47,7 @@
 
 ### 新功能
 - ✅ **Sentinel 研究证据层落地**：新增角色预测留痕、角色绩效评分、投资建议绩效和执行纪律旁路，不改变真实交易行为。
-- ✅ **Tushare 高频新闻归档接入**：默认读取司库归档目录 `/Volumes/Aino Kishi/AI/projects/司库/01-资料采集/量化投资/Serenity研究/数据采集/tushare-news`，支持 `raw/YYYY-MM-DD/*.jsonl`、`index/latest-status.json` 和 `digest/`。
+- ✅ **Tushare 高频新闻归档接入**：默认读取司库归档目录 `/Users/zhuchenyuan/AI/projects/司库/01-资料采集/量化投资/Serenity研究/数据采集/tushare-news`，支持 `raw/YYYY-MM-DD/*.jsonl`、`index/latest-status.json` 和 `digest/`。
 - ✅ **Tushare 2000 积分权限增强入档**：项目文档明确当前数据源能力已提升，可支撑更丰富的行情、新闻、财务和资金面证据。
 - ✅ **交易日报告 Markdown 日期归档**：所有日报、盘前策略、盘中分析、收盘复盘、系统状态报告按 `YYYY/MM/YYYY-MM-DD/` 结构保存到司库 `恭喜发财报告` 目录。
 

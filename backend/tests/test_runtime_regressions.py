@@ -303,15 +303,28 @@ def test_daily_report_does_not_depend_on_serenity_candidate_pool():
 
 def test_default_report_archives_point_to_local_siku_vault():
     """Recovered local workspace should not keep writing reports to the old flash drive."""
+    from app.data_sources.horizon_news_importer import DEFAULT_TUSHARE_NEWS_ROOT
+    from app.services import report_archive
     import scripts.daily_report as daily_report
+    import scripts.run_sentinel as run_sentinel
     import scripts.serenity_research_report as serenity_report
 
     expected_root = Path.home() / "AI/projects/司库/01-资料采集/量化投资"
 
     assert daily_report.DEFAULT_ARCHIVE_DIR == str(expected_root / "恭喜发财报告")
     assert serenity_report.DEFAULT_SERENITY_ARCHIVE_DIR == str(expected_root / "Serenity研究")
-    assert "/Volumes/Aino Kishi" not in daily_report.DEFAULT_ARCHIVE_DIR
-    assert "/Volumes/Aino Kishi" not in serenity_report.DEFAULT_SERENITY_ARCHIVE_DIR
+    assert report_archive.DEFAULT_ARCHIVE_DIR == str(expected_root / "恭喜发财报告")
+    assert run_sentinel.SERENITY_LEARNING_ARCHIVE_DIR == str(expected_root / "恭喜发财报告")
+    assert DEFAULT_TUSHARE_NEWS_ROOT == expected_root / "Serenity研究/数据采集/tushare-news"
+
+    checked_paths = [
+        daily_report.DEFAULT_ARCHIVE_DIR,
+        serenity_report.DEFAULT_SERENITY_ARCHIVE_DIR,
+        report_archive.DEFAULT_ARCHIVE_DIR,
+        run_sentinel.SERENITY_LEARNING_ARCHIVE_DIR,
+        str(DEFAULT_TUSHARE_NEWS_ROOT),
+    ]
+    assert all("/Volumes/Aino Kishi" not in path for path in checked_paths)
 
 
 def test_serenity_default_archive_is_research_only_without_feishu_or_quotes(tmp_path):

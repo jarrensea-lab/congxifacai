@@ -16,7 +16,7 @@
         <key>PATH</key>
         <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>PYTHONPATH</key>
-        <string>/Volumes/Aino Kishi/AI/workflows/恭喜发财/backend</string>
+        <string>/Users/zhuchenyuan/AI/workflows/恭喜发财/backend</string>
     </dict>
 
     <key>WorkingDirectory</key>
