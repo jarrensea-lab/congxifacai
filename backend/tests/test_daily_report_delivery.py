@@ -79,22 +79,24 @@ def test_build_next_day_strategy_sections_include_required_blocks():
     ))
 
     for heading in (
-        "## 一、明日总策略",
-        "## 二、账户约束",
-        "## 三、数据源审计",
-        "## 四、市场状态",
-        "## 五、Sentinel 研究输入",
-        "## 六、四人辩论矩阵",
-        "## 七、裁判裁决",
-        "## 八、明日执行剧本",
+        "## 一、今日账户操作策略",
+        "## 二、持仓处理策略",
+        "## 三、新开仓策略",
+        "## 四、标的池分层",
+        "## 五、数据覆盖与评分",
+        "## 六、复盘与自迭代",
+        "## 七、研究归档链接",
     ):
         assert heading in sections
+    assert "当前持仓怎么处理" in sections
+    assert "是否需要卖" in sections
+    assert "是否需要买" in sections
+    assert "今天不动，明天等什么信号" in sections
     assert "2026-06-29" in sections
     assert "AI半导体" in sections
-    assert "小账户先保本金" in sections
     assert "Serenity 深挖" in sections
     assert "2026-06-28_Serenity深挖-AI半导体.md" in sections
-    assert "AI 原文若出现旧仓位或现金规则" in sections
+    assert "完整辩论记录" in sections
 
 
 def test_load_sentinel_research_package_falls_back_to_latest(monkeypatch, tmp_path):
@@ -148,12 +150,86 @@ def test_build_next_day_strategy_sections_render_role_votes():
         sentinel_package=None,
     ))
 
-    assert "## 七、裁判裁决" in sections
+    assert "## 五、数据覆盖与评分" in sections
     assert "角色投票审计" in sections
     assert "688008" in sections
     assert "H7" in sections
     assert "S8" in sections
     assert "ev_test" in sections
+
+
+def test_build_next_day_strategy_sections_separates_executable_and_research_reference():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-01",
+        target_date="2026-07-02",
+        risk_level=4,
+        final_view="现金等待触发",
+        confidence=8,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {"shanghai": 4118.89}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "target_scores": [
+                {
+                    "code": "002123",
+                    "name": "低价突破",
+                    "action": "buy",
+                    "score": 78,
+                    "entry_price": 3.2,
+                    "stop_loss": 3.04,
+                    "target_price": 3.58,
+                    "position_amount": 1800,
+                    "decision_reason": "放量突破且买得起",
+                },
+                {
+                    "code": "688008",
+                    "name": "澜起科技",
+                    "action": "research_only",
+                    "score": 70,
+                    "lot_value": 13700,
+                    "block_reason": "lot_size_exceeded",
+                    "decision_reason": "买不起最小交易单位，仅作半导体锚点",
+                },
+            ]
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "### 今日可执行标的" in sections
+    assert "低价突破(002123)" in sections
+    assert "### 研究参照标的" in sections
+    assert "澜起科技(688008)" in sections
+    assert "买不起最小交易单位" in sections
+    assert "数据不足，建议观望" not in sections
+
+
+def test_build_next_day_strategy_sections_excludes_legacy_report_order():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-01",
+        target_date="2026-07-02",
+        risk_level=3,
+        final_view="等待触发",
+        confidence=7,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={"target_scores": []},
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "## 📈 一、市场概况" not in sections
+    assert "## 🧠 三、AI 多维度分析" not in sections
+    assert sections.index("## 一、今日账户操作策略") < sections.index("## 三、新开仓策略")
 
 
 def test_build_feishu_summary_keeps_full_report_local_hint():

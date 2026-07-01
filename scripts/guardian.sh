@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# 恭喜发财 交易日守护进程
+# 恭喜发财 v7 交易日监控脚本
 # 
 # 功能:
 #   1. 健康检查 — 每30分钟检查 API/DeepSeek/数据源
@@ -10,17 +10,16 @@
 # 使用:
 #   chmod +x scripts/guardian.sh
 #   ./scripts/guardian.sh &
-#   或通过 launchd 守护: cp scripts/guardian.plist ~/Library/LaunchAgents/
+#   生产常驻服务使用 scripts/install-congxicai-v7-launchd.sh
 # 
-# ⚠️ 重要：此脚本不再管理 API 进程。
-#   API 进程由 launchd (com.zhuchenyuan.congxicai-v6) 的 KeepAlive=true 自动守护。
-#   双重管理会导致进程反复崩溃，冲突已修正。
+# ⚠️ 重要：此脚本只做监控和本地日志，不管理 API 进程。
+#   API 进程由 launchd (com.zhuchenyuan.congxicai-v7) 的 KeepAlive=true 自动守护。
 # ============================================================
 
-PORT=${PORT:-8001}
+PORT=${PORT:-8000}
 HOST=${HOST:-"127.0.0.1"}
 HEALTH_URL="http://${HOST}:${PORT}/api/health"
-LOG_DIR="${HOME}/恭喜发财-logs"
+LOG_DIR="${HOME}/Library/Logs/congxicai-v7"
 CHECK_INTERVAL=1800  # 30分钟
 
 # 加载 .env.local（如果存在）
@@ -64,7 +63,7 @@ generate_daily_report() {
         echo " 日期: $(date '+%Y-%m-%d %H:%M')"
         echo "========================================"
         echo ""
-        echo "⚠️  进程管理: launchd (KeepAlive=true) — guardian 仅监控"
+        echo "⚠️  进程管理: launchd com.zhuchenyuan.congxicai-v7 — guardian 仅监控"
         echo ""
 
         # API 状态

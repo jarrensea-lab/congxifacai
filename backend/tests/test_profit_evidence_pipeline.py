@@ -78,7 +78,7 @@ def test_sentinel_serenity_candidates_enter_target_pool_with_evidence(tmp_path):
 
     item = target_pool.get("688008")
     assert result["upserted_targets"] == 1
-    assert item["status"] == "candidate"
+    assert item["status"] == "research_reference"
     assert item["source"] == "sentinel_serenity"
     assert item["serenity"]["score"] == 62.5
     assert item["sentinel"]["theme"] == "半导体"

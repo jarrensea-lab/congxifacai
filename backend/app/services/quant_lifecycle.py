@@ -62,6 +62,48 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def lot_size_for_code(code: str) -> int:
+    """Return minimum A-share board lot size used by this project."""
+    clean = _clean_code(code).replace("sh", "").replace("sz", "").replace("bj", "")
+    if clean.startswith(("688", "689")):
+        return 200
+    return 100
+
+
+def _execution_gate(
+    code: str,
+    *,
+    current_price: float | None = None,
+    available_cash: float = 0,
+    total_assets: float = 0,
+) -> dict[str, Any]:
+    """Classify account executability before a target reaches the trading pool."""
+    lot_size = lot_size_for_code(code)
+    price = _to_float(current_price)
+    lot_value = round(price * lot_size, 2) if price > 0 else 0.0
+    assets = _to_float(total_assets, _to_float(available_cash))
+    cash = _to_float(available_cash)
+    single_limit = round(assets * 0.35, 2) if assets else cash
+    executable_budget = max(0.0, min(cash, single_limit))
+    result = {
+        "lot_size": lot_size,
+        "current_price": price,
+        "lot_value": lot_value,
+        "available_cash": round(cash, 2),
+        "total_assets": round(assets, 2),
+        "executable_budget": round(executable_budget, 2),
+        "executable": False,
+        "block_reason": "",
+    }
+    if price <= 0:
+        result["block_reason"] = "price_missing"
+    elif lot_value > cash or lot_value > executable_budget:
+        result["block_reason"] = "lot_size_exceeded"
+    else:
+        result["executable"] = True
+    return result
+
+
 def normalize_alert_level(level: str | None) -> str:
     if level in ("high", "mid", "low"):
         return level
@@ -106,7 +148,8 @@ class CandidatePoolStore:
         return [
             item
             for item in items.values()
-            if isinstance(item, dict) and item.get("status") not in {"removed", "expired"}
+            if isinstance(item, dict)
+            and item.get("status") not in {"removed", "expired", "research_only", "research_reference"}
         ]
 
     def upsert_recommendations(self, recommendations: list[dict[str, Any]], source: str) -> int:
@@ -175,8 +218,10 @@ class TargetPoolStore(CandidatePoolStore):
 
     VALID_STATUSES = {
         "research_only",
+        "research_reference",
         "candidate",
         "watching",
+        "executable",
         "actionable",
         "blocked_chasing",
         "position",
@@ -195,11 +240,26 @@ class TargetPoolStore(CandidatePoolStore):
         evidence: dict[str, Any] | None = None,
         sentinel: dict[str, Any] | None = None,
         serenity: dict[str, Any] | None = None,
+        current_price: float | None = None,
+        available_cash: float = 0,
+        total_assets: float = 0,
     ) -> bool:
         clean = _clean_code(code)
         if not clean:
             return False
         normalized_status = status if status in self.VALID_STATUSES else "candidate"
+        execution = _execution_gate(
+            clean,
+            current_price=current_price,
+            available_cash=available_cash,
+            total_assets=total_assets,
+        )
+        if source == "sentinel_serenity" and normalized_status in {"candidate", "watching", "executable"}:
+            normalized_status = "research_reference"
+        if current_price is not None and execution["executable"] and normalized_status == "candidate":
+            normalized_status = "watching"
+        elif current_price is not None and not execution["executable"] and normalized_status in {"candidate", "watching", "executable"}:
+            normalized_status = "research_reference"
         payload = self.load()
         items = payload.setdefault("items", {})
         existing = items.get(clean, {})
@@ -217,6 +277,7 @@ class TargetPoolStore(CandidatePoolStore):
             "evidence_ids": merged_evidence_ids,
             "sentinel": {**(existing.get("sentinel") or {}), **(sentinel or {})},
             "serenity": {**(existing.get("serenity") or {}), **(serenity or {})},
+            "execution": {**(existing.get("execution") or {}), **execution},
             "updated_at": _now(),
         }
         item.setdefault("created_at", _now())
@@ -284,13 +345,14 @@ def _candidate_alert(item: dict[str, Any], quote: dict[str, Any], available_cash
     if price <= 0:
         return None
 
+    code = item.get("code", "")
+    name = item.get("name", code)
     change_pct = _to_float(quote.get("change_pct"))
     vol_ratio = _to_float(quote.get("vol_ratio"))
     amount_wan = _to_float(quote.get("amount_wan") or quote.get("amount"))
-    lot_value = price * 100
+    lot_size = lot_size_for_code(code)
+    lot_value = price * lot_size
     affordable = lot_value <= available_cash
-    code = item.get("code", "")
-    name = item.get("name", code)
 
     base = {
         "stock_code": code,
@@ -300,6 +362,7 @@ def _candidate_alert(item: dict[str, Any], quote: dict[str, Any], available_cash
         "vol_ratio": vol_ratio,
         "amount_wan": amount_wan,
         "lot_value": round(lot_value, 2),
+        "lot_size": lot_size,
         "affordable": affordable,
     }
 

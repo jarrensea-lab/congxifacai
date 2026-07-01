@@ -4,7 +4,7 @@
 
 **恭喜发财**是一个运行在 Codex 之上的自动化 A 股交易智能助手，由多角色 AI 辩论引擎驱动，覆盖盘前策略、盘中监控到收盘复盘的全交易流程。
 
-当前 feature 分支版本 `v7.4.0-dev`，核心方向是“量化生命周期闭环底座”。迭代方向见 [ROADMAP.md](ROADMAP.md)。
+当前 feature 分支版本 `v7.5.0-dev`，核心方向是“盈利策略管线重构”。迭代方向见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -75,6 +75,8 @@ scripts/install-congxicai-v7-launchd.sh
 │       ├── services/         # 飞书通道、生命周期池 & 指令解析
 │       │   ├── feishu_client.py    # 飞书消息卡片推送
 │       │   ├── quant_lifecycle.py  # 生产候选池/持仓池扫描与提醒
+│       │   ├── target_snapshot.py  # 单标的结构化数据快照
+│       │   ├── target_scoring.py   # 账户可执行评分
 │       │   ├── report_archive.py   # Markdown 日期归档
 │       │   ├── schedule_policy.py  # 主报告/盘前校准交易日规则
 │       │   ├── strategy_profile.py # 保守铁律 / 高收益试验模式
@@ -89,27 +91,31 @@ scripts/install-congxicai-v7-launchd.sh
 │       ├── routers/          # FastAPI 路由
 │       └── utils/            # 缓存/日志/交易日历
 ├── scripts/
-│   └── guardian.sh           # 交易日守护进程
+│   ├── daily_report.py       # 次日投资策略主报告
+│   ├── guardian.sh           # v7 交易日监控脚本
+│   └── install-congxicai-v7-launchd.sh
 └── docs/
-    └── superpowers/specs/    # 设计文档
+    ├── reviews/              # 代码/文件审查
+    └── worklists/            # 执行 Worklist
 ```
 
 ---
 
 ## 核心技术特性
 
-### v7.4.0-dev 量化生命周期方向
+### v7.5.0-dev 盈利策略管线
 
-`v7.4.0-dev` 不再把系统目标定义为“生成更多报告”，而是转向未来量化管理需要的事件驱动底座：
+`v7.5.0-dev` 将系统从“研究堆料/报告输出”推进到“账户可执行策略输出”：
 
-- **盈利优先**：小账户是高收益验证账户，目标是在可控亏损内验证系统能否捕捉真实收益。
-- **账户分级**：小账户激进试错，中账户分层进攻，大账户保守复利。
-- **候选标的池**：池外标的按“直接建议建仓 / 入池观察 / 丢弃”处理；池内标的按“升级建仓 / 继续观察 / 出池”处理。
-- **持仓管理池**：持仓必须带止损、止盈、失效条件、持有周期和复核时间，不能只靠人工盯盘。
-- **定时/手动触发闭环**：先用现有盘前、午盘、午后、收盘任务和手动运行把架构、数据、策略、监控、预警跑通。
-- **分钟/秒级预留**：分钟级轮询、秒级行情、自动下单和高频撮合不在当前 v7.4 首轮范围内，作为 v7.5/v8 的架构预留。
+- **主报告先回答动作**：持仓怎么处理、是否卖、是否买、买哪只、多少钱、什么价格、止损在哪里、今天不动明天等什么信号。
+- **标的池分层**：`executable`、`watching`、`research_reference`、`removed` 四类状态，研究参照不能触发买入。
+- **账户可执行评分**：按现金、单票预算、A 股最小交易单位和止损目标判断能不能买。
+- **数据快照归一**：每只标的聚合行情、K 线、资金流、北向、新闻/公告、财务、Sentinel 证据和 Serenity 深挖。
+- **拒绝泛化观望**：不再用“数据不足，建议观望”兜底，必须写清缺哪类数据或哪个信号未触发。
+- **项目清理**：移除 knowX/教程/旧 v6 启动残留，修正 `AGENTS.md` 和 `SYSTEM.md` 项目身份。
 
-设计文档：[v7.4.0-dev 量化生命周期闭环底座](docs/superpowers/specs/2026-07-01-quant-lifecycle-v7-4-design.md)。
+执行文档：[v7.5 Profit Pipeline Refactor Worklist](docs/worklists/2026-07-01-v7-5-profit-pipeline-refactor-worklist.md)。
+审查报告：[v7.5 代码与文件审查报告](docs/reviews/2026-07-01-v7-5-code-file-review.md)。
 
 ### AI 辩论引擎（四角色并行）
 

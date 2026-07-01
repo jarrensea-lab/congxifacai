@@ -1,27 +1,49 @@
-# knowX — AI 学习助手
+# 恭喜发财 — Codex 项目入口
 
-> Claude Code 启动入口。打开此目录时，Claude Code 自动加载本文件和 SYSTEM.md。
+> 打开本目录时，先按本文和 `SYSTEM.md` 理解项目身份。这里不是 knowX，也不是通用学习助手。
 
-## 身份
+## 项目身份
 
-你是 knowX，拥有自己知识库，运行在claude code和飞书群 "内阁" 中的 AI 学习助手。
+恭喜发财是个人 A 股研究、策略、风控、报告和预警工作流。项目目标不是“多生成报告”，而是：
 
-## 运行方式
+1. 选出标的。
+2. 给出可执行策略。
+3. 用户按策略操作。
+4. 通过复盘和数据闭环提高盈利能力。
 
-1. Claude Code 打开本目录，自动加载 `SYSTEM.md` 作为系统提示词
-2. 另一个终端运行 `./scripts/polling-agent.sh start` 启动消息轮询
-3. 轮询到新消息时，Claude Code 读取消息内容，按 SYSTEM.md 规则处理
+## 当前主线
 
-## 日常操作
+- 小账户采用高收益试验模式，但必须有硬止损和账户可执行性校验。
+- Sentinel 负责高频新闻、主题热度、风险事件和归一证据包。
+- Serenity 负责产业链瓶颈深挖，是研究证据源，不直接发出买卖指令。
+- Target Pool 是生产标的生命周期池，必须区分：
+  - `executable`：今日可执行。
+  - `watching`：观察等待触发。
+  - `research_reference`：研究参照，不能直接交易。
+  - `removed`：剔除。
+- 主报告第一屏必须回答：
+  - 当前持仓怎么处理。
+  - 是否需要卖，卖多少，看什么信号。
+  - 是否需要买，买哪只，多少钱，什么价格，错了哪里止损。
+  - 今天不动，明天等什么信号。
 
-- 用户发 `knowX 今天学什么` → 查 `data/graph.db` → 生成课程卡片 → 飞书回复
-- 用户发 `knowX 简报` → 生成日报 → 飞书推送
-- 自动简报：每天早上 7:00 自动推送
+## 关键入口
 
-## 数据文件
+| 入口 | 用途 |
+|---|---|
+| `backend/app/main.py` | FastAPI + APScheduler 常驻入口 |
+| `scripts/daily_report.py` | 次日投资策略主报告 CLI 入口 |
+| `backend/app/services/quant_lifecycle.py` | 标的池/持仓预警生命周期 |
+| `backend/app/services/target_snapshot.py` | 单标的结构化数据快照 |
+| `backend/app/services/target_scoring.py` | 账户可执行评分 |
+| `backend/app/report_engine/` | 盘前/盘中/收盘报告引擎 |
+| `scripts/install-congxicai-v7-launchd.sh` | v7 launchd 常驻安装 |
 
-| 文件 | 说明 |
-|------|------|
-| `data/graph.db` | SQLite 知识图谱（nodes / edges / progress） |
-| `config.json` | 群ID、推送时间、新闻源 |
-| `SYSTEM.md` | 完整行为规则 |
+## 工作要求
+
+- 不把研究线索直接当买入建议。
+- 不用“数据不足，建议观望”做泛化兜底；必须写清缺哪类数据或哪个信号未触发。
+- 不推荐买不起最小交易单位的标的；买不起的一律归为研究参照。
+- 不暴露 API Key、Webhook、Token、Cookie。
+- 修改交易、预警、报告、账户逻辑后必须跑测试。
+- 真实报告验证尽量使用 `CONGXI_PORTFOLIO_PATH`、`CONGXI_CANDIDATE_POOL_PATH`、`CONGXI_REPORT_ARCHIVE_DIR` 临时副本，避免污染真实持仓。

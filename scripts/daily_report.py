@@ -55,7 +55,8 @@ def build_execution_guard(
     reserve_cash = round(total_assets * reserve_pct / 100, 2) if total_assets else 0
     single_limit = round(total_assets * single_pct / 100, 2) if total_assets else 0
     buy_budget = max(0.0, min(available_cash - reserve_cash, single_limit))
-    max_affordable_price = round(buy_budget / 100, 2)
+    max_affordable_main = round(buy_budget / 100, 2)
+    max_affordable_star = round(buy_budget / 200, 2)
 
     lines.append(f"- 策略模式：{profile['title']}；目标：{profile['target']}。")
     lines.append(
@@ -73,8 +74,9 @@ def build_execution_guard(
         if profile["mode"] == "capital_preservation":
             action_prefix = "原则上不新增买入；若新增"
         lines.append(
-            f"- 机器校验: {action_prefix}，必须买得起一手100股，当前单笔预算约 ¥{buy_budget:,.2f}，"
-            f"只考虑股价不高于 ¥{max_affordable_price:.2f} 的标的；其余只放观察名单。"
+            f"- 机器校验: {action_prefix}，必须买得起对应板块最小交易单位，当前单笔预算约 ¥{buy_budget:,.2f}，"
+            f"主板/创业板100股标的不高于 ¥{max_affordable_main:.2f}，科创板200股标的不高于 ¥{max_affordable_star:.2f}；"
+            "买不起的只作研究参照，不进入可执行策略池。"
         )
 
     for p in positions:
@@ -279,14 +281,20 @@ def build_data_source_audit(
     """Render data-source audit rows for the main report."""
     indices = market_data.get("indices", {}) if isinstance(market_data, dict) else {}
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
+    deepseek_status = "configured" if os.getenv("DEEPSEEK_API_KEY") else "missing"
+    qwen_status = "configured" if (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")) else "missing"
+    if deepseek_ok is not None:
+        deepseek_status = "ok" if deepseek_ok else "degraded"
+    if qwen_ok is not None:
+        qwen_status = "ok" if qwen_ok else "degraded"
     rows = [
         "| 数据源 | 状态 | 覆盖/说明 |",
         "|---|---|---|",
         f"| 行情数据 | {'ok' if indices else 'degraded'} | 指数 {len(indices)} 项 |",
         f"| Tushare 高频新闻 | {sentinel_status.get('status', 'missing')} | 新闻 {(sentinel_package or {}).get('event_count', 0)} 条 |",
         f"| Sentinel 研究包 | {'ok' if sentinel_package else 'missing'} | 研究输入，不产生交易指令 |",
-        f"| DeepSeek | {('unknown' if deepseek_ok is None else ('ok' if deepseek_ok else 'degraded'))} | 四角色/裁判主模型 |",
-        f"| Qwen | {('unknown' if qwen_ok is None else ('ok' if qwen_ok else 'degraded'))} | 研究员/备用裁判 |",
+        f"| DeepSeek | {deepseek_status} | 四角色/裁判主模型；状态表示配置存在，不等于本次探活成功 |",
+        f"| Qwen | {qwen_status} | 研究员/备用裁判；状态表示配置存在，不等于本次探活成功 |",
         f"| 本地持仓 | {'ok' if portfolio_loaded else 'missing'} | 账户约束优先生效 |",
         f"| SQLite | {'ok' if sqlite_ok else 'degraded'} | 辩论快照与持仓同步 |",
     ]
@@ -324,6 +332,184 @@ def build_next_day_execution_playbook(
     return lines
 
 
+def _money(value) -> str:
+    try:
+        return f"¥{float(value):,.2f}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _cell(value, limit: int = 120) -> str:
+    text = str(value or "—").replace("\n", " ").replace("|", "/").strip()
+    return text[:limit] if len(text) > limit else text
+
+
+def _target_label(item: dict) -> str:
+    code = str(item.get("code") or item.get("stock_code") or "").strip()
+    name = str(item.get("name") or item.get("stock_name") or code).strip()
+    return f"{name}({code})" if code else name
+
+
+def _target_scores(decision: dict) -> list[dict]:
+    scores = decision.get("target_scores") if isinstance(decision, dict) else None
+    return [item for item in scores if isinstance(item, dict)] if isinstance(scores, list) else []
+
+
+def _split_target_scores(decision: dict) -> dict[str, list[dict]]:
+    buckets = {
+        "executable": [],
+        "watching": [],
+        "research_reference": [],
+        "removed": [],
+    }
+    for item in _target_scores(decision):
+        action = str(item.get("action") or item.get("status") or "").lower()
+        block_reason = str(item.get("block_reason") or "")
+        if action in {"buy", "add", "actionable", "executable"}:
+            buckets["executable"].append(item)
+        elif action in {"research_only", "research_reference"} or block_reason == "lot_size_exceeded":
+            buckets["research_reference"].append(item)
+        elif action in {"remove", "removed", "sell", "avoid", "expired"}:
+            buckets["removed"].append(item)
+        else:
+            buckets["watching"].append(item)
+    return buckets
+
+
+def _render_target_bucket(title: str, rows: list[dict], empty_text: str) -> list[str]:
+    lines = [f"### {title}", ""]
+    if not rows:
+        return lines + [f"- {empty_text}", ""]
+
+    lines.extend([
+        "| 标的 | 动作 | 买入/触发价 | 仓位 | 止损 | 目标 | 依据 |",
+        "|---|---|---:|---:|---:|---:|---|",
+    ])
+    action_names = {
+        "buy": "买入/试仓",
+        "add": "加仓",
+        "watch": "继续观察",
+        "hold": "持有",
+        "research_only": "研究参照",
+        "research_reference": "研究参照",
+        "remove": "剔除",
+        "removed": "剔除",
+    }
+    for item in rows:
+        action = str(item.get("action") or item.get("status") or "watch").lower()
+        label = _target_label(item)
+        entry = _money(item.get("entry_price") or item.get("trigger_price"))
+        amount = _money(item.get("position_amount") or item.get("suggested_amount"))
+        stop_loss = _money(item.get("stop_loss"))
+        target_price = _money(item.get("target_price"))
+        reason = item.get("decision_reason") or item.get("reason") or item.get("block_reason")
+        if item.get("lot_value") and "买不起" not in str(reason):
+            reason = f"{reason or ''}；一手金额约{_money(item.get('lot_value'))}".strip("；")
+        lines.append(
+            f"| {_cell(label, 40)} | {action_names.get(action, _cell(action, 20))} | "
+            f"{entry} | {amount} | {stop_loss} | {target_price} | {_cell(reason, 160)} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _first_executable_target(decision: dict) -> dict | None:
+    for item in _split_target_scores(decision)["executable"]:
+        if str(item.get("action") or "").lower() in {"buy", "add", "actionable", "executable"}:
+            return item
+    return None
+
+
+def _holding_action_lines(positions: list[dict], total_assets: float) -> list[str]:
+    lines = []
+    if not positions:
+        return [
+            "- 当前持仓怎么处理：当前无持仓，无卖出动作。",
+            "- 是否需要卖：不需要，卖出监控保持空转。",
+        ]
+
+    lines.extend([
+        "| 持仓 | 股数 | 现价 | 市值 | 动作 | 触发信号 |",
+        "|---|---:|---:|---:|---|---|",
+    ])
+    for pos in positions:
+        shares = int(pos.get("shares", pos.get("position", 0)) or 0)
+        price = float(pos.get("current_price", 0) or 0)
+        value = float(pos.get("current_value", shares * price) or 0)
+        ratio = value / total_assets * 100 if total_assets else 0
+        label = _target_label(pos)
+        action = "持有监控"
+        signal = "跌破止损、触及目标价、或仓位超限时触发飞书预警"
+        lines.append(f"| {_cell(label, 40)} | {shares} | {_money(price)} | {_money(value)} | {action} | {_cell(signal)} |")
+        if ratio:
+            lines.append(f"<!-- {label} 当前约占总资产 {ratio:.1f}% -->")
+    return lines
+
+
+def _new_entry_action_lines(decision: dict) -> list[str]:
+    buy = _first_executable_target(decision)
+    if not buy:
+        return [
+            "- 是否需要买：今天不主动买入。",
+            "- 如果动，动哪只：暂无通过账户预算、最小交易单位、价格触发和风控过滤的标的。",
+            "- 多少钱：不下单。",
+            "- 什么价格买：等待标的池给出明确触发价。",
+            "- 错了哪里止损：无新仓，不设置新止损；已有持仓按持仓策略执行。",
+            "- 今天不动，明天等什么信号：等可执行标的同时满足放量、价格触发、风险未否决、且一手金额买得起。",
+        ]
+    label = _target_label(buy)
+    amount = _money(buy.get("position_amount") or buy.get("suggested_amount"))
+    entry = _money(buy.get("entry_price") or buy.get("trigger_price"))
+    stop_loss = _money(buy.get("stop_loss"))
+    target = _money(buy.get("target_price"))
+    reason = buy.get("decision_reason") or "通过结构化评分和账户可执行性校验。"
+    return [
+        "- 是否需要买：可以进入人工复核买入。",
+        f"- 如果动，动哪只：{label}。",
+        f"- 多少钱：建议金额 {amount}，不得超过报告给出的单票预算。",
+        f"- 什么价格买：{entry} 附近或触发价内，不追高。",
+        f"- 错了哪里止损：{stop_loss} 硬止损；目标位 {target}。",
+        f"- 依据：{reason}",
+        "- 今天不动，明天等什么信号：若未成交，继续等放量延续、回踩不破触发位、资金流未转弱。",
+    ]
+
+
+def _research_archive_lines(sentinel_package: dict | None, roles: dict, decision: dict) -> list[str]:
+    lines = [
+        "- 完整辩论记录：保留在本地辩论/报告归档，主报告只展示可执行结论。",
+        "- Sentinel 归一数据包：保留高频新闻、主题热度、风险事件和证据编号。",
+        "- Serenity 深挖：保留产业链瓶颈、候选锚点和验证问题；进入策略前必须再过账户与行情评分。",
+    ]
+    if sentinel_package:
+        lines.append(
+            f"- Sentinel 数据状态：{(sentinel_package.get('source_status') or {}).get('status', 'unknown')}；"
+            f"新闻 {sentinel_package.get('event_count', 0)} 条，关键新闻 {sentinel_package.get('key_event_count', 0)} 条。"
+        )
+        themes = sentinel_package.get("top_themes") or []
+        if themes:
+            lines.append("- 主题热度：" + "；".join(f"{item.get('name')}({item.get('count')})" for item in themes[:5]))
+        dives = sentinel_package.get("serenity_deep_dives") or []
+        if dives:
+            lines.append("- Serenity 深挖文件：")
+            for dive in dives[:5]:
+                path = str(dive.get("learning_report_path") or "")
+                basename = os.path.basename(path) if path else "未记录路径"
+                candidates = dive.get("top_candidates") or []
+                candidate_text = ""
+                if candidates:
+                    candidate_text = "；候选：" + "、".join(
+                        f"{item.get('name', item.get('code'))}({item.get('code')})"
+                        for item in candidates[:3]
+                    )
+                lines.append(f"  - {dive.get('theme', '未知主题')}: {basename}{candidate_text}")
+    researcher = roles.get("researcher") if isinstance(roles, dict) else None
+    if researcher:
+        lines.append("- Serenity研究员：本次已作为研究证据源参与，具体观点以归档全文为准。")
+    if isinstance(decision, dict) and decision.get("role_votes"):
+        lines.append("- 角色投票明细：见“数据覆盖与评分”中的 role_votes 审计表。")
+    return lines
+
+
 def build_next_day_strategy_sections(
     *,
     report_date: str,
@@ -343,8 +529,11 @@ def build_next_day_strategy_sections(
 ) -> list[str]:
     """Build the strategy-first opening sections of the main report."""
     profile = strategy_profile or get_strategy_profile()
+    total_assets = total_assets or available_cash
+    target_buckets = _split_target_scores(decision)
+    final_action = build_final_action_summary(positions, available_cash, total_assets, profile)
     lines = [
-        "## 一、明日总策略",
+        "## 一、今日账户操作策略",
         "",
         f"- 服务交易日：{target_date}",
         f"- 策略模式：{profile['title']}",
@@ -354,75 +543,95 @@ def build_next_day_strategy_sections(
         f"- 置信度：{confidence}/10",
         f"- 风险等级：R{risk_level}",
         f"- 总体倾向：{analysis_report.get('overall_bias', 'neutral')}",
-        "",
-        "## 二、账户约束",
-        "",
-        f"- 可用现金：¥{available_cash:,.2f}",
-        f"- 估算总资产：¥{total_assets:,.2f}",
-        f"- 当前持仓数：{len(positions)}",
-        "",
-        "## 三、数据源审计",
-        "",
+        f"- 当前资产：现金 {_money(available_cash)}；估算总资产 {_money(total_assets)}；持仓 {len(positions)} 只。",
+        f"- 当前持仓怎么处理：{final_action}",
     ]
-    lines.extend(build_data_source_audit(market_data=market_data, sentinel_package=sentinel_package))
+    lines.extend(_new_entry_action_lines(decision))
     lines.extend([
         "",
-        "## 四、市场状态",
+        "## 二、持仓处理策略",
         "",
     ])
-    indices = market_data.get("indices", {}) if isinstance(market_data, dict) else {}
-    if indices:
-        for key, value in indices.items():
-            lines.append(f"- {key}: {value}")
+    lines.extend(_holding_action_lines(positions, total_assets))
+    lines.extend([
+        "",
+        "## 三、新开仓策略",
+        "",
+    ])
+    lines.extend(_render_target_bucket(
+        "今日可执行标的",
+        target_buckets["executable"],
+        "暂无通过账户预算、最小交易单位、行情触发和风控过滤的标的。",
+    ))
+    lines.extend([
+        "## 四、标的池分层",
+        "",
+    ])
+    lines.extend(_render_target_bucket(
+        "观察等待触发标的",
+        target_buckets["watching"],
+        "暂无观察标的；若 Sentinel/Serenity 有新线索，先进入研究参照或观察等待触发。",
+    ))
+    lines.extend(_render_target_bucket(
+        "研究参照标的",
+        target_buckets["research_reference"],
+        "暂无研究参照标的；买不起一手或只具备产业链锚点价值的标的会放在这里。",
+    ))
+    lines.extend(_render_target_bucket(
+        "今日剔除标的",
+        target_buckets["removed"],
+        "暂无剔除标的。",
+    ))
+    lines.extend([
+        "",
+        "## 五、数据覆盖与评分",
+        "",
+        "- 数据源审计：",
+    ])
+    lines.extend(f"  {line}" for line in build_data_source_audit(market_data=market_data, sentinel_package=sentinel_package))
+    target_scores = _target_scores(decision)
+    if target_scores:
+        lines.extend([
+            "",
+            "### 标的评分",
+            "",
+            "| 标的 | 分数 | 动作 | 数据缺口 | 阻断原因 |",
+            "|---|---:|---|---|---|",
+        ])
+        for item in target_scores:
+            missing = item.get("missing_data") or []
+            missing_text = "、".join(str(value) for value in missing) if isinstance(missing, list) else str(missing)
+            lines.append(
+                f"| {_cell(_target_label(item), 40)} | {item.get('score', 0)} | "
+                f"{_cell(item.get('action') or item.get('status'), 30)} | {_cell(missing_text or '无', 80)} | "
+                f"{_cell(item.get('block_reason') or '无', 80)} |"
+            )
     else:
-        lines.append("- 行情数据缺失，市场状态降级。")
-    market_note = analysis_report.get("market_context", "")
-    if market_note:
-        lines.append(f"- 市场摘要：{market_note}")
+        lines.extend([
+            "",
+            "- 标的评分：本次未生成结构化 target_scores；不能把研究线索直接当成买入建议。",
+        ])
     lines.extend([
         "",
-        "## 五、Sentinel 研究输入",
-        "",
-    ])
-    lines.extend(build_sentinel_research_section(sentinel_package))
-    lines.extend([
-        "",
-        "## 六、四人辩论矩阵",
-        "",
-    ])
-    lines.extend(build_role_matrix(roles, decision))
-    lines.extend([
-        "",
-        "## 七、裁判裁决",
-        "",
-        f"- 采用/否决说明：{decision.get('reasoning', decision.get('debate_summary', '暂无结构化裁决说明。'))}",
-        "- 裁判输出必须继续接受账户约束、风控和一手金额校验。",
-        "- AI 原文若出现旧仓位或现金规则，以本报告“机器可执行校验”中的当前策略模式为准。",
+        "- 辩论权重说明：Serenity研究员提供产业链瓶颈证据，不直接下买卖指令；守夜人风控否决优先生效。",
         "",
     ])
     lines.extend(build_role_vote_audit(decision))
     lines.extend([
         "",
-        "## 八、明日执行剧本",
-        "",
-    ])
-    lines.extend(build_next_day_execution_playbook(
-        positions=positions,
-        available_cash=available_cash,
-        total_assets=total_assets,
-        decision=decision,
-        risk_level=risk_level,
-        strategy_profile=profile,
-    ))
-    lines.extend([
-        "",
-        "## 九、后续验证",
+        "## 六、复盘与自迭代",
         "",
         f"- 本报告生成日：{report_date}",
-        "- 四角色和裁判判断进入 Sentinel 预测留痕后，按 1/3/5/20 日回看。",
-        "- 样本不足时只显示观察，不自动调整权重或 prompt。",
+        f"- 裁判采用/否决说明：{decision.get('reasoning', decision.get('debate_summary', '暂无结构化裁决说明。'))}",
+        "- 每个进入可执行池的标的必须留存触发价、止损、目标位、账户预算和证据编号。",
+        "- 每个观察标的按 1/3/5/20 日回看：符合预期进可执行池，不符合预期剔除。",
+        "- 每个研究参照标的只验证方向和产业链假设，买得起且行情触发后才允许迁移到观察/可执行池。",
+        "",
+        "## 七、研究归档链接",
         "",
     ])
+    lines.extend(_research_archive_lines(sentinel_package, roles, decision))
+    lines.append("")
     return lines
 
 
@@ -500,9 +709,160 @@ async def push_daily_report_to_feishu(title: str, md_content: str) -> dict:
         return {"feishu_webhook": False, "error": f"飞书推送异常: {e}"}
 
 
+async def build_target_scores_for_report(
+    *,
+    available_cash: float,
+    total_assets: float,
+    limit: int | None = None,
+) -> list[dict]:
+    """Score current target-pool items with normalized data snapshots."""
+    from app.ai.serenity_financial_evidence import fetch_financial_evidence
+    from app.data_sources.akshare_market import AKShareMarketClient
+    from app.data_sources.akshare_news import AKShareNewsClient
+    from app.data_sources.tencent_client import TencentDataSource
+    from app.services.quant_lifecycle import TargetPoolStore
+    from app.services.target_scoring import score_target
+    from app.services.target_snapshot import build_target_snapshot
+
+    class CachedMarketSource:
+        def __init__(self):
+            self.client = AKShareMarketClient()
+            self._fund_flows = None
+            self._northbound = None
+
+        async def fetch_fund_flow_individual(self):
+            if self._fund_flows is None:
+                self._fund_flows = await self.client.fetch_fund_flow_individual()
+            return self._fund_flows
+
+        async def fetch_hsgt_flow(self):
+            if self._northbound is None:
+                self._northbound = await self.client.fetch_hsgt_flow()
+            return self._northbound
+
+    financial_cache: dict[str, dict] = {}
+
+    async def cached_financial_fetcher(codes: list[str]) -> dict[str, dict]:
+        missing = [code for code in codes if code not in financial_cache]
+        if missing:
+            financial_cache.update(await fetch_financial_evidence(missing))
+        return {code: financial_cache.get(code, {}) for code in codes}
+
+    store = TargetPoolStore()
+    payload = store.load()
+    items = [
+        item for item in payload.get("items", {}).values()
+        if isinstance(item, dict) and item.get("status") not in {"removed", "expired"}
+    ]
+    max_items = limit or int(os.getenv("CONGXI_TARGET_SCORE_LIMIT", "12"))
+    items = items[:max_items]
+    if not items:
+        return []
+
+    quote_source = TencentDataSource()
+    market_source = CachedMarketSource()
+    news_source = AKShareNewsClient()
+    scores: list[dict] = []
+    for item in items:
+        code = str(item.get("code") or "").strip()
+        if not code:
+            continue
+        snapshot = await build_target_snapshot(
+            code,
+            name=item.get("name", code),
+            quote_source=quote_source,
+            market_source=market_source,
+            news_source=news_source,
+            financial_fetcher=cached_financial_fetcher,
+            sentinel=item.get("sentinel") or {},
+            serenity=item.get("serenity") or {},
+        )
+        score = score_target(snapshot, available_cash=available_cash, total_assets=total_assets)
+        score["source_status"] = {
+            key: (snapshot.get(key) or {}).get("status")
+            for key in ("quote", "kline", "fund_flow", "northbound", "news", "financial", "sentinel", "serenity")
+        }
+        quote = snapshot.get("quote") if isinstance(snapshot.get("quote"), dict) else {}
+        action = str(score.get("action") or "")
+        next_status = {
+            "buy": "executable",
+            "add": "executable",
+            "research_only": "research_reference",
+            "remove": "removed",
+        }.get(action, "watching")
+        store.upsert_target(
+            code=code,
+            name=score.get("name") or item.get("name", code),
+            status=next_status,
+            source="target_scoring",
+            evidence=item.get("evidence") or {},
+            evidence_ids=item.get("evidence_ids") or [],
+            sentinel=item.get("sentinel") or {},
+            serenity=item.get("serenity") or {},
+            current_price=quote.get("price"),
+            available_cash=available_cash,
+            total_assets=total_assets,
+        )
+        scores.append(score)
+    return sorted(scores, key=lambda row: float(row.get("score", 0) or 0), reverse=True)
+
+
+async def finalize_daily_report(
+    *,
+    lines: list[str],
+    today: str,
+    time_str: str,
+    portfolio: dict,
+    portfolio_path: str,
+) -> str:
+    """Persist the markdown report, update portfolio metadata, and push Feishu summary."""
+    lines.append("---")
+    lines.append(f"*报告生成时间: {today} {time_str}*")
+    lines.append("*🤖 恭喜发财 — AI 智能分析 · 仅供参考，不构成投资建议*")
+
+    md_content = '\n'.join(lines)
+    title = "次日投资策略主报告"
+    delivery = save_report_to_obsidian(
+        md_content,
+        report_date=today,
+        archive_dir=ARCHIVE_DIR,
+        title=title,
+        push_status={"feishu_webhook": False, "error": "pending"},
+    )
+    filepath = delivery["report_path"]
+    print(f"✅ 报告已保存: {filepath}", flush=True)
+    print(f"   📄 共 {len(lines)} 行 / {os.path.getsize(filepath)} 字节", flush=True)
+
+    portfolio["updated_at"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    with open(portfolio_path, 'w', encoding='utf-8') as f:
+        json.dump(portfolio, f, ensure_ascii=False, indent=2)
+    print("✅ 持仓数据已更新", flush=True)
+
+    print("📤 推送飞书...", flush=True)
+    push_status = await push_daily_report_to_feishu(
+        f"📊 恭喜发财 — {today} 次日投资策略主报告",
+        md_content,
+    )
+    if push_status.get("feishu_webhook"):
+        print("   ✅ Webhook 卡片推送成功", flush=True)
+    else:
+        print(f"   ⚠️ {push_status.get('error', 'Webhook 推送失败')}", flush=True)
+
+    save_report_to_obsidian(
+        md_content,
+        report_date=today,
+        archive_dir=ARCHIVE_DIR,
+        title=title,
+        push_status=push_status,
+    )
+
+    print("=" * 60, flush=True)
+    print("📋 每日综合报告完成", flush=True)
+    print("=" * 60, flush=True)
+    return filepath
+
+
 async def main():
-    import httpx
-    from app.config import settings
     from app.data_sources.tencent_client import TencentDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
@@ -518,7 +878,10 @@ async def main():
     print("=" * 60, flush=True)
 
     # ===== 1. 读取持仓 =====
-    portfolio_path = os.path.join(PROJECT_ROOT, 'data', 'user_portfolio.json')
+    portfolio_path = os.environ.get(
+        "CONGXI_PORTFOLIO_PATH",
+        os.path.join(PROJECT_ROOT, 'data', 'user_portfolio.json'),
+    )
     if not os.path.exists(portfolio_path):
         print("❌ 未找到持仓数据", flush=True)
         return
@@ -631,6 +994,20 @@ async def main():
         confidence = "N/A"
         roles = {}
 
+    print("🎯 生成标的池评分...", flush=True)
+    try:
+        target_scores = await build_target_scores_for_report(
+            available_cash=available_cash,
+            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+        )
+        if target_scores:
+            decision["target_scores"] = target_scores
+            print(f"   标的评分完成: {len(target_scores)} 个标的", flush=True)
+        else:
+            print("   标的池为空或无可评分标的", flush=True)
+    except Exception as e:
+        print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
+
     # ===== 4. 构建综合Markdown报告 =====
     lines = []
     try:
@@ -663,6 +1040,15 @@ async def main():
         sentinel_package=sentinel_package,
         strategy_profile=strategy_profile,
     ))
+
+    if os.getenv("CONGXI_REPORT_LEGACY_SECTIONS", "0") != "1":
+        return await finalize_daily_report(
+            lines=lines,
+            today=today,
+            time_str=time_str,
+            portfolio=portfolio,
+            portfolio_path=portfolio_path,
+        )
 
     # ── 一、市场概况 ──
     idx = market_data.get("indices", {})
@@ -943,55 +1329,13 @@ async def main():
         lines.append(f"{knowledge}")
         lines.append("")
 
-    lines.append("---")
-    lines.append(f"*报告生成时间: {today} {time_str}*")
-    lines.append("*🤖 恭喜发财 — AI 智能分析 · 仅供参考，不构成投资建议*")
-
-    md_content = '\n'.join(lines)
-
-    # ===== 写入 Obsidian 报告目录 =====
-    title = "次日投资策略主报告"
-    delivery = save_report_to_obsidian(
-        md_content,
-        report_date=today,
-        archive_dir=ARCHIVE_DIR,
-        title=title,
-        push_status={"feishu_webhook": False, "error": "pending"},
+    return await finalize_daily_report(
+        lines=lines,
+        today=today,
+        time_str=time_str,
+        portfolio=portfolio,
+        portfolio_path=portfolio_path,
     )
-    filepath = delivery["report_path"]
-    print(f"✅ 报告已保存: {filepath}", flush=True)
-    print(f"   📄 共 {len(lines)} 行 / {os.path.getsize(filepath)} 字节", flush=True)
-
-    # ===== 更新持仓 =====
-    portfolio["updated_at"] = now.strftime('%Y-%m-%d %H:%M:%S')
-    with open(portfolio_path, 'w', encoding='utf-8') as f:
-        json.dump(portfolio, f, ensure_ascii=False, indent=2)
-    print("✅ 持仓数据已更新", flush=True)
-
-    # ===== 推送飞书 =====
-    print("📤 推送飞书...", flush=True)
-    push_status = await push_daily_report_to_feishu(
-        f"📊 恭喜发财 — {today} 次日投资策略主报告",
-        md_content,
-    )
-    if push_status.get("feishu_webhook"):
-        print("   ✅ Webhook 卡片推送成功", flush=True)
-    else:
-        print(f"   ⚠️ {push_status.get('error', 'Webhook 推送失败')}", flush=True)
-
-    save_report_to_obsidian(
-        md_content,
-        report_date=today,
-        archive_dir=ARCHIVE_DIR,
-        title=title,
-        push_status=push_status,
-    )
-
-    print("=" * 60, flush=True)
-    print("📋 每日综合报告完成", flush=True)
-    print("=" * 60, flush=True)
-
-    return filepath
 
 
 if __name__ == "__main__":
