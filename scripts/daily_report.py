@@ -355,6 +355,15 @@ def _target_scores(decision: dict) -> list[dict]:
     return [item for item in scores if isinstance(item, dict)] if isinstance(scores, list) else []
 
 
+def _outside_pool_scan(decision: dict) -> list[dict]:
+    rows = decision.get("outside_pool_scan") if isinstance(decision, dict) else None
+    return [item for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
+
+
+def _round_price(value: float) -> float:
+    return round(max(0.0, float(value or 0)), 2)
+
+
 def _split_target_scores(decision: dict) -> dict[str, list[dict]]:
     buckets = {
         "executable": [],
@@ -449,6 +458,39 @@ def _holding_action_lines(positions: list[dict], total_assets: float) -> list[st
 def _new_entry_action_lines(decision: dict) -> list[str]:
     buy = _first_executable_target(decision)
     if not buy:
+        outside_scan = _outside_pool_scan(decision)
+        actionable_scan = [
+            item for item in outside_scan
+            if item.get("affordable") is not False and (item.get("suggested_amount") or item.get("lot_value"))
+        ]
+        if actionable_scan:
+            top = actionable_scan[0]
+            label = _target_label(top)
+            amount = top.get("suggested_amount") or top.get("lot_value")
+            trigger = top.get("trigger_price") or top.get("current_price") or top.get("max_entry_price")
+            stop_loss = top.get("stop_loss")
+            target = top.get("target_price")
+            budget = top.get("executable_budget") or top.get("lot_value")
+            reason = top.get("watch_reason") or "等实时价格、量能、成交额、资金流同时触发。"
+            return [
+                "- 是否需要买：今天不主动买入；明天只做条件触发，不预挂单。",
+                f"- 如果动，动哪只：优先复核 {label}。",
+                f"- 多少钱：一手试错约{_money(amount)}，不得超过单票预算{_money(budget)}。",
+                f"- 什么价格买：{_money(trigger)}以内观察，资金流未转正或高开追涨不买。",
+                f"- 错了哪里止损：跌破{_money(stop_loss)}止损；第一目标看{_money(target)}。",
+                f"- 今天不动，明天等什么信号：{reason}",
+            ]
+        if outside_scan:
+            top = outside_scan[0]
+            reason = top.get("watch_reason") or "等回落到最高观察价以内，并补齐实时量能和资金流。"
+            return [
+                "- 是否需要买：今天不主动买入。",
+                f"- 如果动，动哪只：暂无可执行买入；池外先观察 {_target_label(top)}。",
+                "- 多少钱：不下单。",
+                f"- 什么价格买：等回落到{_money(top.get('max_entry_price') or top.get('trigger_price'))}以内并重新评分。",
+                "- 错了哪里止损：无新仓，不设置新止损；已有持仓按持仓策略执行。",
+                f"- 今天不动，明天等什么信号：{reason}",
+            ]
         return [
             "- 是否需要买：今天不主动买入。",
             "- 如果动，动哪只：暂无通过账户预算、最小交易单位、价格触发和风控过滤的标的。",
@@ -510,6 +552,26 @@ def _research_archive_lines(sentinel_package: dict | None, roles: dict, decision
     return lines
 
 
+def _render_outside_pool_scan(rows: list[dict]) -> list[str]:
+    lines = ["### 池外小账户补扫", ""]
+    if not rows:
+        return lines + ["- 本次未生成池外补扫候选；需要扩展可执行候选源。", ""]
+    lines.extend([
+        "| 标的 | 现价 | 一手金额 | 最高观察价 | 触发/观察价 | 止损 | 目标 | 来源 | 明日等待信号 |",
+        "|---|---:|---:|---:|---:|---:|---:|---|---|",
+    ])
+    for item in rows[:8]:
+        lines.append(
+            f"| {_cell(_target_label(item), 40)} | {_money(item.get('current_price'))} | "
+            f"{_money(item.get('lot_value'))} | {_money(item.get('max_entry_price'))} | "
+            f"{_money(item.get('trigger_price') or item.get('max_entry_price'))} | "
+            f"{_money(item.get('stop_loss'))} | {_money(item.get('target_price'))} | "
+            f"{_cell(item.get('source'), 40)} | {_cell(item.get('watch_reason'), 160)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def build_next_day_strategy_sections(
     *,
     report_date: str,
@@ -563,6 +625,7 @@ def build_next_day_strategy_sections(
         target_buckets["executable"],
         "暂无通过账户预算、最小交易单位、行情触发和风控过滤的标的。",
     ))
+    lines.extend(_render_outside_pool_scan(_outside_pool_scan(decision)))
     lines.extend([
         "## 四、标的池分层",
         "",
@@ -807,6 +870,84 @@ async def build_target_scores_for_report(
     return sorted(scores, key=lambda row: float(row.get("score", 0) or 0), reverse=True)
 
 
+async def build_outside_pool_scan_for_report(
+    *,
+    available_cash: float,
+    total_assets: float,
+    existing_codes: set[str] | None = None,
+) -> list[dict]:
+    """Build a small-account outside-pool scan with live quote context."""
+    from app.data_sources.tencent_client import TencentDataSource
+    from app.services.small_account_discovery import build_small_account_seed_candidates
+
+    seeds = build_small_account_seed_candidates(
+        available_cash=available_cash,
+        total_assets=total_assets,
+        existing_codes=existing_codes or set(),
+    )
+    if not seeds:
+        return []
+    quote_source = TencentDataSource()
+    quotes = await quote_source.fetch_batch([item["code"] for item in seeds])
+    rows: list[dict] = []
+    for seed in seeds:
+        quote = quotes.get(seed["code"]) or {}
+        price = float(quote.get("price") or 0)
+        lot_value = round(price * int(seed.get("lot_size") or 100), 2) if price > 0 else 0
+        affordable = bool(price > 0 and price <= float(seed.get("max_entry_price") or 0))
+        change_pct = float(quote.get("change_pct") or 0)
+        vol_ratio = float(quote.get("vol_ratio") or 0)
+        amount_wan = float(quote.get("amount_wan") or 0)
+        volume_clue = bool(vol_ratio >= 2 and amount_wan >= 10000)
+        chasing_risk = bool(change_pct >= 9)
+        actionability_rank = 0
+        if affordable and volume_clue and not chasing_risk:
+            actionability_rank = 3
+        elif affordable and not chasing_risk:
+            actionability_rank = 2
+        elif affordable:
+            actionability_rank = 1
+        reason = seed["watch_reason"]
+        if price <= 0:
+            reason = "池外小账户补扫；实时价格缺失，先补 quote。"
+        elif not affordable:
+            reason = f"池外小账户补扫；现价高于最高观察价，等回落到¥{seed['max_entry_price']:.2f}以内。"
+        elif chasing_risk:
+            reason = "池外小账户补扫；接近追高区，等回踩确认，不追涨。"
+        elif volume_clue:
+            reason = "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。"
+        trigger_price = _round_price(price if price > 0 and affordable else seed.get("max_entry_price") or 0)
+        stop_loss = _round_price(trigger_price * 0.95) if trigger_price > 0 and affordable else None
+        target_price = _round_price(trigger_price * 1.12) if trigger_price > 0 and affordable else None
+        rows.append({
+            **seed,
+            "name": quote.get("name") or seed["name"],
+            "current_price": price,
+            "lot_value": lot_value,
+            "affordable": affordable,
+            "change_pct": change_pct,
+            "vol_ratio": vol_ratio,
+            "amount_wan": amount_wan,
+            "volume_clue": volume_clue,
+            "chasing_risk": chasing_risk,
+            "actionability_rank": actionability_rank,
+            "trigger_price": trigger_price,
+            "stop_loss": stop_loss,
+            "target_price": target_price,
+            "suggested_amount": lot_value if affordable else 0,
+            "executable_budget": round(min(available_cash, total_assets * 0.35 if total_assets else available_cash), 2),
+            "watch_reason": reason,
+        })
+    return sorted(
+        rows,
+        key=lambda item: (
+            -int(item.get("actionability_rank") or 0),
+            not item.get("affordable"),
+            -float(item.get("amount_wan") or 0),
+        ),
+    )
+
+
 async def finalize_daily_report(
     *,
     lines: list[str],
@@ -1007,6 +1148,23 @@ async def main():
             print("   标的池为空或无可评分标的", flush=True)
     except Exception as e:
         print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
+
+    print("🔎 生成池外小账户补扫...", flush=True)
+    try:
+        existing_codes = {
+            str(item.get("code") or "").strip()
+            for item in decision.get("target_scores", [])
+            if isinstance(item, dict)
+        }
+        outside_scan = await build_outside_pool_scan_for_report(
+            available_cash=available_cash,
+            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+            existing_codes=existing_codes,
+        )
+        decision["outside_pool_scan"] = outside_scan
+        print(f"   池外补扫完成: {len(outside_scan)} 个候选", flush=True)
+    except Exception as e:
+        print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
 
     # ===== 4. 构建综合Markdown报告 =====
     lines = []

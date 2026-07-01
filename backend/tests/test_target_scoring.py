@@ -69,3 +69,7 @@ def test_score_target_names_missing_data_instead_of_generic_insufficient():
     assert result["block_reason"] == "missing_required_data"
     assert result["missing_data"] == ["fund_flow", "financial"]
     assert "数据不足" not in result["decision_reason"]
+    assert result["entry_price"] == 3.2
+    assert result["stop_loss"] == 3.04
+    assert result["target_price"] == 3.58
+    assert "补齐" in result["next_signal"]

@@ -1,6 +1,8 @@
 """Daily report delivery and Obsidian archive regression tests."""
 import json
 
+import pytest
+
 
 def test_save_report_to_obsidian_writes_report_index_and_status(tmp_path):
     from scripts.daily_report import save_report_to_obsidian
@@ -230,6 +232,149 @@ def test_build_next_day_strategy_sections_excludes_legacy_report_order():
     assert "## 📈 一、市场概况" not in sections
     assert "## 🧠 三、AI 多维度分析" not in sections
     assert sections.index("## 一、今日账户操作策略") < sections.index("## 三、新开仓策略")
+
+
+def test_build_next_day_strategy_sections_renders_outside_pool_scan_when_no_buy():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-01",
+        target_date="2026-07-02",
+        risk_level=3,
+        final_view="等待触发",
+        confidence=7,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "target_scores": [
+                {
+                    "code": "688008",
+                    "name": "澜起科技",
+                    "action": "research_only",
+                    "score": 55,
+                    "lot_value": 63178,
+                    "block_reason": "lot_size_exceeded",
+                    "decision_reason": "买不起最小交易单位",
+                }
+            ],
+            "outside_pool_scan": [
+                {
+                    "code": "000629",
+                    "name": "钒钛股份",
+                    "source": "small_account_discovery",
+                    "current_price": 3.55,
+                    "lot_value": 355.0,
+                    "max_entry_price": 21.29,
+                    "trigger_price": 3.55,
+                    "stop_loss": 3.37,
+                    "target_price": 3.98,
+                    "suggested_amount": 355.0,
+                    "watch_reason": "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。",
+                }
+            ],
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "### 池外小账户补扫" in sections
+    assert "钒钛股份(000629)" in sections
+    assert "最高观察价" in sections
+    assert "触发/观察价" in sections
+    assert "¥3.37" in sections
+    assert "¥3.98" in sections
+    assert "一手试错约¥355.00" in sections
+    assert "今天不动，明天等什么信号" in sections
+    assert "池外小账户补扫" in sections
+
+
+def test_build_next_day_strategy_sections_does_not_try_unaffordable_outside_scan():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-01",
+        target_date="2026-07-02",
+        risk_level=4,
+        final_view="等待回落",
+        confidence=6,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "target_scores": [],
+            "outside_pool_scan": [
+                {
+                    "code": "002261",
+                    "name": "拓维信息",
+                    "source": "small_account_discovery",
+                    "current_price": 28.47,
+                    "lot_value": 2847.0,
+                    "max_entry_price": 21.29,
+                    "trigger_price": 21.29,
+                    "affordable": False,
+                    "watch_reason": "池外小账户补扫；现价高于最高观察价，等回落到¥21.29以内。",
+                }
+            ],
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "不下单" in sections
+    assert "拓维信息(002261)" in sections
+    assert "一手试错约¥2,847.00" not in sections
+    assert "等回落到¥21.29以内" in sections
+
+
+@pytest.mark.asyncio
+async def test_build_outside_pool_scan_for_report_adds_live_quote_context(monkeypatch):
+    import app.data_sources.tencent_client as tencent_module
+    from scripts.daily_report import build_outside_pool_scan_for_report
+
+    class FakeTencent:
+        async def fetch_batch(self, codes):
+            return {
+                "000629": {
+                    "code": "000629",
+                    "name": "钒钛股份",
+                    "price": 22.5,
+                    "change_pct": 1.2,
+                    "vol_ratio": 1.3,
+                    "amount_wan": 8000,
+                },
+                "000100": {
+                    "code": "000100",
+                    "name": "TCL科技",
+                    "price": 4.8,
+                    "change_pct": 3.5,
+                    "vol_ratio": 2.4,
+                    "amount_wan": 25000,
+                },
+            }
+
+    monkeypatch.setattr(tencent_module, "TencentDataSource", FakeTencent)
+
+    rows = await build_outside_pool_scan_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        existing_codes={"688008"},
+    )
+
+    tcl = next(item for item in rows if item["code"] == "000100")
+    assert rows[0]["code"] == "000100"
+    assert tcl["current_price"] == 4.8
+    assert tcl["lot_value"] == 480.0
+    assert tcl["affordable"] is True
+    assert tcl["trigger_price"] == 4.8
+    assert tcl["stop_loss"] == 4.56
+    assert tcl["target_price"] == 5.38
+    assert tcl["suggested_amount"] == 480.0
+    assert "量能线索" in tcl["watch_reason"]
 
 
 def test_build_feishu_summary_keeps_full_report_local_hint():

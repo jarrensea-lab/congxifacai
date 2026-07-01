@@ -66,6 +66,8 @@ def score_target(
     lot_value = round(price * lot_size, 2) if price > 0 else 0.0
     budget = _buy_budget(available_cash, total_assets)
     missing_data = [key for key in REQUIRED_SOURCES if not _status_ok(snapshot.get(key))]
+    stop_loss = round(price * 0.95, 2) if price > 0 else 0
+    target_price = round(price * 1.12, 2) if price > 0 else 0
 
     base = {
         "code": code,
@@ -76,21 +78,28 @@ def score_target(
         "decision_reason": "",
         "missing_data": missing_data,
         "entry_price": round(price, 2) if price else 0,
-        "stop_loss": 0,
-        "target_price": 0,
+        "stop_loss": stop_loss,
+        "target_price": target_price,
         "position_amount": 0,
         "lot_size": lot_size,
         "lot_value": lot_value,
         "executable_budget": budget,
+        "next_signal": "",
     }
 
     if missing_data:
+        next_signal = "补齐" + "、".join(missing_data)
+        if price > 0:
+            next_signal += f"，且价格维持在¥{price:.2f}上方、量比>=2、成交额>=1亿元、资金流转正。"
+        else:
+            next_signal += "，并恢复实时价格后再给触发价。"
         return {
             **base,
             "score": 40,
             "action": "watch",
             "block_reason": "missing_required_data",
             "decision_reason": "缺少结构化数据项：" + "、".join(missing_data) + "；先补数据，不使用泛化观望兜底。",
+            "next_signal": next_signal,
         }
 
     if price <= 0:
@@ -117,8 +126,6 @@ def score_target(
     change_pct = _to_float(quote.get("change_pct"))
     vol_ratio = _to_float(quote.get("vol_ratio"))
     amount_wan = _to_float(quote.get("amount_wan"))
-    stop_loss = round(price * 0.95, 2)
-    target_price = round(price * 1.12, 2)
     position_amount = round(min(budget, lot_value), 2)
 
     if change_pct >= 9:
@@ -130,6 +137,7 @@ def score_target(
             "stop_loss": stop_loss,
             "target_price": target_price,
             "decision_reason": f"{name}({code}) 涨幅接近追高区，等待回踩确认。",
+            "next_signal": f"等待回踩至¥{price * 0.97:.2f}附近且不破¥{stop_loss:.2f}，再重新评分。",
         }
 
     if total_score >= 70 and change_pct >= 3 and vol_ratio >= 2 and amount_wan >= 10000:
@@ -142,6 +150,7 @@ def score_target(
             "target_price": target_price,
             "position_amount": position_amount,
             "decision_reason": f"{name}({code}) 放量突破且账户买得起，可小仓试错，硬止损¥{stop_loss:.2f}。",
+            "next_signal": f"若明日回踩不破¥{stop_loss:.2f}且量比>=2，可按¥{price:.2f}附近人工复核。",
         }
 
     return {
@@ -152,4 +161,5 @@ def score_target(
         "stop_loss": stop_loss,
         "target_price": target_price,
         "decision_reason": f"{name}({code}) 数据已覆盖，但趋势/量能/资金未同时触发买入阈值，等待放量突破或回踩确认。",
+        "next_signal": f"明日等价格站稳¥{price:.2f}、量比>=2、成交额>=1亿元且资金流不转弱。",
     }

@@ -7,15 +7,18 @@
 - ✅ **标的池分层**：生产 Target Pool 明确区分 `executable`、`watching`、`research_reference`、`removed`，研究参照不再触发买入扫描。
 - ✅ **Sentinel/Serenity 接入策略管线**：Sentinel/Serenity 研究候选进入 Target Pool，但默认作为研究参照或观察对象，必须再经过数据快照、账户可执行性和评分。
 - ✅ **拒绝泛化观望**：报告和评分不再用“数据不足，建议观望”兜底，改为明确缺 `quote/kline/fund_flow/financial` 或说明一手金额超限、追高、量能未触发等具体原因。
+- ✅ **次日条件策略补强**：当标的池没有可执行买入时，主报告自动输出池外小账户补扫首选，包含“动哪只、多少钱、什么价格、哪里止损、第一目标、明天等什么信号”。
 
 ### 数据与评分
 - ✅ 新增 `backend/app/services/target_snapshot.py`：聚合实时行情、K 线、个股资金流、北向资金、新闻/公告、财务指标、Sentinel 证据和 Serenity 深挖。
 - ✅ 新增 `backend/app/services/target_scoring.py`：输出买入/观察/研究参照、分数、入场价、止损、目标位、仓位金额和阻断原因。
+- ✅ 新增 `backend/app/services/small_account_discovery.py`：维护低价高流动性种子池，按账户现金计算可买一手的最高观察价。
 - ✅ 新增最小交易单位规则：主板/创业板默认 100 股，科创板 `688/689` 默认 200 股。
 - ✅ 日报生成时会从 Target Pool 拉取标的评分，并把评分结果回写标的池状态。
 
 ### 报告与运行
 - ✅ `scripts/daily_report.py` 默认输出 v7.5 七段结构；旧长报告仅通过 `CONGXI_REPORT_LEGACY_SECTIONS=1` 保留。
+- ✅ `scripts/daily_report.py` 新增池外小账户补扫表，按量能线索、是否买得起、追高风险排序，并展示现价、一手金额、最高观察价、触发/观察价、止损和目标。
 - ✅ `CONGXI_PORTFOLIO_PATH` 支持临时持仓副本，便于真实报告验证时不污染生产持仓文件。
 - ✅ 数据源审计中 DeepSeek/Qwen 状态从 `unknown` 改为 `configured/missing/ok/degraded`。
 - ✅ FastAPI/health/调度日志版本统一到 `v7.5.0-dev`。
@@ -28,8 +31,8 @@
 - ✅ 新增审查报告：`docs/reviews/2026-07-01-v7-5-code-file-review.md`。
 
 ### 验证
-- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests -q`：`206 passed`。
-- 使用临时持仓/标的池/报告目录真实运行 `scripts/daily_report.py`：成功生成 120 行 v7.5 主报告。
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests -q`：`210 passed`。
+- 使用临时持仓/标的池/报告目录真实运行 `scripts/daily_report.py`：成功生成 133 行 v7.5 主报告，顶部次日策略输出 000629 条件观察、¥355 一手试错、¥3.37 止损、¥3.98 目标。
 
 ## v7.4.0-dev (2026-07-01) — 量化生命周期闭环底座
 
