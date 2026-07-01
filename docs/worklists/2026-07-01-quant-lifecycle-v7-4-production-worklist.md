@@ -4,6 +4,7 @@
 分支：`codex/quant-lifecycle-v7-4`
 方案文件：`docs/superpowers/plans/2026-07-01-quant-lifecycle-v7-4-production-plan.md`
 盈利主线决策：`docs/architecture/2026-07-01-profit-centered-pipeline-decision.md`
+细化执行清单：`docs/worklists/2026-07-01-profit-centered-evidence-target-pool-worklist.md`
 
 ## 任务目标
 
@@ -12,6 +13,8 @@
 当前阶段不做分钟级和秒级能力，先保证架构、数据、策略、监控、预警能稳定跑通。
 
 所有工作按盈利目标倒推：选出标的，给出策略，用户按策略操作，最终通过复盘提高盈利概率。不能影响候选池、策略、预警或复盘权重的模块，不进入生产主线。
+
+术语锁定：标的池是总生命周期池；候选池只是标的池中的状态视图。Sentinel 是证据中枢，不是决策者；Serenity 是产业链评分因子，不直接给买点。
 
 ## Worklist
 
