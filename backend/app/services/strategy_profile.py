@@ -23,8 +23,8 @@ STRATEGY_PROFILES: dict[str, dict[str, Any]] = {
         "target": "30天内争取 +10%",
         "max_drawdown_pct": 10,
         "cash_reserve_pct": 10,
-        "single_position_limit_pct": 35,
-        "standard_single_position_limit_pct": 35,
+        "single_position_limit_pct": 50,
+        "standard_single_position_limit_pct": 50,
         "stop_loss_pct": 5,
         "allow_high_volatility": True,
     },
@@ -32,6 +32,6 @@ STRATEGY_PROFILES: dict[str, dict[str, Any]] = {
 
 
 def get_strategy_profile(mode: str | None = None) -> dict[str, Any]:
-    """Return the active temporary strategy profile without mutating the old iron rules."""
-    selected = (mode or os.getenv("CONGXI_STRATEGY_MODE") or "capital_preservation").strip()
+    """Return the active report-time strategy profile without mutating the old iron rules."""
+    selected = (mode or os.getenv("CONGXI_STRATEGY_MODE") or "growth_sprint").strip()
     return dict(STRATEGY_PROFILES.get(selected, STRATEGY_PROFILES["capital_preservation"]))

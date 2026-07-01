@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
         logger.info("飞书 Webhook 已配置")
 
     # ============================================================
-    # V7.4-dev 定时任务注册（量化生命周期 feature 分支）
+    # V7.5-dev 定时任务注册（盈利策略管线 feature 分支）
     # ============================================================
     scheduler.add_job(
         _run_premarket_with_status,
@@ -152,7 +152,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"已清理旧调度任务: {stale_job_id}")
         except Exception:
             pass
-    logger.info("旺财V7.4-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中/收盘 + Bot轮询)")
+    logger.info("旺财V7.5-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中/收盘 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -168,7 +168,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
-    version="7.4.0-dev",
+    version="7.5.0-dev",
     lifespan=lifespan,
 )
 
@@ -343,7 +343,7 @@ async def _scan_candidate_pool_and_push(stage: str, available_cash: float) -> di
 
     alerts = result.get("alerts", [])
     if alerts:
-        title = f"旺财V7.4 候选池提醒 - {stage}"
+        title = f"旺财V7.5 候选池提醒 - {stage}"
         _feishu_webhook_push(title, _format_lifecycle_alerts(alerts))
     logger.info(f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} alerts={len(alerts)}")
     return result
@@ -691,7 +691,7 @@ async def _run_afternoon_with_status():
                     f"{alert.get('stock_name')}({alert.get('stock_code')}) - {alert.get('message')}"
                 )
             if watch_alerts:
-                _feishu_webhook_push("旺财V7.4 持仓预警", _format_lifecycle_alerts(watch_alerts))
+                _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(watch_alerts))
             acc = db.query(SimAccount).first()
             cash = acc.cash / 100 if acc else 0
             lifecycle_result = await _scan_candidate_pool_and_push("午后", cash)

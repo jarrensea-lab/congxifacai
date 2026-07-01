@@ -19,6 +19,8 @@ def _sample_sentinel_package():
         ],
         "top_symbols": [
             {"name": "688008", "count": 3},
+            {"name": "020988", "count": 5},
+            {"name": "399808", "count": 2},
             {"name": "not-a-share", "count": 9},
         ],
         "risk_events": [
@@ -76,12 +78,14 @@ def test_sentinel_serenity_candidates_enter_target_pool_with_evidence(tmp_path):
 
     item = target_pool.get("688008")
     assert result["upserted_targets"] == 1
-    assert item["status"] == "candidate"
+    assert item["status"] == "research_reference"
     assert item["source"] == "sentinel_serenity"
     assert item["serenity"]["score"] == 62.5
     assert item["sentinel"]["theme"] == "半导体"
     assert item["evidence_ids"]
-    assert result["skipped"][0]["reason"] == "invalid_a_share_code"
+    skipped_codes = {item["code"] for item in result["skipped"]}
+    assert {"020988", "399808", "not-a-share"} <= skipped_codes
+    assert all(item["reason"] == "invalid_a_share_code" for item in result["skipped"])
 
 
 def test_sentinel_evidence_context_is_strategy_input_summary():

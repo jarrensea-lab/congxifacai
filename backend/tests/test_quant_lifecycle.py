@@ -3,8 +3,10 @@ import pytest
 from app.services.quant_lifecycle import (
     CandidatePoolStore,
     PositionWatchStore,
+    TargetPoolStore,
     evaluate_candidate_pool,
     evaluate_position_watch,
+    lot_size_for_code,
     normalize_alert_level,
 )
 
@@ -108,3 +110,57 @@ def test_alert_level_normalizes_medium_to_mid():
     assert normalize_alert_level("medium") == "mid"
     assert normalize_alert_level("mid") == "mid"
     assert normalize_alert_level("high") == "high"
+
+
+def test_lot_size_for_code_respects_board_rules():
+    assert lot_size_for_code("600000") == 100
+    assert lot_size_for_code("300750") == 100
+    assert lot_size_for_code("688008") == 200
+    assert lot_size_for_code("838000") == 100
+
+
+def test_target_pool_routes_unaffordable_serenity_candidate_to_research_reference(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+
+    ok = store.upsert_target(
+        code="688008",
+        name="澜起科技",
+        status="candidate",
+        source="sentinel_serenity",
+        evidence_ids=["ev_test"],
+        serenity={"score": 62.5},
+        available_cash=6085.61,
+        total_assets=6085.61,
+        current_price=68.5,
+    )
+
+    item = store.get("688008")
+    assert ok is True
+    assert item["status"] == "research_reference"
+    assert item["execution"]["lot_size"] == 200
+    assert item["execution"]["lot_value"] == 13700.0
+    assert item["execution"]["block_reason"] == "lot_size_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_candidate_pool_scans_research_reference_without_action_alert(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="688008",
+        name="澜起科技",
+        status="research_reference",
+        source="sentinel_serenity",
+        current_price=68.5,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    result = await evaluate_candidate_pool(
+        store,
+        FakeQuoteSource({"688008": {"price": 70, "change_pct": 4.0, "vol_ratio": 3.0, "amount_wan": 50000}}),
+        available_cash=6085.61,
+    )
+
+    assert result["scanned"] == 0
+    assert result["alerts"] == []
+    assert store.get("688008")["status"] == "research_reference"

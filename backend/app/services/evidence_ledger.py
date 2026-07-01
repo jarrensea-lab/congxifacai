@@ -27,7 +27,15 @@ def _now() -> str:
 
 def _is_a_share_code(value: Any) -> bool:
     text = str(value or "").strip()
-    return len(text) == 6 and text.isdigit() and text[:1] in {"0", "3", "6", "8", "9"}
+    if len(text) != 6 or not text.isdigit():
+        return False
+    return text.startswith((
+        "000", "001", "002", "003",
+        "300", "301", "302",
+        "600", "601", "603", "605", "688", "689",
+        "430", "830", "831", "832", "833", "834", "835", "836", "837", "838", "839",
+        "870", "871", "872", "873", "874", "875", "876", "877", "878", "879",
+    ))
 
 
 def _stable_id(payload: dict[str, Any]) -> str:

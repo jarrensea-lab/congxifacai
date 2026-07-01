@@ -156,7 +156,7 @@ class TestMarkdownCard:
                 "title": "高收益试验模式",
                 "target": "30天内争取 +10%",
                 "max_drawdown_pct": 10,
-                "single_position_limit_pct": 35,
+                "single_position_limit_pct": 50,
                 "cash_reserve_pct": 10,
             },
         )
@@ -166,7 +166,7 @@ class TestMarkdownCard:
         assert "高收益试验模式" in card
         assert "30天内争取 +10%" in card
         assert "最大回撤 -10%" in card
-        assert "单票 35%" in card
+        assert "单票 50%" in card
 
     def test_midday_card_basic(self):
         """测试午盘快报卡片"""
