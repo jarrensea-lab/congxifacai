@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterable, List
@@ -11,6 +12,13 @@ from app.ai.sentinel_contracts import SECRET_FIELD_NAMES
 
 
 CN_TZ = timezone(timedelta(hours=8))
+DEFAULT_TUSHARE_NEWS_ROOT = Path(
+    os.getenv(
+        "CONGXI_TUSHARE_NEWS_ROOT",
+        str(Path(os.getenv("SIKU_VAULT_DIR", str(Path.home() / "AI/projects/司库")))
+            / "01-资料采集/量化投资/Serenity研究/数据采集/tushare-news"),
+    )
+)
 
 KEYWORD_SYMBOLS = {
     "许继电气": "000400.SZ",
@@ -120,6 +128,16 @@ def import_horizon_news_events(root_dir: str | Path, date: str) -> List[Dict[str
             events.append(event)
 
     return events
+
+
+def default_tushare_news_root() -> Path:
+    """Return the configured high-frequency Tushare news archive root."""
+    return Path(os.environ.get("CONGXI_TUSHARE_NEWS_ROOT", str(DEFAULT_TUSHARE_NEWS_ROOT)))
+
+
+def import_default_tushare_news_events(date: str) -> List[Dict[str, Any]]:
+    """Import one day of high-frequency Tushare news from the default archive."""
+    return import_horizon_news_events(default_tushare_news_root(), date)
 
 
 def write_sentinel_news_events(events: List[Dict[str, Any]], output_path: str | Path) -> None:

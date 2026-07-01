@@ -1,7 +1,7 @@
 """报告标准化数据模型 — 所有报告统一Schema"""
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel
+from typing import Optional, Any
+from pydantic import BaseModel, Field
 
 
 class PositionItem(BaseModel):
@@ -28,6 +28,7 @@ class Recommendation(BaseModel):
     trend_score: int = 5       # 1-10
     beginner_guide: str = ""
     recommend_date: str = ""
+    realtime_quote: dict[str, Any] = Field(default_factory=dict)
 
 
 class RiskAlert(BaseModel):
@@ -77,3 +78,4 @@ class ReportData(BaseModel):
     system_health: Optional[SystemHealth] = None
     knowledge_tip: str = ""
     top_sectors: list[str] = []
+    strategy_profile: dict[str, Any] = Field(default_factory=dict)

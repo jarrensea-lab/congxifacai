@@ -251,6 +251,15 @@ AGGREGATOR_PROMPT = """你是「裁判」— AI 辩论聚合器。
             }}
         ]
     }},
+    "role_votes": {{
+        "股票代码": {{
+            "hunter": {{"score": 0-10, "reason": "短线技术面是否支持"}},
+            "accountant": {{"score": 0-10, "reason": "估值/基本面是否支持"}},
+            "guardian": {{"veto": true/false, "reason": "是否触发风控否决"}},
+            "serenity": {{"score": 0-10, "reason": "产业链瓶颈/稀缺性是否支持"}},
+            "evidence_ids": ["如有 Sentinel evidence_id 请列出"]
+        }}
+    }},
     "backtest_summary": {{
         "note": "策略回测结果(基于最近6个月历史数据模拟)",
         "total_trades": "模拟交易次数",

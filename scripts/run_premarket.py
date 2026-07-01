@@ -61,11 +61,32 @@ async def main():
     print(f"指数: 上证{sh} 深证{sz}", flush=True)
 
     market_data = {"indices": {"shanghai": sh, "shenzhen": sz}, "sectors": [],
-                   "holdings": hd["holdings"], "holdings_str": hd["holdings_str"], "news": []}
+                   "holdings": hd["holdings"], "holdings_str": hd["holdings_str"], "news": [],
+                   "available_cash": hd["available_cash"], "total_assets": hd["available_cash"]}
+
+    try:
+        from datetime import date
+        from app.ai.sentinel_research import load_research_package
+        from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
+
+        sentinel_root = os.path.join(os.path.dirname(__file__), "..", "data", "sentinel")
+        sentinel_package = load_research_package(str(date.today()), output_root=sentinel_root)
+        if sentinel_package:
+            market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
+            ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+            print(
+                "Sentinel evidence: "
+                f"{ingest_result.get('evidence_count', 0)} 条证据, "
+                f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
+                flush=True,
+            )
+    except Exception as e:
+        print(f"⚠️ Sentinel evidence 接入失败，降级继续: {e}", flush=True)
 
     # 3. 分析 + 辩论
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
+    from app.services.quote_enrichment import enrich_decision_with_realtime_quotes
     from app.services.report_templates import strategy_report_md
     import httpx
 
@@ -81,6 +102,7 @@ async def main():
     print(f"辩论: R{risk}, {len(pool)}支标的, {decision.get('final_view','?')}", flush=True)
 
     # 4. 策略报告
+    decision = await enrich_decision_with_realtime_quotes(decision, tc)
     report_md = strategy_report_md(decision)
 
     # 4a. Webhook 卡片 (摘要)
@@ -96,8 +118,11 @@ async def main():
 
     # 4b. lark-cli IM 全文推送
     full_text = f"**🐕 旺财V6 盘前策略 [R{risk}]**\n\n{report_md[:7500]}"
-    im_ok = lark_send(full_text)
-    print(f"💬 lark IM 全文: {'✅' if im_ok else '⚠️'}", flush=True)
+    if getattr(settings, "FEISHU_WEBHOOK_ONLY", False):
+        print("💬 lark IM 全文: ⏭️ Webhook-only 模式已跳过", flush=True)
+    else:
+        im_ok = lark_send(full_text)
+        print(f"💬 lark IM 全文: {'✅' if im_ok else '⚠️'}", flush=True)
 
     # 5. 策略图表
     print("生成图表...", flush=True)

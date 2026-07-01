@@ -1,5 +1,16 @@
 """飞书消息卡片 Markdown 构建器 — 标准化卡片格式"""
 from app.report_engine.report_schema import ReportData
+from app.services.report_templates import _recommendation_quote_lines
+
+
+def _alert_level(level: str) -> str:
+    return "mid" if level == "medium" else level
+
+
+def _recommendation_dict(recommendation) -> dict:
+    if hasattr(recommendation, "model_dump"):
+        return recommendation.model_dump()
+    return recommendation.dict()
 
 
 def build_premarket_card(data: ReportData) -> str:
@@ -32,6 +43,7 @@ def build_premarket_card(data: ReportData) -> str:
     for r in data.recommendations:
         if r.strategy_type == "short_term":
             lines.append(f"- **{r.name}**({r.code}): {r.reason[:80]}")
+            lines.extend(_recommendation_quote_lines(_recommendation_dict(r)))
             lines.append(f"  🛑 {r.buy_range} | 🎯 {r.target}")
     lines.extend([
         "",
@@ -40,6 +52,7 @@ def build_premarket_card(data: ReportData) -> str:
     for r in data.recommendations:
         if r.strategy_type == "mid_low_freq":
             lines.append(f"- **{r.name}**({r.code}): {r.reason[:80]}")
+            lines.extend(_recommendation_quote_lines(_recommendation_dict(r)))
             lines.append(f"  🛑 {r.buy_range} | 🎯 {r.target}")
     lines.extend([
         "",
@@ -62,6 +75,18 @@ def build_closing_card(data: ReportData) -> str:
         "",
         "**📈 今日交易回顾**",
     ]
+    profile = data.strategy_profile or {}
+    if profile:
+        lines.extend([
+            f"- 策略模式: {profile.get('title', '未指定')}",
+            f"- 目标: {profile.get('target', '未指定')}",
+            (
+                f"- 风险边界: 最大回撤 -{profile.get('max_drawdown_pct', '?')}% | "
+                f"单票 {profile.get('single_position_limit_pct', '?')}% | "
+                f"现金底线 {profile.get('cash_reserve_pct', '?')}%"
+            ),
+            "- 验收口径: 不承诺收益，只验证报告、风控、人工复核和复盘是否按规则执行",
+        ])
     if pnl:
         icon = "📈" if pnl.daily_pnl >= 0 else "📉"
         lines.append(f"- 日盈亏: {icon} ¥{pnl.daily_pnl:+,.2f} ({pnl.daily_pnl_pct:+.2f}%)")
@@ -76,10 +101,10 @@ def build_closing_card(data: ReportData) -> str:
         lines.append("- 无持仓")
 
     lines.extend(["", "**⚖️ 风控事件**"])
-    alerts = [a for a in data.alerts if a.level in ("high", "mid")]
+    alerts = [a for a in data.alerts if _alert_level(a.level) in ("high", "mid")]
     if alerts:
         for a in alerts[:3]:
-            icon = {"high": "🔴", "mid": "🟡"}.get(a.level, "⚪")
+            icon = {"high": "🔴", "mid": "🟡"}.get(_alert_level(a.level), "⚪")
             lines.append(f"- {icon} {a.stock_name}({a.stock_code}): {a.message[:100]}")
     else:
         lines.append("- 今日无风控事件")
@@ -134,8 +159,8 @@ def build_afternoon_risk_card(data: ReportData) -> str:
         f"📅 {data.date}",
         "",
     ]
-    high_alerts = [a for a in data.alerts if a.level == "high"]
-    mid_alerts = [a for a in data.alerts if a.level == "mid"]
+    high_alerts = [a for a in data.alerts if _alert_level(a.level) == "high"]
+    mid_alerts = [a for a in data.alerts if _alert_level(a.level) == "mid"]
     if high_alerts:
         for a in high_alerts[:3]:
             lines.append(f"- 🔴 **{a.stock_name}**({a.stock_code}): {a.message}")
