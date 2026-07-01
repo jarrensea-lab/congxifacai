@@ -96,25 +96,32 @@
 
 ### 5. Sentinel/Serenity 入生产候选池
 
-状态：未完成，下一步
+状态：未完成，已完成深度 review
 
 执行步骤：
 
+- 先阅读深度 review：`docs/sentinel/2026-07-01-sentinel-serenity-pipeline-review.md`。
 - 定位 Sentinel 研究包输出结构。
 - 抽取候选主题、候选标的、证据摘要、风险标签。
 - 转成 `candidate_pool` 入池事件。
 - 保持研究层边界：研究结论不直接买卖，只触发入池、继续观察、禁止追、出池。
+- 将 Sentinel evidence 注入 `run_analysis()` / `run_debate()`，使其真正进入策略输入，而不是只进入日报展示。
+- 为 Serenity 角色增加可审计的 `role_votes` / `role_weight` 输出，避免“参与了但无法判断作用”。
 
 预期产物：
 
 - Sentinel/Serenity 入池适配函数或服务。
 - 对应单元测试。
 - 至少一个历史研究包回放样例。
+- 主报告能标明研究候选是 `已进入策略输入`、`已进入候选池` 还是 `仅报告展示`。
 
 验证方式：
 
 - 历史 Sentinel 包可以生成候选池事件。
 - 无标的映射时必须输出“无法入池原因”，不能静默。
+- `data/candidate_pool.json` 出现 `source=sentinel_serenity` 的候选。
+- `run_debate()` prompt 输入能包含 Sentinel evidence 摘要。
+- 每个研究候选都能追溯到主题、证据、行情校验和账户可买性。
 
 ### 6. 告警去重与冷却
 
@@ -189,4 +196,3 @@
 - 需要新增私密凭证或授权。
 - 数据源不可用且无法判断行情事实。
 - Sentinel/Serenity 研究结论无法映射到 A 股标的，继续硬接会制造假信号。
-
