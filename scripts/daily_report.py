@@ -447,6 +447,7 @@ async def main():
     from app.data_sources.tencent_client import TencentDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
+    from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
     from app.services.portfolio_store import recalculate_portfolio, sync_db_from_user_portfolio
 
     now = datetime.now()
@@ -536,6 +537,19 @@ async def main():
     portfolio["total_pnl_all"] = portfolio.get("total_pnl", 0) + portfolio.get("realized_pnl", 0)
     portfolio["total_assets"] = round(available_cash + portfolio["total_value"], 2)
     market_data["total_assets"] = portfolio["total_assets"]
+    sentinel_package = load_sentinel_research_package(today)
+    if sentinel_package:
+        market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
+        try:
+            ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+            print(
+                "   Sentinel evidence 接入: "
+                f"{ingest_result.get('evidence_count', 0)} 条证据, "
+                f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"   ⚠️ Sentinel evidence 入池失败，降级继续: {e}", flush=True)
 
     # ===== 3. 分析 + 辩论 =====
     print("📊 构建市场数据摘要...", flush=True)
@@ -566,8 +580,6 @@ async def main():
         target_date = main_report_target_date(now.date()).isoformat()
     except Exception:
         target_date = today
-    sentinel_package = load_sentinel_research_package(today)
-
     # 标题 + 元信息
     lines.append("# 📊 恭喜发财 — 次日投资策略主报告")
     lines.append("")

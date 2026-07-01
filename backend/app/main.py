@@ -38,6 +38,10 @@ from app.services.quant_lifecycle import (
     evaluate_position_watch,
     normalize_alert_level,
 )
+from app.services.evidence_ledger import (
+    build_sentinel_evidence_context,
+    upsert_sentinel_evidence_to_target_pool,
+)
 from app.services.schedule_policy import (
     schedule_reason,
     should_run_main_report,
@@ -443,6 +447,20 @@ async def _run_premarket_with_status():
     try:
         logger.info("=== 旺财V7 盘前任务启动 ===")
         market_data = await _fetch_market_data()
+        try:
+            from app.ai.sentinel_research import load_research_package
+
+            sentinel_package = load_research_package(str(date.today()))
+            if sentinel_package:
+                market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
+                ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+                logger.info(
+                    "Sentinel evidence 已进入盘前输入: "
+                    f"evidence={ingest_result.get('evidence_count', 0)} "
+                    f"targets={ingest_result.get('upserted_targets', 0)}"
+                )
+        except Exception as exc:
+            logger.warning(f"Sentinel evidence 盘前接入失败，降级继续: {exc}")
         sh = market_data["indices"].get("sh000001", {}).get("price", 3350)
         sz = market_data["indices"].get("sz399001", {}).get("price", 10800)
         logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")

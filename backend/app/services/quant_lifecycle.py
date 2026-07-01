@@ -165,6 +165,67 @@ class CandidatePoolStore:
         self.save(payload)
 
 
+class TargetPoolStore(CandidatePoolStore):
+    """Compatibility wrapper for the production stock lifecycle pool.
+
+    `CandidatePoolStore` remains as the MVP file-backed implementation. The
+    business meaning is broader: it is the total target lifecycle pool, where
+    "candidate" is only one status.
+    """
+
+    VALID_STATUSES = {
+        "research_only",
+        "candidate",
+        "watching",
+        "actionable",
+        "blocked_chasing",
+        "position",
+        "removed",
+        "expired",
+    }
+
+    def upsert_target(
+        self,
+        *,
+        code: str,
+        name: str,
+        status: str = "candidate",
+        source: str = "manual",
+        evidence_ids: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+        sentinel: dict[str, Any] | None = None,
+        serenity: dict[str, Any] | None = None,
+    ) -> bool:
+        clean = _clean_code(code)
+        if not clean:
+            return False
+        normalized_status = status if status in self.VALID_STATUSES else "candidate"
+        payload = self.load()
+        items = payload.setdefault("items", {})
+        existing = items.get(clean, {})
+        merged_evidence_ids = list(dict.fromkeys([
+            *(existing.get("evidence_ids") or []),
+            *(evidence_ids or []),
+        ]))
+        item = {
+            **existing,
+            "code": clean,
+            "name": name or existing.get("name") or clean,
+            "status": normalized_status,
+            "source": source,
+            "evidence": {**(existing.get("evidence") or {}), **(evidence or {})},
+            "evidence_ids": merged_evidence_ids,
+            "sentinel": {**(existing.get("sentinel") or {}), **(sentinel or {})},
+            "serenity": {**(existing.get("serenity") or {}), **(serenity or {})},
+            "updated_at": _now(),
+        }
+        item.setdefault("created_at", _now())
+        item.setdefault("decision_history", [])
+        items[clean] = item
+        self.save(payload)
+        return True
+
+
 class PositionWatchStore:
     """File-backed stop-loss/take-profit plan store for real positions."""
 

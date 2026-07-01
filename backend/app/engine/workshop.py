@@ -63,6 +63,11 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
             "不要沿用旧的30%现金底线或10%单票上限，除非当前策略模式明确如此。\n"
         )
     news_str = json.dumps(analysis_report.get("news", []), ensure_ascii=False)
+    sentinel_evidence = analysis_report.get("sentinel_evidence", "")
+    if sentinel_evidence:
+        if not isinstance(sentinel_evidence, str):
+            sentinel_evidence = json.dumps(sentinel_evidence, ensure_ascii=False)
+        news_str = f"{news_str}\n\n【Sentinel 证据摘要】\n{sentinel_evidence}"
 
     engine = AIDebateEngine()
 
@@ -104,6 +109,7 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
         "backtest_summary": final.get("backtest_summary", {}),
         "risk_summary": final.get("risk_summary", ""),
         "knowledge_corner": final.get("knowledge_corner", ""),
+        "role_votes": final.get("role_votes", {}),
     }
     decision = _apply_account_constraints(
         decision,
@@ -244,6 +250,7 @@ def _repair_final_decision(result: dict) -> dict:
     else:
         risk_summary = str(guardian_risks or "")
 
+    role_votes = _build_fallback_role_votes(hunter, accountant, guardian, researcher)
     return {
         "final_decision": decision,
         "confidence": confidence,
@@ -271,7 +278,61 @@ def _repair_final_decision(result: dict) -> dict:
         "position_plan": {"entries": []},
         "risk_summary": risk_summary,
         "knowledge_corner": "",
+        "role_votes": role_votes,
     }
+
+
+def _build_fallback_role_votes(
+    hunter: dict,
+    accountant: dict,
+    guardian: dict,
+    researcher: dict,
+) -> dict:
+    votes: dict[str, dict] = {}
+    guardian_text = json.dumps(guardian, ensure_ascii=False)
+    guardian_veto = any(word in guardian_text for word in ("禁止", "不追", "规避", "卖出", "清仓", "退市", "ST"))
+    role_scores: dict[str, float] = {}
+    role_reasons: dict[str, str] = {}
+    for role_name, role_data in (("hunter", hunter), ("accountant", accountant), ("serenity", researcher)):
+        if not isinstance(role_data, dict):
+            role_scores[role_name] = 0
+            role_reasons[role_name] = ""
+            continue
+        try:
+            role_scores[role_name] = float(role_data.get("conviction", 0) or 0)
+        except (TypeError, ValueError):
+            role_scores[role_name] = 0
+        role_reasons[role_name] = str(role_data.get("analysis") or role_data.get("market_view") or "")[:300]
+
+    for role_name, role_data in (("hunter", hunter), ("accountant", accountant), ("serenity", researcher)):
+        recommendations = role_data.get("recommendations", []) if isinstance(role_data, dict) else []
+        if not isinstance(recommendations, list):
+            continue
+        for rec in recommendations:
+            if not isinstance(rec, dict):
+                continue
+            code = str(rec.get("code") or "").strip()
+            if not code:
+                continue
+            votes.setdefault(code, {
+                "hunter": {"score": 0, "reason": ""},
+                "accountant": {"score": 0, "reason": ""},
+                "guardian": {"veto": guardian_veto, "reason": guardian.get("position_advice", "")},
+                "serenity": {"score": 0, "reason": ""},
+            })
+            votes[code][role_name] = {
+                "score": role_scores.get(role_name, 0),
+                "reason": str(rec.get("reason") or role_reasons.get(role_name, ""))[:300],
+            }
+            votes[code]["guardian"] = {"veto": guardian_veto, "reason": guardian.get("position_advice", "")}
+    if researcher and isinstance(researcher, dict):
+        for code, vote in votes.items():
+            if vote.get("serenity", {}).get("score", 0) == 0:
+                vote["serenity"] = {
+                    "score": role_scores.get("serenity", 0),
+                    "reason": role_reasons.get("serenity", ""),
+                }
+    return votes
 
 
 def _derive_risk_level(final: dict, available_cash: float = 0) -> int:

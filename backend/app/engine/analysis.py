@@ -50,6 +50,7 @@ async def run_analysis(market_data: dict) -> dict:
         "total_assets": market_data.get("total_assets", 0),
         "strategy_profile": market_data.get("strategy_profile", {}),
         "news": market_data.get("news", []),
+        "sentinel_evidence": market_data.get("sentinel_evidence", ""),
     }
 
 

@@ -61,7 +61,27 @@ async def main():
     print(f"指数: 上证{sh} 深证{sz}", flush=True)
 
     market_data = {"indices": {"shanghai": sh, "shenzhen": sz}, "sectors": [],
-                   "holdings": hd["holdings"], "holdings_str": hd["holdings_str"], "news": []}
+                   "holdings": hd["holdings"], "holdings_str": hd["holdings_str"], "news": [],
+                   "available_cash": hd["available_cash"], "total_assets": hd["available_cash"]}
+
+    try:
+        from datetime import date
+        from app.ai.sentinel_research import load_research_package
+        from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
+
+        sentinel_root = os.path.join(os.path.dirname(__file__), "..", "data", "sentinel")
+        sentinel_package = load_research_package(str(date.today()), output_root=sentinel_root)
+        if sentinel_package:
+            market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
+            ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+            print(
+                "Sentinel evidence: "
+                f"{ingest_result.get('evidence_count', 0)} 条证据, "
+                f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
+                flush=True,
+            )
+    except Exception as e:
+        print(f"⚠️ Sentinel evidence 接入失败，降级继续: {e}", flush=True)
 
     # 3. 分析 + 辩论
     from app.engine.analysis import run_analysis
