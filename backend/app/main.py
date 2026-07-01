@@ -31,6 +31,13 @@ from app.data_sources.data_router import DataSourceRouter
 from app.services.monitor import MonitorService
 from app.services.push_tracker import push_tracker, compute_retry_delay
 from app.services.portfolio_store import sync_db_from_user_portfolio
+from app.services.quant_lifecycle import (
+    CandidatePoolStore,
+    PositionWatchStore,
+    evaluate_candidate_pool,
+    evaluate_position_watch,
+    normalize_alert_level,
+)
 from app.services.schedule_policy import (
     schedule_reason,
     should_run_main_report,
@@ -286,6 +293,58 @@ async def _fetch_market_data() -> dict:
             "total_assets": hd.get("total_assets", 0)}
 
 
+def _decision_recommendations(decision: dict) -> list[dict]:
+    recommendations: list[dict] = []
+    seen = set()
+    for bucket in ("short_term", "mid_low_freq"):
+        section = decision.get(bucket, {})
+        if isinstance(section, dict):
+            for rec in section.get("recommendations", []) or []:
+                code = str(rec.get("code") or "").strip() if isinstance(rec, dict) else ""
+                if code and code not in seen:
+                    seen.add(code)
+                    recommendations.append(rec)
+    for bucket in ("stock_pool", "unaffordable_watchlist"):
+        for rec in decision.get(bucket, []) or []:
+            code = str(rec.get("code") or "").strip() if isinstance(rec, dict) else ""
+            if code and code not in seen:
+                seen.add(code)
+                recommendations.append(rec)
+    return recommendations
+
+
+def _format_lifecycle_alerts(alerts: list[dict]) -> str:
+    lines = ["**候选池/持仓生命周期提醒**", ""]
+    for alert in alerts[:8]:
+        lines.append(
+            f"- {alert.get('stock_name', '')}({alert.get('stock_code', '')}) "
+            f"{alert.get('action', '')}: {alert.get('message', '')}"
+        )
+        suggestion = alert.get("suggestion")
+        if suggestion:
+            lines.append(f"  建议: {suggestion}")
+    return "\n".join(lines)
+
+
+async def _scan_candidate_pool_and_push(stage: str, available_cash: float) -> dict:
+    try:
+        result = await evaluate_candidate_pool(
+            CandidatePoolStore(),
+            TencentDataSource(),
+            available_cash=float(available_cash or 0),
+        )
+    except Exception as exc:
+        logger.warning(f"{stage}候选池扫描失败: {exc}")
+        return {"scanned": 0, "alerts": [], "error": str(exc)}
+
+    alerts = result.get("alerts", [])
+    if alerts:
+        title = f"旺财V7.4 候选池提醒 - {stage}"
+        _feishu_webhook_push(title, _format_lifecycle_alerts(alerts))
+    logger.info(f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} alerts={len(alerts)}")
+    return result
+
+
 def _get_today_risk_alerts(db: Session, today: datetime | None = None) -> list[RiskAlert]:
     """Return risk alerts created since local midnight."""
     now = today or datetime.now()
@@ -399,6 +458,11 @@ async def _run_premarket_with_status():
         from app.services.quote_enrichment import enrich_decision_with_realtime_quotes
         from app.services.report_templates import strategy_report_md
         decision = await enrich_decision_with_realtime_quotes(decision, TencentDataSource())
+        candidate_count = CandidatePoolStore().upsert_recommendations(
+            _decision_recommendations(decision),
+            source="premarket",
+        )
+        logger.info(f"盘前推荐已进入生产候选池: {candidate_count} 支")
         report_md = strategy_report_md(decision)
         extra = "\n\n...\n\n*[完整报告已推送]*"
         summary = report_md[:2800] + (extra if len(report_md) > 2800 else "")
@@ -462,13 +526,23 @@ async def _run_midday_with_status():
 
         holdings = market_data.get("holdings", [])
         if not holdings:
-            # 空仓精简模式：仅推送盘面概况，不做完整 AI 辩论
+            lifecycle_result = await _scan_candidate_pool_and_push(
+                "午盘",
+                market_data.get("available_cash", 0),
+            )
+            alert_count = len(lifecycle_result.get("alerts", []))
+            tip = "候选池已触发提醒，请按飞书卡片人工复核。" if alert_count else "候选池暂无可执行触发，继续观察。"
             await report_engine.push_midday(
                 date=str(date.today()),
-                market_summary="🪹 **当前空仓观望中**\n\n无持仓压力，下午保持观察即可。",
-                positions=[], afternoon_tip="空仓是策略，耐心等待高确定性机会。",
+                market_summary=(
+                    "当前空仓。\n\n"
+                    f"候选池扫描: {lifecycle_result.get('scanned', 0)} 支，"
+                    f"触发提醒: {alert_count} 条。"
+                ),
+                positions=[],
+                afternoon_tip=tip,
             )
-            logger.info("--- 午盘快报完成（空仓精简模式） ---")
+            logger.info("--- 午盘快报完成（空仓候选池扫描模式） ---")
             return
 
         snapshot = final.get("market_snapshot", "N/A")
@@ -525,20 +599,33 @@ async def _run_afternoon_with_status():
                 logger.info("空仓：推送精简午后检查")
                 acc = db.query(SimAccount).first()
                 cash = acc.cash / 100 if acc else 0
+                lifecycle_result = await _scan_candidate_pool_and_push("午后", cash)
+                lifecycle_alerts = lifecycle_result.get("alerts", [])
                 await report_engine.push_afternoon_risk(
                     date=today_str,
-                    positions=[], alerts=[],
+                    positions=[],
+                    alerts=[{
+                        "stock_code": a.get("stock_code", ""),
+                        "stock_name": a.get("stock_name", ""),
+                        "alert_type": "candidate_pool",
+                        "level": normalize_alert_level(a.get("level")),
+                        "message": a.get("message", ""),
+                        "suggestion": a.get("suggestion", ""),
+                    } for a in lifecycle_alerts],
                     performance={"total_assets": cash, "available_cash": cash},
                 )
                 return
 
 
             alerts = []
+            position_quotes = {}
+            position_watch = PositionWatchStore()
             for p in positions:
                 # 通过 MonitorService 获取多源数据
                 rt = await monitor.get_realtime_data(p.stock_code)
                 if not rt or not rt.get("price"):
                     continue
+                position_quotes[p.stock_code] = rt
 
                 # 更新持仓市价
                 price = rt.get("price", 0)
@@ -557,6 +644,10 @@ async def _run_afternoon_with_status():
                     "cost_price": round(p.avg_cost / 100, 2) if p.avg_cost else 0,
                     "id": p.id,
                 }
+                plan = position_watch.get(p.stock_code) or {}
+                if plan:
+                    pos_dict["stop_loss_price"] = plan.get("stop_loss_price")
+                    pos_dict["target_price"] = plan.get("target_price")
                 risk_result = await monitor.check_risk(pos_dict, rt, db_session=db)
                 if risk_result:
                     msg = f"{risk_result['level'].upper()}: {p.stock_name}({p.stock_code}) - {risk_result['message']}"
@@ -575,10 +666,20 @@ async def _run_afternoon_with_status():
                             pass
 
             db.commit()
-
-            # 统一推送午后风控（有警告红色/无警告绿色）
+            watch_alerts = evaluate_position_watch(position_watch, position_quotes)
+            for alert in watch_alerts:
+                alerts.append(
+                    f"{normalize_alert_level(alert.get('level')).upper()}: "
+                    f"{alert.get('stock_name')}({alert.get('stock_code')}) - {alert.get('message')}"
+                )
+            if watch_alerts:
+                _feishu_webhook_push("旺财V7.4 持仓预警", _format_lifecycle_alerts(watch_alerts))
             acc = db.query(SimAccount).first()
             cash = acc.cash / 100 if acc else 0
+            lifecycle_result = await _scan_candidate_pool_and_push("午后", cash)
+            lifecycle_alerts = lifecycle_result.get("alerts", [])
+
+            # 统一推送午后风控（有警告红色/无警告绿色）
             mv = sum(p.market_value for p in positions) / 100
             pos_list = [{
                 "stock_code": p.stock_code, "stock_name": p.stock_name,
@@ -588,7 +689,14 @@ async def _run_afternoon_with_status():
                 "level": "high" if "HIGH" in a.split(": ", 1)[0].upper() else "mid",
                 "message": a[:200],
                 "stock_name": a.split("(")[0].split(": ")[-1] if ": " in a else "",
-            } for a in alerts]
+            } for a in alerts] + [{
+                "stock_code": a.get("stock_code", ""),
+                "stock_name": a.get("stock_name", ""),
+                "alert_type": "candidate_pool",
+                "level": normalize_alert_level(a.get("level")),
+                "message": a.get("message", "")[:200],
+                "suggestion": a.get("suggestion", ""),
+            } for a in lifecycle_alerts]
             await report_engine.push_afternoon_risk(
                 date=today_str,
                 positions=pos_list, alerts=alert_list,

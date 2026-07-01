@@ -3,6 +3,10 @@ from app.report_engine.report_schema import ReportData
 from app.services.report_templates import _recommendation_quote_lines
 
 
+def _alert_level(level: str) -> str:
+    return "mid" if level == "medium" else level
+
+
 def _recommendation_dict(recommendation) -> dict:
     if hasattr(recommendation, "model_dump"):
         return recommendation.model_dump()
@@ -97,10 +101,10 @@ def build_closing_card(data: ReportData) -> str:
         lines.append("- 无持仓")
 
     lines.extend(["", "**⚖️ 风控事件**"])
-    alerts = [a for a in data.alerts if a.level in ("high", "mid")]
+    alerts = [a for a in data.alerts if _alert_level(a.level) in ("high", "mid")]
     if alerts:
         for a in alerts[:3]:
-            icon = {"high": "🔴", "mid": "🟡"}.get(a.level, "⚪")
+            icon = {"high": "🔴", "mid": "🟡"}.get(_alert_level(a.level), "⚪")
             lines.append(f"- {icon} {a.stock_name}({a.stock_code}): {a.message[:100]}")
     else:
         lines.append("- 今日无风控事件")
@@ -155,8 +159,8 @@ def build_afternoon_risk_card(data: ReportData) -> str:
         f"📅 {data.date}",
         "",
     ]
-    high_alerts = [a for a in data.alerts if a.level == "high"]
-    mid_alerts = [a for a in data.alerts if a.level == "mid"]
+    high_alerts = [a for a in data.alerts if _alert_level(a.level) == "high"]
+    mid_alerts = [a for a in data.alerts if _alert_level(a.level) == "mid"]
     if high_alerts:
         for a in high_alerts[:3]:
             lines.append(f"- 🔴 **{a.stock_name}**({a.stock_code}): {a.message}")

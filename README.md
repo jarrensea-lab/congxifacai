@@ -4,7 +4,7 @@
 
 **恭喜发财**是一个运行在 Codex 之上的自动化 A 股交易智能助手，由多角色 AI 辩论引擎驱动，覆盖盘前策略、盘中监控到收盘复盘的全交易流程。
 
-当前 feature 分支版本 `v7.4.0-dev`，核心方向是“量化生命周期与分钟级触发底座”。迭代方向见 [ROADMAP.md](ROADMAP.md)。
+当前 feature 分支版本 `v7.4.0-dev`，核心方向是“量化生命周期闭环底座”。迭代方向见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -72,8 +72,9 @@ scripts/install-congxicai-v7-launchd.sh
 │       │   ├── analysis.py   # 市场数据分析
 │       │   ├── workshop.py   # 策略工作流编排
 │       │   └── debate_tracker.py   # 辩论记录追踪
-│       ├── services/         # 飞书通道 & 指令解析
+│       ├── services/         # 飞书通道、生命周期池 & 指令解析
 │       │   ├── feishu_client.py    # 飞书消息卡片推送
+│       │   ├── quant_lifecycle.py  # 生产候选池/持仓池扫描与提醒
 │       │   ├── report_archive.py   # Markdown 日期归档
 │       │   ├── schedule_policy.py  # 主报告/盘前校准交易日规则
 │       │   ├── strategy_profile.py # 保守铁律 / 高收益试验模式
@@ -105,10 +106,10 @@ scripts/install-congxicai-v7-launchd.sh
 - **账户分级**：小账户激进试错，中账户分层进攻，大账户保守复利。
 - **候选标的池**：池外标的按“直接建议建仓 / 入池观察 / 丢弃”处理；池内标的按“升级建仓 / 继续观察 / 出池”处理。
 - **持仓管理池**：持仓必须带止损、止盈、失效条件、持有周期和复核时间，不能只靠人工盯盘。
-- **分钟级触发**：盘中轮询候选池与持仓池，触发机会或风险时通过飞书机器人发送动作提醒。
-- **秒级预留**：秒级行情、自动下单和高频撮合不在 v7.4.0 范围内，作为 v7.5/v8 的架构预留。
+- **定时/手动触发闭环**：先用现有盘前、午盘、午后、收盘任务和手动运行把架构、数据、策略、监控、预警跑通。
+- **分钟/秒级预留**：分钟级轮询、秒级行情、自动下单和高频撮合不在当前 v7.4 首轮范围内，作为 v7.5/v8 的架构预留。
 
-设计文档：[v7.4.0-dev 量化生命周期与分钟级触发底座](docs/superpowers/specs/2026-07-01-quant-lifecycle-v7-4-design.md)。
+设计文档：[v7.4.0-dev 量化生命周期闭环底座](docs/superpowers/specs/2026-07-01-quant-lifecycle-v7-4-design.md)。
 
 ### AI 辩论引擎（四角色并行）
 
