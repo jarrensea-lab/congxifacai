@@ -97,6 +97,65 @@ def test_build_next_day_strategy_sections_include_required_blocks():
     assert "AI 原文若出现旧仓位或现金规则" in sections
 
 
+def test_load_sentinel_research_package_falls_back_to_latest(monkeypatch, tmp_path):
+    import scripts.daily_report as daily_report
+
+    root = tmp_path / "sentinel"
+    package_dir = root / "research_packages"
+    package_dir.mkdir(parents=True)
+    old_package = {
+        "date": "2026-06-30",
+        "event_count": 1705,
+        "source_status": {"status": "ok"},
+    }
+    (package_dir / "2026-06-30.json").write_text(json.dumps(old_package), encoding="utf-8")
+    monkeypatch.setattr(daily_report, "SENTINEL_OUTPUT_ROOT", root)
+
+    package = daily_report.load_sentinel_research_package("2026-07-01")
+
+    assert package["date"] == "2026-06-30"
+    assert package["fallback_used"] is True
+    assert package["requested_date"] == "2026-07-01"
+
+
+def test_build_next_day_strategy_sections_render_role_votes():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-01",
+        target_date="2026-07-02",
+        risk_level=4,
+        final_view="观察",
+        confidence=7,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {"shanghai": 4118.89}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "reasoning": "等待触发价。",
+            "role_votes": {
+                "688008": {
+                    "hunter": {"score": 7, "reason": "放量突破"},
+                    "accountant": {"score": 5, "reason": "估值中性"},
+                    "guardian": {"veto": False, "reason": "未触发风控"},
+                    "serenity": {"score": 8, "reason": "产业链瓶颈"},
+                    "evidence_ids": ["ev_test"],
+                }
+            },
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "## 七、裁判裁决" in sections
+    assert "角色投票审计" in sections
+    assert "688008" in sections
+    assert "H7" in sections
+    assert "S8" in sections
+    assert "ev_test" in sections
+
+
 def test_build_feishu_summary_keeps_full_report_local_hint():
     from scripts.daily_report import build_feishu_summary
 

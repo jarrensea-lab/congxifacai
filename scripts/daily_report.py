@@ -5,6 +5,7 @@ import os
 import json
 import asyncio
 from datetime import datetime
+from pathlib import Path
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(PROJECT_ROOT, 'backend'))
@@ -22,6 +23,7 @@ DEFAULT_ARCHIVE_DIR = os.path.join(
 )
 ARCHIVE_DIR = os.getenv("CONGXI_REPORT_ARCHIVE_DIR", DEFAULT_ARCHIVE_DIR)
 DELIVERY_STATUS_FILENAME = "delivery_status.json"
+SENTINEL_OUTPUT_ROOT = Path(os.getenv("CONGXI_SENTINEL_OUTPUT_ROOT", os.path.join(PROJECT_ROOT, "data", "sentinel")))
 
 
 from app.services.strategy_profile import get_strategy_profile
@@ -135,11 +137,25 @@ def build_final_action_summary(
 
 
 def load_sentinel_research_package(report_date: str) -> dict | None:
-    """Load Sentinel research package for report_date if it exists."""
+    """Load Sentinel research package for report_date, falling back to the latest available package."""
     try:
         from app.ai.sentinel_research import load_research_package
 
-        return load_research_package(report_date)
+        package = load_research_package(report_date, output_root=SENTINEL_OUTPUT_ROOT)
+        if package:
+            return package
+        package_dir = SENTINEL_OUTPUT_ROOT / "research_packages"
+        if not package_dir.exists():
+            return None
+        for path in sorted(package_dir.glob("*.json"), reverse=True):
+            fallback = load_research_package(path.stem, output_root=SENTINEL_OUTPUT_ROOT)
+            if fallback:
+                fallback = dict(fallback)
+                fallback["fallback_used"] = True
+                fallback["requested_date"] = report_date
+                fallback["fallback_reason"] = "requested_date_package_missing"
+                return fallback
+        return None
     except Exception:
         return None
 
@@ -178,6 +194,41 @@ def build_role_matrix(roles: dict, decision: dict) -> list[str]:
     return lines
 
 
+def build_role_vote_audit(decision: dict) -> list[str]:
+    """Render per-symbol role votes so strategy influence is auditable."""
+    votes = decision.get("role_votes") if isinstance(decision, dict) else {}
+    if not isinstance(votes, dict) or not votes:
+        return ["- 角色投票审计：本次裁判未返回结构化 role_votes。"]
+
+    lines = [
+        "### 角色投票审计",
+        "",
+        "| 标的 | 猎手 | 账房 | 守夜人 | Serenity | Evidence |",
+        "|---|---:|---:|---|---:|---|",
+    ]
+    for code, item in votes.items():
+        if not isinstance(item, dict):
+            continue
+        hunter = item.get("hunter") if isinstance(item.get("hunter"), dict) else {}
+        accountant = item.get("accountant") if isinstance(item.get("accountant"), dict) else {}
+        guardian = item.get("guardian") if isinstance(item.get("guardian"), dict) else {}
+        serenity = item.get("serenity") if isinstance(item.get("serenity"), dict) else {}
+        evidence_ids = item.get("evidence_ids") or []
+        if isinstance(evidence_ids, list):
+            evidence_text = "、".join(str(eid) for eid in evidence_ids[:3])
+        else:
+            evidence_text = str(evidence_ids)
+        veto = "否决" if guardian.get("veto") else "通过"
+        guardian_reason = str(guardian.get("reason", ""))[:40]
+        lines.append(
+            f"| {code} | H{hunter.get('score', 0)} | A{accountant.get('score', 0)} | "
+            f"{veto} {guardian_reason} | S{serenity.get('score', 0)} | {evidence_text or '无'} |"
+        )
+    if len(lines) == 4:
+        return ["- 角色投票审计：role_votes 为空或格式不可用。"]
+    return lines
+
+
 def build_sentinel_research_section(package: dict | None) -> list[str]:
     """Render Sentinel research package summary for the main report."""
     if not package:
@@ -189,6 +240,10 @@ def build_sentinel_research_section(package: dict | None) -> list[str]:
         f"- Sentinel 状态：{(package.get('source_status') or {}).get('status', 'unknown')}",
         f"- 高频新闻：{package.get('event_count', 0)} 条，关键新闻 {package.get('key_event_count', 0)} 条。",
     ]
+    if package.get("fallback_used"):
+        lines.append(
+            f"- 研究包日期：{package.get('date')}；请求日期 {package.get('requested_date')} 无包，已使用最新可用包。"
+        )
     themes = package.get("top_themes") or []
     if themes:
         lines.append("- 主题热度：" + "；".join(f"{item.get('name')}({item.get('count')})" for item in themes[:5]))
@@ -343,6 +398,10 @@ def build_next_day_strategy_sections(
         f"- 采用/否决说明：{decision.get('reasoning', decision.get('debate_summary', '暂无结构化裁决说明。'))}",
         "- 裁判输出必须继续接受账户约束、风控和一手金额校验。",
         "- AI 原文若出现旧仓位或现金规则，以本报告“机器可执行校验”中的当前策略模式为准。",
+        "",
+    ])
+    lines.extend(build_role_vote_audit(decision))
+    lines.extend([
         "",
         "## 八、明日执行剧本",
         "",
