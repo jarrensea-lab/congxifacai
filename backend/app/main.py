@@ -395,7 +395,10 @@ async def _run_premarket_with_status():
         risk = debate_result.get("recommended_risk_level", 3)
         pool = decision.get("stock_pool", [])
 
+        from app.data_sources.tencent_client import TencentDataSource
+        from app.services.quote_enrichment import enrich_decision_with_realtime_quotes
         from app.services.report_templates import strategy_report_md
+        decision = await enrich_decision_with_realtime_quotes(decision, TencentDataSource())
         report_md = strategy_report_md(decision)
         extra = "\n\n...\n\n*[完整报告已推送]*"
         summary = report_md[:2800] + (extra if len(report_md) > 2800 else "")

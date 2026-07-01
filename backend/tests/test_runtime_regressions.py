@@ -293,6 +293,114 @@ def test_run_premarket_defines_pos_plan_before_chart_use():
     assert first_assignment < first_use
 
 
+def test_strategy_report_flags_recommendation_price_mismatch():
+    """Premarket reports should not silently trust stale AI-written stock prices."""
+    from app.services.report_templates import strategy_report_md
+
+    report = strategy_report_md({
+        "final_decision": "谨慎观察",
+        "confidence": 6,
+        "reasoning": "测试",
+        "short_term": {
+            "recommendations": [{
+                "code": "002475",
+                "name": "立讯精密",
+                "reason": "现价33.5元，消费电子链条景气。",
+                "buy_range": "33.0-34.0",
+                "stop_loss": "31.0",
+                "target": "38.0",
+                "realtime_quote": {
+                    "price": 67.62,
+                    "last_close": 70.4,
+                    "change_pct": -3.95,
+                    "source": "tencent",
+                },
+            }]
+        },
+        "mid_low_freq": {"recommendations": []},
+    })
+
+    assert "实时行情: 67.62元" in report
+    assert "腾讯" in report
+    assert "AI文本价格疑似过期" in report
+    assert "33.50元" in report
+
+
+@pytest.mark.asyncio
+async def test_quote_enrichment_attaches_realtime_quotes_to_recommendations():
+    """Rendering inputs should carry live quote snapshots for recommended stocks."""
+    from app.services.quote_enrichment import enrich_decision_with_realtime_quotes
+
+    class FakeQuotes:
+        async def fetch_batch(self, codes):
+            assert codes == ["002475"]
+            return {
+                "002475": {
+                    "code": "002475",
+                    "name": "立讯精密",
+                    "price": 67.62,
+                    "last_close": 70.4,
+                    "change_pct": -3.95,
+                    "source": "tencent",
+                }
+            }
+
+    decision = {
+        "short_term": {
+            "recommendations": [{
+                "code": "002475",
+                "name": "立讯精密",
+                "reason": "现价33.5元。",
+            }]
+        },
+        "mid_low_freq": {"recommendations": []},
+    }
+
+    enriched = await enrich_decision_with_realtime_quotes(decision, FakeQuotes())
+
+    rec = enriched["short_term"]["recommendations"][0]
+    assert rec["realtime_quote"]["price"] == 67.62
+    assert enriched["quote_validation"]["status"] == "success"
+    assert enriched["quote_validation"]["codes"] == ["002475"]
+
+
+def test_premarket_report_engine_card_keeps_realtime_quote_warning():
+    """The actual premarket push card should preserve quote mismatch warnings."""
+    from app.report_engine.templates.premarket import build_premarket_report_data
+    from app.report_engine.renderers.markdown_card import build_premarket_card
+
+    data = build_premarket_report_data(
+        date="2026-07-01",
+        decision={
+            "final_decision": "谨慎观察",
+            "confidence": 6,
+            "reasoning": "测试",
+            "short_term": {
+                "recommendations": [{
+                    "code": "002475",
+                    "name": "立讯精密",
+                    "reason": "现价33.5元。",
+                    "buy_range": "33-34",
+                    "target": "38",
+                    "realtime_quote": {
+                        "price": 67.62,
+                        "change_pct": -3.95,
+                        "source": "tencent",
+                    },
+                }]
+            },
+            "mid_low_freq": {"recommendations": []},
+        },
+        positions=[],
+        risk_level=3,
+    )
+
+    card = build_premarket_card(data)
+
+    assert "实时行情: 67.62元" in card
+    assert "AI文本价格疑似过期" in card
+
+
 def test_daily_report_does_not_depend_on_serenity_candidate_pool():
     """The main daily report should not import the standalone Serenity candidate pool."""
     source = Path("scripts/daily_report.py").read_text(encoding="utf-8")

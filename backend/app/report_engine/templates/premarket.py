@@ -25,6 +25,7 @@ def build_premarket_report_data(
             trend_score=item.get("trend_score", 5),
             beginner_guide=item.get("beginner_guide", ""),
             recommend_date=date,
+            realtime_quote=item.get("realtime_quote", {}),
         ))
     for item in decision.get("mid_low_freq", {}).get("recommendations", []):
         recs.append(Recommendation(
@@ -40,6 +41,7 @@ def build_premarket_report_data(
             trend_score=item.get("trend_score", 5),
             beginner_guide=item.get("beginner_guide", ""),
             recommend_date=date,
+            realtime_quote=item.get("realtime_quote", {}),
         ))
 
     pos_items = []

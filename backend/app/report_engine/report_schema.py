@@ -28,6 +28,7 @@ class Recommendation(BaseModel):
     trend_score: int = 5       # 1-10
     beginner_guide: str = ""
     recommend_date: str = ""
+    realtime_quote: dict[str, Any] = Field(default_factory=dict)
 
 
 class RiskAlert(BaseModel):

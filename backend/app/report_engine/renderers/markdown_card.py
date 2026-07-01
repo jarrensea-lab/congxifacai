@@ -1,5 +1,12 @@
 """飞书消息卡片 Markdown 构建器 — 标准化卡片格式"""
 from app.report_engine.report_schema import ReportData
+from app.services.report_templates import _recommendation_quote_lines
+
+
+def _recommendation_dict(recommendation) -> dict:
+    if hasattr(recommendation, "model_dump"):
+        return recommendation.model_dump()
+    return recommendation.dict()
 
 
 def build_premarket_card(data: ReportData) -> str:
@@ -32,6 +39,7 @@ def build_premarket_card(data: ReportData) -> str:
     for r in data.recommendations:
         if r.strategy_type == "short_term":
             lines.append(f"- **{r.name}**({r.code}): {r.reason[:80]}")
+            lines.extend(_recommendation_quote_lines(_recommendation_dict(r)))
             lines.append(f"  🛑 {r.buy_range} | 🎯 {r.target}")
     lines.extend([
         "",
@@ -40,6 +48,7 @@ def build_premarket_card(data: ReportData) -> str:
     for r in data.recommendations:
         if r.strategy_type == "mid_low_freq":
             lines.append(f"- **{r.name}**({r.code}): {r.reason[:80]}")
+            lines.extend(_recommendation_quote_lines(_recommendation_dict(r)))
             lines.append(f"  🛑 {r.buy_range} | 🎯 {r.target}")
     lines.extend([
         "",

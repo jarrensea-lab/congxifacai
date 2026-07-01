@@ -1,5 +1,58 @@
 """V7 报告模板 — 飞书消息卡片 + Markdown 报告格式"""
 from datetime import datetime
+import re
+
+
+def _source_label(source: str) -> str:
+    source = (source or "").lower()
+    if source == "tencent":
+        return "腾讯"
+    return source or "行情源"
+
+
+def _extract_ai_mentioned_prices(*texts: str) -> list[float]:
+    prices = []
+    pattern = re.compile(r"(?:现价|当前价|股价)\s*[:：]?\s*(\d+(?:\.\d+)?)")
+    for text in texts:
+        for match in pattern.finditer(str(text or "").replace(",", "")):
+            try:
+                prices.append(float(match.group(1)))
+            except ValueError:
+                continue
+    return prices
+
+
+def _recommendation_quote_lines(rec: dict) -> list[str]:
+    quote = rec.get("realtime_quote") or rec.get("quote") or {}
+    if not isinstance(quote, dict):
+        return []
+    try:
+        price = float(quote.get("price") or 0)
+    except (TypeError, ValueError):
+        price = 0
+    if price <= 0:
+        return []
+
+    source = _source_label(str(quote.get("source") or ""))
+    change = quote.get("change_pct")
+    try:
+        change_part = f", 涨跌幅 {float(change):+.2f}%"
+    except (TypeError, ValueError):
+        change_part = ""
+    lines = [f"  实时行情: {price:.2f}元 ({source}{change_part})"]
+
+    mentioned = _extract_ai_mentioned_prices(
+        rec.get("reason", ""),
+        rec.get("buy_range", ""),
+        rec.get("beginner_guide", ""),
+    )
+    for ai_price in mentioned:
+        if ai_price > 0 and abs(ai_price - price) / price > 0.02:
+            lines.append(
+                f"  ⚠️ AI文本价格疑似过期: 文本{ai_price:.2f}元 vs 实时{price:.2f}元，以实时行情为准。"
+            )
+            break
+    return lines
 
 
 def daily_report_md(date: str, api_health: bool, deepseek_health: bool,
@@ -105,6 +158,7 @@ def strategy_report_md(decision: dict, backtests: dict = None) -> str:
         lines.append("## ⚡ 短线机会 (1-5天)")
         for r in st["recommendations"]:
             lines.append(f"- **{r.get('name', '')}**({r.get('code', '')}): {r.get('reason', '')}")
+            lines.extend(_recommendation_quote_lines(r))
             lines.append(f"  买入: {r.get('buy_range', '')} | 止损: {r.get('stop_loss', '')} | 目标: {r.get('target', '')}")
             lines.append(f"  👶 {r.get('beginner_guide', '')}")
 
@@ -114,6 +168,7 @@ def strategy_report_md(decision: dict, backtests: dict = None) -> str:
         lines.append("## 📈 中线机会 (1-4周)")
         for r in ml["recommendations"]:
             lines.append(f"- **{r.get('name', '')}**({r.get('code', '')}): {r.get('reason', '')}")
+            lines.extend(_recommendation_quote_lines(r))
             lines.append(f"  买入: {r.get('buy_range', '')} | 止损: {r.get('stop_loss', '')} | 目标: {r.get('target', '')}")
             lines.append(f"  👶 {r.get('beginner_guide', '')}")
 

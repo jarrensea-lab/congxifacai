@@ -66,6 +66,7 @@ async def main():
     # 3. 分析 + 辩论
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
+    from app.services.quote_enrichment import enrich_decision_with_realtime_quotes
     from app.services.report_templates import strategy_report_md
     import httpx
 
@@ -81,6 +82,7 @@ async def main():
     print(f"辩论: R{risk}, {len(pool)}支标的, {decision.get('final_view','?')}", flush=True)
 
     # 4. 策略报告
+    decision = await enrich_decision_with_realtime_quotes(decision, tc)
     report_md = strategy_report_md(decision)
 
     # 4a. Webhook 卡片 (摘要)
