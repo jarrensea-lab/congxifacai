@@ -84,7 +84,7 @@ async def lifespan(app: FastAPI):
         logger.info("飞书 Webhook 已配置")
 
     # ============================================================
-    # V7.3 定时任务注册（主报告服务下一交易日，盘前仅做短校准）
+    # V7.4-dev 定时任务注册（量化生命周期 feature 分支）
     # ============================================================
     scheduler.add_job(
         _run_premarket_with_status,
@@ -141,7 +141,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"已清理旧调度任务: {stale_job_id}")
         except Exception:
             pass
-    logger.info("旺财V7.3 调度器已启动 (次日主报告 + 盘前校准 + 盘中/收盘 + Bot轮询)")
+    logger.info("旺财V7.4-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中/收盘 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -157,7 +157,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
-    version="7.3.0",
+    version="7.4.0-dev",
     lifespan=lifespan,
 )
 
