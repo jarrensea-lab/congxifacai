@@ -3,12 +3,15 @@
 日期：2026-07-01
 分支：`codex/quant-lifecycle-v7-4`
 方案文件：`docs/superpowers/plans/2026-07-01-quant-lifecycle-v7-4-production-plan.md`
+盈利主线决策：`docs/architecture/2026-07-01-profit-centered-pipeline-decision.md`
 
 ## 任务目标
 
 把恭喜发财从“每天生成报告”推进到“候选池、持仓池、定时扫描、飞书预警、收盘复盘”的可运行闭环。
 
 当前阶段不做分钟级和秒级能力，先保证架构、数据、策略、监控、预警能稳定跑通。
+
+所有工作按盈利目标倒推：选出标的，给出策略，用户按策略操作，最终通过复盘提高盈利概率。不能影响候选池、策略、预警或复盘权重的模块，不进入生产主线。
 
 ## Worklist
 
@@ -100,13 +103,16 @@
 
 执行步骤：
 
+- 先阅读盈利主线决策：`docs/architecture/2026-07-01-profit-centered-pipeline-decision.md`。
 - 先阅读深度 review：`docs/sentinel/2026-07-01-sentinel-serenity-pipeline-review.md`。
+- 建立 Evidence Ledger，给 Sentinel 主题、Serenity 候选、辩论建议和候选池提醒统一 evidence_id。
 - 定位 Sentinel 研究包输出结构。
 - 抽取候选主题、候选标的、证据摘要、风险标签。
 - 转成 `candidate_pool` 入池事件。
 - 保持研究层边界：研究结论不直接买卖，只触发入池、继续观察、禁止追、出池。
 - 将 Sentinel evidence 注入 `run_analysis()` / `run_debate()`，使其真正进入策略输入，而不是只进入日报展示。
 - 为 Serenity 角色增加可审计的 `role_votes` / `role_weight` 输出，避免“参与了但无法判断作用”。
+- 将 Serenity 从“辩论观点”升级为候选池评分因子，初始权重 15%，守夜人保留 veto。
 
 预期产物：
 
@@ -114,6 +120,7 @@
 - 对应单元测试。
 - 至少一个历史研究包回放样例。
 - 主报告能标明研究候选是 `已进入策略输入`、`已进入候选池` 还是 `仅报告展示`。
+- 模块贡献报告能区分 Sentinel 证据、Serenity 评分、猎手技术触发、账房估值、守夜人 veto 对最终动作的贡献。
 
 验证方式：
 
@@ -122,6 +129,7 @@
 - `data/candidate_pool.json` 出现 `source=sentinel_serenity` 的候选。
 - `run_debate()` prompt 输入能包含 Sentinel evidence 摘要。
 - 每个研究候选都能追溯到主题、证据、行情校验和账户可买性。
+- 连续样本复盘后能回答：Sentinel 证据是否提高候选命中率，Serenity 候选是否跑赢指数。
 
 ### 6. 告警去重与冷却
 
