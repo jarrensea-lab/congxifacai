@@ -5,6 +5,7 @@ import math
 from typing import Any
 
 from app.services.quant_lifecycle import lot_size_for_code
+from app.services.strategy_profile import get_strategy_profile
 
 
 DEFAULT_SMALL_ACCOUNT_SEEDS: tuple[dict[str, str], ...] = (
@@ -37,9 +38,11 @@ def build_small_account_seed_candidates(
 ) -> list[dict[str, Any]]:
     """Return deterministic outside-pool seeds that a small account can plausibly buy."""
     existing = {str(code).strip() for code in existing_codes or set()}
+    profile = get_strategy_profile()
     assets = _to_float(total_assets, _to_float(available_cash))
     cash = _to_float(available_cash)
-    single_budget = min(cash, assets * 0.35 if assets else cash)
+    single_limit_pct = _to_float(profile.get("single_position_limit_pct"), 50)
+    single_budget = min(cash, assets * (single_limit_pct / 100) if assets else cash)
     rows: list[dict[str, Any]] = []
     for item in DEFAULT_SMALL_ACCOUNT_SEEDS:
         code = item["code"]

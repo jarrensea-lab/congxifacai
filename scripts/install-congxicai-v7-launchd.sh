@@ -41,6 +41,7 @@ fi
 
 export PYTHONPATH="${PROJECT_DIR}/backend"
 export CONGXI_PROJECT_DIR="${PROJECT_DIR}"
+export CONGXI_STRATEGY_MODE="${CONGXI_STRATEGY_MODE:-growth_sprint}"
 
 exec "${PROJECT_DIR}/.venv/bin/python" -m uvicorn app.main:app \
   --host "${HOST}" \

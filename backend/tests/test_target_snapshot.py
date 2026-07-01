@@ -73,3 +73,17 @@ async def test_build_target_snapshot_collects_structured_sources():
     assert snapshot["financial"]["status"] == "ok"
     assert snapshot["sentinel"]["evidence_ids"] == ["ev_test"]
     assert snapshot["serenity"]["score"] == 65
+
+
+@pytest.mark.asyncio
+async def test_build_target_snapshot_uses_quote_name_when_pool_name_is_code():
+    snapshot = await build_target_snapshot(
+        "002123",
+        name="002123",
+        quote_source=FakeQuoteSource(),
+        market_source=FakeMarketSource(),
+        news_source=FakeNewsSource(),
+        financial_fetcher=fake_financial_fetcher,
+    )
+
+    assert snapshot["name"] == "测试标的"

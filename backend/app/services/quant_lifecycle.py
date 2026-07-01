@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import PROJECT_ROOT
+from app.services.strategy_profile import get_strategy_profile
 
 
 def default_candidate_pool_path() -> Path:
@@ -81,9 +82,11 @@ def _execution_gate(
     lot_size = lot_size_for_code(code)
     price = _to_float(current_price)
     lot_value = round(price * lot_size, 2) if price > 0 else 0.0
+    profile = get_strategy_profile()
     assets = _to_float(total_assets, _to_float(available_cash))
     cash = _to_float(available_cash)
-    single_limit = round(assets * 0.35, 2) if assets else cash
+    single_limit_pct = _to_float(profile.get("single_position_limit_pct"), 50)
+    single_limit = round(assets * (single_limit_pct / 100), 2) if assets else cash
     executable_budget = max(0.0, min(cash, single_limit))
     result = {
         "lot_size": lot_size,

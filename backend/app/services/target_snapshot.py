@@ -66,6 +66,10 @@ async def build_target_snapshot(
         else:
             quote_payload = (quotes or {}).get(clean_code) if isinstance(quotes, dict) else None
             snapshot["quote"] = _ok(**quote_payload) if isinstance(quote_payload, dict) else _missing("quote_not_found")
+            if isinstance(quote_payload, dict):
+                quote_name = str(quote_payload.get("name") or "").strip()
+                if quote_name and snapshot["name"] in {"", clean_code}:
+                    snapshot["name"] = quote_name
     else:
         snapshot["quote"] = _missing("quote_fetch_batch_unavailable")
 

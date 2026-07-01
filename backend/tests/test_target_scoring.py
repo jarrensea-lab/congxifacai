@@ -54,8 +54,22 @@ def test_score_target_returns_buy_for_low_price_volume_breakout():
     assert result["entry_price"] == 3.2
     assert result["stop_loss"] == 3.04
     assert result["target_price"] > result["entry_price"]
-    assert result["position_amount"] <= 2129.97
+    assert result["executable_budget"] == 3042.8
+    assert result["position_amount"] <= 3042.8
     assert result["missing_data"] == []
+
+
+def test_score_target_checks_affordability_before_missing_data():
+    snapshot = _base_snapshot(code="002371", price=935.36)
+    snapshot["fund_flow"] = {"status": "missing", "reason": "fund_flow_not_found"}
+
+    result = score_target(snapshot, available_cash=6085.61, total_assets=6085.61)
+
+    assert result["action"] == "research_only"
+    assert result["block_reason"] == "lot_size_exceeded"
+    assert result["lot_value"] == 93536.0
+    assert result["missing_data"] == ["fund_flow"]
+    assert "买不起最小交易单位" in result["decision_reason"]
 
 
 def test_score_target_names_missing_data_instead_of_generic_insufficient():

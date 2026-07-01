@@ -221,7 +221,7 @@ async def test_run_analysis_and_debate_propagate_growth_sprint_profile(monkeypat
             "title": "高收益试验模式",
             "target": "30天内争取 +10%",
             "max_drawdown_pct": 10,
-            "single_position_limit_pct": 35,
+            "single_position_limit_pct": 50,
             "cash_reserve_pct": 10,
             "stop_loss_pct": 5,
         },
@@ -230,7 +230,7 @@ async def test_run_analysis_and_debate_propagate_growth_sprint_profile(monkeypat
 
     assert analysis["strategy_profile"]["title"] == "高收益试验模式"
     assert "高收益试验模式" in captured["holdings_data"]
-    assert "单票上限: 35%" in captured["holdings_data"]
+    assert "单票上限: 50%" in captured["holdings_data"]
     assert "现金底线: 10%" in captured["holdings_data"]
 
 

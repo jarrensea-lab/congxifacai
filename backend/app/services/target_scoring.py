@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.quant_lifecycle import lot_size_for_code
+from app.services.strategy_profile import get_strategy_profile
 
 
 REQUIRED_SOURCES = ("quote", "kline", "fund_flow", "financial")
@@ -23,10 +24,11 @@ def _status_ok(payload: dict[str, Any] | None) -> bool:
 
 
 def _buy_budget(available_cash: float, total_assets: float) -> float:
+    profile = get_strategy_profile()
     assets = _to_float(total_assets, _to_float(available_cash))
     cash = _to_float(available_cash)
-    single_limit = assets * 0.35 if assets else cash
-    reserve_cash = assets * 0.10 if assets else 0
+    single_limit = assets * (_to_float(profile.get("single_position_limit_pct"), 50) / 100) if assets else cash
+    reserve_cash = assets * (_to_float(profile.get("cash_reserve_pct"), 10) / 100) if assets else 0
     return round(max(0.0, min(cash - reserve_cash, single_limit)), 2)
 
 
@@ -87,21 +89,6 @@ def score_target(
         "next_signal": "",
     }
 
-    if missing_data:
-        next_signal = "补齐" + "、".join(missing_data)
-        if price > 0:
-            next_signal += f"，且价格维持在¥{price:.2f}上方、量比>=2、成交额>=1亿元、资金流转正。"
-        else:
-            next_signal += "，并恢复实时价格后再给触发价。"
-        return {
-            **base,
-            "score": 40,
-            "action": "watch",
-            "block_reason": "missing_required_data",
-            "decision_reason": "缺少结构化数据项：" + "、".join(missing_data) + "；先补数据，不使用泛化观望兜底。",
-            "next_signal": next_signal,
-        }
-
     if price <= 0:
         return {
             **base,
@@ -118,6 +105,21 @@ def score_target(
             "action": "research_only",
             "block_reason": "lot_size_exceeded",
             "decision_reason": f"{name}({code}) 买不起最小交易单位：{lot_size}股约需¥{lot_value:,.2f}，当前可执行预算约¥{budget:,.2f}。",
+        }
+
+    if missing_data:
+        next_signal = "补齐" + "、".join(missing_data)
+        if price > 0:
+            next_signal += f"，且价格维持在¥{price:.2f}上方、量比>=2、成交额>=1亿元、资金流转正。"
+        else:
+            next_signal += "，并恢复实时价格后再给触发价。"
+        return {
+            **base,
+            "score": 40,
+            "action": "watch",
+            "block_reason": "missing_required_data",
+            "decision_reason": "缺少结构化数据项：" + "、".join(missing_data) + "；先补数据，不使用泛化观望兜底。",
+            "next_signal": next_signal,
         }
 
     technical = _technical_score(snapshot)
