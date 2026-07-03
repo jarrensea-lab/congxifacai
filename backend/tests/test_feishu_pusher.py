@@ -99,3 +99,49 @@ async def test_send_api_card_uses_feishu_message_api(monkeypatch):
     assert requests[1]["headers"] == {"Authorization": "Bearer tenant-token"}
     assert requests[1]["json"]["receive_id"] == "oc_xxx"
     assert requests[1]["json"]["msg_type"] == "interactive"
+
+
+@pytest.mark.asyncio
+async def test_send_api_card_reuses_cached_tenant_token(monkeypatch):
+    feishu_pusher._TOKEN_CACHE.clear()
+    requests = []
+
+    class FakeResponse:
+        def __init__(self, payload):
+            self.status_code = 200
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class FakeClient:
+        def __init__(self, timeout):
+            self.timeout = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, **kwargs):
+            requests.append(url)
+            if url.endswith("/tenant_access_token/internal"):
+                return FakeResponse({"tenant_access_token": "tenant-token", "expire": 7200})
+            return FakeResponse({"code": 0})
+
+    monkeypatch.setattr(feishu_pusher.httpx, "AsyncClient", FakeClient)
+
+    for _ in range(2):
+        assert await feishu_pusher.send_api_card(
+            app_id="cli_cache",
+            app_secret="secret",
+            chat_id="oc_xxx",
+            title="标题",
+            content="正文",
+        ) is True
+
+    token_requests = [url for url in requests if url.endswith("/tenant_access_token/internal")]
+    message_requests = [url for url in requests if url.endswith("/im/v1/messages")]
+    assert len(token_requests) == 1
+    assert len(message_requests) == 2

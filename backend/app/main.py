@@ -48,6 +48,7 @@ from app.services.schedule_policy import (
     should_run_premarket_calibration,
 )
 from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
+from app.services.notification_gate import NotificationGate, build_alert_digest
 
 # 报告引擎
 from app.report_engine.engine import report_engine
@@ -315,17 +316,11 @@ def _decision_recommendations(decision: dict) -> list[dict]:
     return recommendations
 
 
+notification_gate = NotificationGate()
+
+
 def _format_lifecycle_alerts(alerts: list[dict]) -> str:
-    lines = ["**候选池/持仓生命周期提醒**", ""]
-    for alert in alerts[:8]:
-        lines.append(
-            f"- {alert.get('stock_name', '')}({alert.get('stock_code', '')}) "
-            f"{alert.get('action', '')}: {alert.get('message', '')}"
-        )
-        suggestion = alert.get("suggestion")
-        if suggestion:
-            lines.append(f"  建议: {suggestion}")
-    return "\n".join(lines)
+    return build_alert_digest(alerts, title="候选池/持仓生命周期提醒")
 
 
 async def _scan_candidate_pool_and_push(stage: str, available_cash: float, total_assets: float = 0) -> dict:
@@ -341,10 +336,14 @@ async def _scan_candidate_pool_and_push(stage: str, available_cash: float, total
         return {"scanned": 0, "alerts": [], "error": str(exc)}
 
     alerts = result.get("alerts", [])
-    if alerts:
+    deliverable_alerts = notification_gate.filter_alerts(alerts, stage=stage)
+    if deliverable_alerts:
         title = f"旺财V7.5 候选池提醒 - {stage}"
-        _feishu_webhook_push(title, _format_lifecycle_alerts(alerts))
-    logger.info(f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} alerts={len(alerts)}")
+        _feishu_webhook_push(title, _format_lifecycle_alerts(deliverable_alerts))
+    logger.info(
+        f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} "
+        f"alerts={len(alerts)} delivered={len(deliverable_alerts)}"
+    )
     return result
 
 
@@ -663,7 +662,9 @@ async def _run_afternoon_with_status():
                     f"{alert.get('stock_name')}({alert.get('stock_code')}) - {alert.get('message')}"
                 )
             if watch_alerts:
-                _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(watch_alerts))
+                deliverable_watch_alerts = notification_gate.filter_alerts(watch_alerts, stage="持仓")
+                if deliverable_watch_alerts:
+                    _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(deliverable_watch_alerts))
             acc = db.query(SimAccount).first()
             cash, total_assets = _account_cash_and_total(acc)
             lifecycle_result = await _scan_candidate_pool_and_push("午后", cash, total_assets)

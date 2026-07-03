@@ -1,11 +1,13 @@
 """V7 飞书推送 — OpenAPI 优先，Webhook/lark-cli 兜底。"""
 import subprocess
 import json
+import time
 import httpx
 from app.utils.logger import logger
 
 LARK_CLI = "/Users/zhuchenyuan/.npm-global/bin/lark-cli"
 CONGXI_CHAT_ID = "oc_c51ef6103f2e0b5b9ed9c40ab86b3e45"
+_TOKEN_CACHE: dict[str, object] = {}
 
 
 def _placeholder(value: str | None) -> bool:
@@ -76,14 +78,8 @@ async def send_api_card(
     base = api_base.rstrip("/")
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            token_resp = await client.post(
-                f"{base}/open-apis/auth/v3/tenant_access_token/internal",
-                json={"app_id": app_id, "app_secret": app_secret},
-            )
-            token_payload = token_resp.json()
-            token = token_payload.get("tenant_access_token")
-            if token_resp.status_code != 200 or not token:
-                logger.warning("Feishu API token request failed")
+            token = await get_tenant_access_token(client, base, app_id, app_secret)
+            if not token:
                 return False
             msg_resp = await client.post(
                 f"{base}/open-apis/im/v1/messages",
@@ -103,6 +99,28 @@ async def send_api_card(
     except Exception as e:
         logger.warning(f"Feishu API push failed: {e}")
         return False
+
+
+async def get_tenant_access_token(client: httpx.AsyncClient, api_base: str, app_id: str, app_secret: str) -> str:
+    """Return cached tenant token; refresh before expiry to save API quota."""
+    cache_key = f"{api_base}:{app_id}"
+    now = time.time()
+    cached = _TOKEN_CACHE.get(cache_key)
+    if isinstance(cached, dict) and cached.get("token") and float(cached.get("expires_at", 0)) > now + 300:
+        return str(cached["token"])
+
+    token_resp = await client.post(
+        f"{api_base}/open-apis/auth/v3/tenant_access_token/internal",
+        json={"app_id": app_id, "app_secret": app_secret},
+    )
+    token_payload = token_resp.json()
+    token = token_payload.get("tenant_access_token")
+    if token_resp.status_code != 200 or not token:
+        logger.warning("Feishu API token request failed")
+        return ""
+    expire = float(token_payload.get("expire") or 7200)
+    _TOKEN_CACHE[cache_key] = {"token": token, "expires_at": now + expire}
+    return str(token)
 
 
 async def send_feishu_card(
