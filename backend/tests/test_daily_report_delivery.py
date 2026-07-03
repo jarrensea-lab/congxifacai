@@ -689,6 +689,49 @@ def test_build_feishu_summary_keeps_full_report_local_hint():
     assert summary.startswith("A" * 50)
 
 
+def test_persist_outside_pool_scan_promotes_affordable_watch_names(tmp_path):
+    from app.services.quant_lifecycle import TargetPoolStore
+    from scripts.daily_report import persist_outside_pool_scan_to_target_pool
+
+    store = TargetPoolStore(tmp_path / "candidate_pool.json")
+    rows = [
+        {
+            "code": "000725",
+            "name": "京东方A",
+            "source": "small_account_discovery",
+            "theme": "面板/低价大成交",
+            "current_price": 8.58,
+            "trigger_price": 8.58,
+            "stop_loss": 8.15,
+            "target_price": 9.61,
+            "affordable": True,
+            "chasing_risk": False,
+            "watch_reason": "池外小账户补扫；等待资金流转正。",
+        },
+        {
+            "code": "688008",
+            "name": "澜起科技",
+            "current_price": 68.5,
+            "affordable": False,
+            "chasing_risk": False,
+        },
+    ]
+
+    promoted = persist_outside_pool_scan_to_target_pool(
+        rows,
+        available_cash=6085.61,
+        total_assets=6085.61,
+        store=store,
+    )
+
+    assert promoted == 1
+    item = store.get("000725")
+    assert item["status"] == "watching"
+    assert item["source"] == "small_account_discovery"
+    assert item["evidence"]["trigger_price"] == 8.58
+    assert store.get("688008") is None
+
+
 def test_save_codex_consultation_uses_report_archive_flow(tmp_path):
     from scripts.save_codex_consultation import save_consultation
 

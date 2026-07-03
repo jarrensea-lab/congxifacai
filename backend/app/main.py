@@ -330,12 +330,13 @@ def _format_lifecycle_alerts(alerts: list[dict]) -> str:
     return "\n".join(lines)
 
 
-async def _scan_candidate_pool_and_push(stage: str, available_cash: float) -> dict:
+async def _scan_candidate_pool_and_push(stage: str, available_cash: float, total_assets: float = 0) -> dict:
     try:
         result = await evaluate_candidate_pool(
             CandidatePoolStore(),
             TencentDataSource(),
             available_cash=float(available_cash or 0),
+            total_assets=float(total_assets or 0),
         )
     except Exception as exc:
         logger.warning(f"{stage}候选池扫描失败: {exc}")
@@ -347,6 +348,12 @@ async def _scan_candidate_pool_and_push(stage: str, available_cash: float) -> di
         _feishu_webhook_push(title, _format_lifecycle_alerts(alerts))
     logger.info(f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} alerts={len(alerts)}")
     return result
+
+
+def _account_cash_and_total(acc: SimAccount | None) -> tuple[float, float]:
+    if not acc:
+        return 0.0, 0.0
+    return acc.cash / 100, acc.total_value / 100
 
 
 def _get_today_risk_alerts(db: Session, today: datetime | None = None) -> list[RiskAlert]:
@@ -547,6 +554,7 @@ async def _run_midday_with_status():
             lifecycle_result = await _scan_candidate_pool_and_push(
                 "午盘",
                 market_data.get("available_cash", 0),
+                market_data.get("total_assets", market_data.get("total_value", 0)),
             )
             alert_count = len(lifecycle_result.get("alerts", []))
             tip = "候选池已触发提醒，请按飞书卡片人工复核。" if alert_count else "候选池暂无可执行触发，继续观察。"
@@ -616,8 +624,8 @@ async def _run_afternoon_with_status():
             if not positions:
                 logger.info("空仓：推送精简午后检查")
                 acc = db.query(SimAccount).first()
-                cash = acc.cash / 100 if acc else 0
-                lifecycle_result = await _scan_candidate_pool_and_push("午后", cash)
+                cash, total_assets = _account_cash_and_total(acc)
+                lifecycle_result = await _scan_candidate_pool_and_push("午后", cash, total_assets)
                 lifecycle_alerts = lifecycle_result.get("alerts", [])
                 await report_engine.push_afternoon_risk(
                     date=today_str,
@@ -693,8 +701,8 @@ async def _run_afternoon_with_status():
             if watch_alerts:
                 _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(watch_alerts))
             acc = db.query(SimAccount).first()
-            cash = acc.cash / 100 if acc else 0
-            lifecycle_result = await _scan_candidate_pool_and_push("午后", cash)
+            cash, total_assets = _account_cash_and_total(acc)
+            lifecycle_result = await _scan_candidate_pool_and_push("午后", cash, total_assets)
             lifecycle_alerts = lifecycle_result.get("alerts", [])
 
             # 统一推送午后风控（有警告红色/无警告绿色）
