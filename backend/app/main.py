@@ -47,6 +47,8 @@ from app.services.schedule_policy import (
     should_run_main_report,
     should_run_premarket_calibration,
 )
+from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
+from app.services.notification_gate import NotificationGate, build_alert_digest
 
 # 报告引擎
 from app.report_engine.engine import report_engine
@@ -58,27 +60,20 @@ class FeishuNotifier:
         self.webhook_url = settings.FEISHU_WEBHOOK_URL
 
     async def send(self, title: str, content: str) -> bool:
-        if not self.webhook_url or "YOUR_WEBHOOK_ID" in self.webhook_url:
-            return False
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                payload = {
-                    "msg_type": "interactive",
-                    "card": {
-                        "header": {
-                            "title": {"tag": "plain_text", "content": title},
-                            "template": "red" if "风险" in title else "blue",
-                        },
-                        "elements": [{"tag": "markdown", "content": content[:3000]}],
-                    },
-                }
-                resp = await client.post(self.webhook_url, json=payload)
-                ok = resp.status_code == 200
-                if ok:
-                    logger.info(f"飞书消息发送成功: {title}")
-                else:
-                    logger.warning(f"飞书消息发送失败: {resp.status_code} {resp.text[:200]}")
-                return ok
+            result = await send_feishu_card(
+                title=title,
+                content=content,
+                webhook_url=self.webhook_url,
+                color="red" if "风险" in title else "blue",
+                app_id=settings.FEISHU_APP_ID,
+                app_secret=settings.FEISHU_APP_SECRET,
+                chat_id=settings.FEISHU_CHAT_ID,
+                api_base=settings.FEISHU_API_BASE,
+            )
+            ok = result.get("feishu_api") or result.get("feishu_webhook")
+            logger.info(f"飞书消息发送{'成功' if ok else '失败'}: {title} channel={result.get('channel', '')}")
+            return bool(ok)
         except Exception as e:
             logger.error(f"飞书推送异常: {e}")
             return False
@@ -89,8 +84,12 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("数据库初始化完成")
 
-    if not settings.FEISHU_WEBHOOK_URL or "YOUR_WEBHOOK_ID" in settings.FEISHU_WEBHOOK_URL:
-        logger.warning("飞书 Webhook URL 未配置，消息推送将不可用。请在 .env.local 中设置 FEISHU_WEBHOOK_URL")
+    has_feishu_api = bool(settings.FEISHU_APP_ID and settings.FEISHU_APP_SECRET and settings.FEISHU_CHAT_ID)
+    has_webhook = bool(settings.FEISHU_WEBHOOK_URL and "YOUR_WEBHOOK_ID" not in settings.FEISHU_WEBHOOK_URL)
+    if not has_feishu_api and not has_webhook:
+        logger.warning("飞书 OpenAPI 与 Webhook 都未配置，消息推送将不可用。")
+    elif has_feishu_api:
+        logger.info("飞书 OpenAPI 已配置，推送将优先使用 API")
     else:
         logger.info("飞书 Webhook 已配置")
 
@@ -168,7 +167,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
-    version="7.5.0-dev",
+    version="8.0.0-dev",
     lifespan=lifespan,
 )
 
@@ -317,17 +316,11 @@ def _decision_recommendations(decision: dict) -> list[dict]:
     return recommendations
 
 
+notification_gate = NotificationGate()
+
+
 def _format_lifecycle_alerts(alerts: list[dict]) -> str:
-    lines = ["**候选池/持仓生命周期提醒**", ""]
-    for alert in alerts[:8]:
-        lines.append(
-            f"- {alert.get('stock_name', '')}({alert.get('stock_code', '')}) "
-            f"{alert.get('action', '')}: {alert.get('message', '')}"
-        )
-        suggestion = alert.get("suggestion")
-        if suggestion:
-            lines.append(f"  建议: {suggestion}")
-    return "\n".join(lines)
+    return build_alert_digest(alerts, title="候选池/持仓生命周期提醒")
 
 
 async def _scan_candidate_pool_and_push(stage: str, available_cash: float, total_assets: float = 0) -> dict:
@@ -343,10 +336,14 @@ async def _scan_candidate_pool_and_push(stage: str, available_cash: float, total
         return {"scanned": 0, "alerts": [], "error": str(exc)}
 
     alerts = result.get("alerts", [])
-    if alerts:
+    deliverable_alerts = notification_gate.filter_alerts(alerts, stage=stage)
+    if deliverable_alerts:
         title = f"旺财V7.5 候选池提醒 - {stage}"
-        _feishu_webhook_push(title, _format_lifecycle_alerts(alerts))
-    logger.info(f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} alerts={len(alerts)}")
+        _feishu_webhook_push(title, _format_lifecycle_alerts(deliverable_alerts))
+    logger.info(
+        f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} "
+        f"alerts={len(alerts)} delivered={len(deliverable_alerts)}"
+    )
     return result
 
 
@@ -369,76 +366,42 @@ def _get_today_risk_alerts(db: Session, today: datetime | None = None) -> list[R
 
 
 def _feishu_webhook_push(title: str, content: str) -> bool:
-    """同步飞书 webhook 推送（供 scheduler 线程使用）"""
-    """同步飞书 webhook 推送 + 指数退避重试（供 APScheduler 线程使用）"""
+    """同步飞书推送：OpenAPI 优先，Webhook 兜底（供 APScheduler 线程使用）。"""
     MAX_RETRIES = 3
     BASE_DELAY = 10  # 秒
 
-    webhook_url = settings.FEISHU_WEBHOOK_URL
-    if not webhook_url or "YOUR_WEBHOOK" in webhook_url:
-        logger.warning("飞书Webhook未配置，跳过推送")
-        return False
-
     for attempt in range(1 + MAX_RETRIES):
         try:
-            import requests
             template = "red"
             if "风险" not in title and "熔断" not in title and "告警" not in title:
                 template = "green" if any(kw in title for kw in ("检查", "无忧", "空仓")) else "blue"
-            payload = {
-                "msg_type": "interactive",
-                "card": {
-                    "header": {"title": {"tag": "plain_text", "content": title},
-                               "template": template},
-                    "elements": [{"tag": "markdown", "content": content[:3000]}],
-                },
-            }
-            resp = requests.post(webhook_url, json=payload, timeout=15)
-            if resp.status_code == 200:
-                logger.info(f"Webhook OK (attempt {attempt+1}): {title}")
+            result = send_feishu_card_sync(
+                title=title,
+                content=content,
+                webhook_url=settings.FEISHU_WEBHOOK_URL,
+                color=template,
+                app_id=settings.FEISHU_APP_ID,
+                app_secret=settings.FEISHU_APP_SECRET,
+                chat_id=settings.FEISHU_CHAT_ID,
+                api_base=settings.FEISHU_API_BASE,
+            )
+            if result.get("feishu_api") or result.get("feishu_webhook"):
+                logger.info(f"Feishu OK (attempt {attempt+1}, channel={result.get('channel', '')}): {title}")
                 return True
-            logger.warning(f"Webhook FAIL (attempt {attempt+1}/{MAX_RETRIES+1}): {resp.status_code} - {title}")
-            if 400 <= resp.status_code < 500:
-                logger.warning(f"Webhook 4xx 不重试: {resp.status_code}")
-                return False
-        except requests.exceptions.Timeout:
-            logger.warning(f"Webhook 超时 (attempt {attempt+1}): {title}")
-        except requests.exceptions.ConnectionError as e:
-            logger.warning(f"Webhook 连接失败 (attempt {attempt+1}): {e}")
+            logger.warning(f"Feishu FAIL (attempt {attempt+1}/{MAX_RETRIES+1}): {result.get('error', '')} - {title}")
         except Exception as e:
-            logger.warning(f"Webhook 异常 (attempt {attempt+1}): {e}")
+            logger.warning(f"Feishu 异常 (attempt {attempt+1}): {e}")
 
         if attempt == MAX_RETRIES:
-            logger.error(f"Webhook 已达最大重试次数 ({MAX_RETRIES})，放弃: {title}")
+            logger.error(f"Feishu 已达最大重试次数 ({MAX_RETRIES})，放弃: {title}")
             return False
 
         delay = compute_retry_delay(attempt + 1, BASE_DELAY, 120)
-        logger.info(f"Webhook 将在 {delay:.0f}s 后重试...")
+        logger.info(f"Feishu 将在 {delay:.0f}s 后重试...")
         import time
         time.sleep(delay)
 
     return False
-    webhook_url = settings.FEISHU_WEBHOOK_URL
-    if not webhook_url or "YOUR_WEBHOOK" in webhook_url:
-        logger.warning("飞书Webhook未配置，跳过推送")
-        return False
-    try:
-        import requests
-        payload = {
-            "msg_type": "interactive",
-            "card": {
-                "header": {"title": {"tag": "plain_text", "content": title},
-                           "template": "red" if "风险" in title or "熔断" in title else "blue"},
-                "elements": [{"tag": "markdown", "content": content[:3000]}],
-            },
-        }
-        resp = requests.post(webhook_url, json=payload, timeout=15)
-        ok = resp.status_code == 200
-        logger.info(f"Webhook {'OK' if ok else 'FAIL '+str(resp.status_code)}: {title}")
-        return ok
-    except Exception as e:
-        logger.error(f"Webhook异常: {e}")
-        return False
 
 async def _run_premarket_with_status():
     """盘前任务 — AI辩论 + 建仓计划 -> 飞书推送"""
@@ -699,7 +662,9 @@ async def _run_afternoon_with_status():
                     f"{alert.get('stock_name')}({alert.get('stock_code')}) - {alert.get('message')}"
                 )
             if watch_alerts:
-                _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(watch_alerts))
+                deliverable_watch_alerts = notification_gate.filter_alerts(watch_alerts, stage="持仓")
+                if deliverable_watch_alerts:
+                    _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(deliverable_watch_alerts))
             acc = db.query(SimAccount).first()
             cash, total_assets = _account_cash_and_total(acc)
             lifecycle_result = await _scan_candidate_pool_and_push("午后", cash, total_assets)

@@ -1,5 +1,32 @@
 # 恭喜发财 更新日志
 
+## v8.0.0-dev (2026-07-03) — 盈利操作系统：Regime + Playbook + Risk Budget + Event Alert
+
+### 顶层方向
+- ✅ **项目目标重定为盈利操作系统**：不再把系统理解成“每天猜一只股票”或“生成更多研究报告”，而是围绕真实账户的候选发现、剧本触发、仓位计算、风险识别、人工复核和复盘校准运转。
+- ✅ **v8 架构审查归档**：新增 `docs/architecture/2026-07-03-v8-profit-system-architecture-review.md`，明确哪些能力保留、哪些删除、哪些推倒重来、哪些优化和新建。
+- ✅ **保留 v7.5 地基**：Target Pool、Target Snapshot、Sentinel/Serenity 证据、账户可执行性和主报告动作优先继续作为生产底座。
+
+### 策略与风控
+- ✅ **市场状态过滤**：新增 `market_regime.py`，用指数变化、上涨家数占比和板块相对强弱识别冰点/恐慌/单边下跌，阻断低吸接飞刀。
+- ✅ **交易剧本引擎**：新增 `playbook_engine.py`，将机会拆成 `breakout_entry` 和 `dip_entry`，分别处理放量突破与低吸二次回踩。
+- ✅ **风险预算仓位计算**：新增 `position_sizing.py`，按账户权益、现金底线、单票上限、每笔风险预算、入场价和止损价倒推出可买股数。
+- ✅ **v8 阻断状态入池**：候选池支持 `blocked_chasing`、`risk_budget_too_small`、`regime_blocks_dip` 等状态，避免研究线索绕过剧本和风控直接变成买入建议。
+- ✅ **池外机会进入候选池**：低价高流动性池外扫描可以把买得起且具备触发线索的标的提升为观察项，进入盘中扫描和飞书提醒闭环。
+
+### 飞书与盘中提醒
+- ✅ **飞书 OpenAPI 优先**：新增 `FEISHU_APP_ID`、`FEISHU_APP_SECRET`、`FEISHU_CHAT_ID`、`FEISHU_API_BASE` 配置；统一发送器默认 OpenAPI，失败后回退 Webhook。
+- ✅ **飞书 token 缓存**：`tenant_access_token` 在常驻进程中缓存，避免每条消息都消耗一次 token 请求。
+- ✅ **通知节流与聚合**：新增 `notification_gate.py`，候选池和持仓预警按 `stage/code/action/playbook` 本地去重，按动作设置冷却窗口，并聚合成一张提醒卡。
+- ✅ **固定报告不被节流**：日报、盘前、午后和收盘报告继续按计划推送；节流只作用于高频候选池/持仓预警。
+
+### 验证
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests/test_feishu_pusher.py backend/tests/test_notification_gate.py backend/tests/test_quant_lifecycle.py -q`：`18 passed`。
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests -q`：`241 passed`。
+- `.venv/bin/python -m ruff check backend scripts`：通过。
+- `git diff --check`：通过。
+- `/review`：发现 1 个本地状态损坏容错问题，已修复并补测试；无剩余阻断项。
+
 ## v7.5.0-dev (2026-07-01) — 盈利策略管线重构
 
 ### 策略主线

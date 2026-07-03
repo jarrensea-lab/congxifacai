@@ -105,16 +105,20 @@ async def main():
     decision = await enrich_decision_with_realtime_quotes(decision, tc)
     report_md = strategy_report_md(decision)
 
-    # 4a. Webhook 卡片 (摘要)
-    webhook_url = settings.FEISHU_WEBHOOK_URL
-    if webhook_url and "YOUR_WEBHOOK" not in webhook_url:
-        summary = report_md[:2800] + ("\n\n...\n\n*[完整报告已推送至群聊]*" if len(report_md) > 2800 else "")
-        async with httpx.AsyncClient(timeout=15) as client:
-            payload = {"msg_type": "interactive", "card": {
-                "header": {"title": {"tag": "plain_text", "content": f"🐕 旺财V6 盘前策略 [R{risk}]"}, "template": "blue"},
-                "elements": [{"tag": "markdown", "content": summary}]}}
-            resp = await client.post(webhook_url, json=payload)
-            print(f"📨 Webhook卡片: {'✅' if resp.status_code == 200 else '⚠️ '+str(resp.status_code)}", flush=True)
+    # 4a. 飞书卡片 (OpenAPI 优先，Webhook 兜底)
+    from app.services.feishu_pusher import send_feishu_card
+
+    summary = report_md[:2800] + ("\n\n...\n\n*[完整报告已推送至群聊]*" if len(report_md) > 2800 else "")
+    push_result = await send_feishu_card(
+        title=f"🐕 旺财V6 盘前策略 [R{risk}]",
+        content=summary,
+        webhook_url=settings.FEISHU_WEBHOOK_URL,
+        app_id=settings.FEISHU_APP_ID,
+        app_secret=settings.FEISHU_APP_SECRET,
+        chat_id=settings.FEISHU_CHAT_ID,
+        api_base=settings.FEISHU_API_BASE,
+    )
+    print(f"📨 飞书卡片({push_result.get('channel') or 'none'}): {'✅' if push_result.get('feishu_api') or push_result.get('feishu_webhook') else '⚠️'}", flush=True)
 
     # 4b. lark-cli IM 全文推送
     full_text = f"**🐕 旺财V6 盘前策略 [R{risk}]**\n\n{report_md[:7500]}"

@@ -1,10 +1,10 @@
 # 恭喜发财 — Codex 自动化 A 股智能助手
 
-> 基于 DeepSeek/Qwen 云端 AI + Tushare 数据源 + 飞书 Webhook 群机器人的个人 A 股研究与交易辅助工作流
+> 基于 DeepSeek/Qwen 云端 AI + Tushare/Tencent 数据源 + 飞书 OpenAPI/Webhook 的个人 A 股研究与交易辅助工作流
 
 **恭喜发财**是一个运行在 Codex 之上的自动化 A 股交易智能助手，由多角色 AI 辩论引擎驱动，覆盖盘前策略、盘中监控到收盘复盘的全交易流程。
 
-当前 feature 分支版本 `v7.5.0-dev`，核心方向是“盈利策略管线重构”。迭代方向见 [ROADMAP.md](ROADMAP.md)。
+当前 feature 分支版本 `v8.0.0-dev`，核心方向是“盈利操作系统”：市场状态、交易剧本、风险预算、事件提醒和复盘闭环。迭代方向见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -17,8 +17,11 @@ cp .env.example .env.local
 # 编辑 .env.local:
 #   DEEPSEEK_API_KEY=sk-xxx
 #   TUSHARE_TOKEN=xxx
+#   FEISHU_APP_ID=cli_xxx
+#   FEISHU_APP_SECRET=xxx
+#   FEISHU_CHAT_ID=oc_xxx
 #   FEISHU_WEBHOOK_URL=https://open.feishu.cn/...
-#   FEISHU_WEBHOOK_ONLY=true
+#   FEISHU_WEBHOOK_ONLY=false
 ```
 
 ### 2. 安装依赖
@@ -33,7 +36,7 @@ pip install -r requirements.txt
 # 直接启动
 python backend/app/main.py
 
-# 或安装 v7 launchd 守护（启动后自动运行）
+# 或安装现有 launchd 守护（启动后自动运行）
 scripts/install-congxicai-v7-launchd.sh
 ```
 
@@ -72,11 +75,16 @@ scripts/install-congxicai-v7-launchd.sh
 │       │   ├── analysis.py   # 市场数据分析
 │       │   ├── workshop.py   # 策略工作流编排
 │       │   └── debate_tracker.py   # 辩论记录追踪
-│       ├── services/         # 飞书通道、生命周期池 & 指令解析
-│       │   ├── feishu_client.py    # 飞书消息卡片推送
+│       ├── services/         # 飞书通道、生命周期池、剧本和风控预算
+│       │   ├── feishu_client.py    # 飞书 Bot/旧通道封装
+│       │   ├── feishu_pusher.py    # 飞书 OpenAPI 优先、Webhook 兜底推送
 │       │   ├── quant_lifecycle.py  # 生产候选池/持仓池扫描与提醒
 │       │   ├── target_snapshot.py  # 单标的结构化数据快照
 │       │   ├── target_scoring.py   # 账户可执行评分
+│       │   ├── market_regime.py    # 市场状态过滤
+│       │   ├── playbook_engine.py  # breakout/dip 交易剧本选择
+│       │   ├── position_sizing.py  # 风险预算仓位计算
+│       │   ├── notification_gate.py # 飞书预警去重、冷却和聚合
 │       │   ├── report_archive.py   # Markdown 日期归档
 │       │   ├── schedule_policy.py  # 主报告/盘前校准交易日规则
 │       │   ├── strategy_profile.py # 保守铁律 / 高收益试验模式
@@ -103,9 +111,24 @@ scripts/install-congxicai-v7-launchd.sh
 
 ## 核心技术特性
 
-### v7.5.0-dev 盈利策略管线
+### v8.0.0-dev 盈利操作系统
 
-`v7.5.0-dev` 将系统从“研究堆料/报告输出”推进到“账户可执行策略输出”：
+`v8.0.0-dev` 将系统从“账户可执行策略输出”推进到“可复盘的盈利操作系统”：
+
+- **市场状态先行**：`market_regime.py` 判断指数、赚钱效应和板块相对强弱；冰点、恐慌、单边下跌或板块过弱时禁止低吸接飞刀。
+- **交易剧本选择**：`playbook_engine.py` 将买点拆成 `breakout_entry` 和 `dip_entry`，分别处理放量突破和低吸二次回踩，不再把所有机会压进单一强势确认评分。
+- **风险预算仓位**：`position_sizing.py` 用账户权益、现金底线、单票上限、每笔风险预算、入场价和止损价倒推出可买股数，避免“50% 单票上限 + 5% 止损”直接吞噬账户回撤空间。
+- **候选池生产化**：Target Pool 继续区分 `executable`、`watching`、`research_reference`、`removed`，并支持 `blocked_chasing`、`risk_budget_too_small`、`regime_blocks_dip` 等 v8 阻断状态，研究线索必须经过剧本、市场状态和仓位预算后才能提醒。
+- **池外机会进入雷达**：低价高流动性池外扫描不再只写进报告，而是把买得起、具备触发线索的标的提升为候选池观察项，进入后续盘中扫描。
+- **飞书额度安全**：飞书 OpenAPI 优先、Webhook 兜底；`tenant_access_token` 在常驻进程中缓存，`notification_gate.py` 对候选池/持仓预警做本地去重、冷却和聚合，连续盘中扫描不会把每次轮询都推给飞书。
+- **报告与提醒分工**：固定日报、盘前、午后和收盘报告保持完整推送；高频盘中扫描只在状态变化、止损止盈或可执行机会出现时触发提醒。
+- **AI 的优势位置明确**：Sentinel/Serenity 负责主线发现、证据整理、风险事件和产业链断层，不直接发买卖指令；买点和仓位由确定性规则、硬数据和账户约束落地。
+
+顶层审查：[v8 盈利系统顶层逻辑与架构审查](docs/architecture/2026-07-03-v8-profit-system-architecture-review.md)。
+
+### v7.5 盈利策略管线地基
+
+`v7.5` 已经完成从“研究堆料/报告输出”到“账户可执行策略输出”的地基：
 
 - **主报告先回答动作**：明日唯一实盘狙击标的、买入逻辑、触发价、一手金额、止损/目标和盘前复核信号。
 - **标的池分层**：`executable`、`watching`、`research_reference`、`removed` 四类状态，研究参照不能触发买入。
@@ -145,16 +168,21 @@ scripts/install-congxicai-v7-launchd.sh
 
 | 模式 | 定位 | 关键参数 |
 |------|------|----------|
-| `growth_sprint` | 当前默认：一周/短期高收益实验 | 现金底线 10%，单票 50%，账户最大回撤 -10%，单笔止损 5% |
-| `capital_preservation` | 可手动切回的保守铁律 | 现金底线 30%，小账户单票 10%，单笔止损 3% |
+| `growth_sprint` | 当前默认：短期高收益实验 | 现金底线 10%，单票上限 50%，账户最大回撤 -10%，每笔风险预算 1% |
+| `capital_preservation` | 可手动切回的保守铁律 | 现金底线 30%，小账户单票 10%，单笔止损 3%，每笔风险预算 0.5% |
 
-`growth_sprint` 只改变报告和人工复核的风险边界，不承诺收益，也不触发自动交易。需要恢复保守档时设置 `CONGXI_STRATEGY_MODE=capital_preservation`。AI 原文若出现旧仓位或现金规则，以报告中的“机器可执行校验”为准。
+`growth_sprint` 只改变报告和人工复核的风险边界，不承诺收益，也不触发自动交易。v8 的实际买入股数会再经过 `position_sizing.py` 的风险预算倒推。需要恢复保守档时设置 `CONGXI_STRATEGY_MODE=capital_preservation`。AI 原文若出现旧仓位或现金规则，以报告中的“机器可执行校验”为准。
 
 ### 飞书全通道
 
-当前生产默认仅启用 **Webhook 群机器人消息卡片**，用于盘前策略、风险预警、午盘简报和系统日报摘要。
+当前生产优先使用 **飞书 OpenAPI 群聊卡片**，Webhook 群机器人作为兜底，用于盘前策略、风险预警、午盘简报和系统日报摘要。
 
-飞书多维表格、飞书文档、画板、任务和 lark-cli IM 通道暂时关闭，避免报告内容通过 API 通道写入外部表格或文档。需要重新启用时，先关闭 `FEISHU_WEBHOOK_ONLY` 并单独验证权限。
+额度控制规则：
+
+- `tenant_access_token` 在常驻进程内缓存，避免每条消息都请求 token。
+- 候选池和持仓预警通过 `notification_gate.py` 本地去重、冷却和聚合。
+- 固定报告不进通知 gate，避免节流误伤主报告。
+- 飞书多维表格、飞书文档、画板、任务和 lark-cli IM 通道仍不作为生产主路径，避免报告内容写入外部表格或文档。需要重新启用时，先单独验证权限和额度。
 
 ### Sentinel 研究证据层
 
@@ -239,8 +267,8 @@ DeepSeek API: 约 ¥0.10/交易日，月均 ¥2.20
 ## 版本与命名
 
 ```
-恭喜发财 v7.x.x    ← 当前迭代
-恭喜发财 v8.x.x    ← 规划中
+恭喜发财 v8.x.x    ← 当前迭代：盈利操作系统
+恭喜发财 v7.x.x    ← 已完成地基：账户可执行策略管线
 ```
 `congxi` 是「恭喜财」的拼音缩写，用于内部标识和项目路由名。
 

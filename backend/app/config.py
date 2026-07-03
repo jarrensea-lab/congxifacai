@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     # 飞书机器人
     FEISHU_WEBHOOK_URL: str = ""
     FEISHU_WEBHOOK_ONLY: bool = False
+    FEISHU_APP_ID: str = ""
+    FEISHU_APP_SECRET: str = ""
+    FEISHU_CHAT_ID: str = ""
+    FEISHU_API_BASE: str = "https://open.feishu.cn"
     FEISHU_BRIDGE_PATH: str = os.path.expanduser("~/.codex/feishu-bridge")
     LARK_CLI_PATH: str = "/Users/zhuchenyuan/.npm-global/bin/lark-cli"
 
@@ -87,11 +91,13 @@ def get_settings() -> Settings:
             "QWEN_API_KEY 未配置，Qwen-Plus 裁判将不可用，会自动回退到 DeepSeek。"
             " 如需多模型多样性请在 .env.local 中设置 QWEN_API_KEY"
         )
-    if not s.FEISHU_WEBHOOK_URL or "YOUR_WEBHOOK_ID" in s.FEISHU_WEBHOOK_URL:
+    has_feishu_api = bool(s.FEISHU_APP_ID and s.FEISHU_APP_SECRET and s.FEISHU_CHAT_ID)
+    has_webhook = bool(s.FEISHU_WEBHOOK_URL and "YOUR_WEBHOOK_ID" not in s.FEISHU_WEBHOOK_URL)
+    if not has_feishu_api and not has_webhook:
         import logging
         logging.getLogger("恭喜发财").warning(
-            "FEISHU_WEBHOOK_URL 未配置或使用示例值，飞书推送将不可用。"
-            " 请在 .env.local 中设置正确的 Webhook URL"
+            "飞书 OpenAPI 与 Webhook 都未配置，飞书推送将不可用。"
+            " 请在 .env.local 中设置 FEISHU_APP_ID/FEISHU_APP_SECRET/FEISHU_CHAT_ID 或 FEISHU_WEBHOOK_URL"
         )
     return s
 
