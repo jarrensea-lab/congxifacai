@@ -689,6 +689,23 @@ def test_build_feishu_summary_keeps_full_report_local_hint():
     assert summary.startswith("A" * 50)
 
 
+@pytest.mark.asyncio
+async def test_push_daily_report_to_feishu_uses_unified_channel(monkeypatch):
+    from scripts import daily_report
+
+    async def fake_send(**kwargs):
+        assert kwargs["title"] == "次日策略"
+        assert "正文" in kwargs["content"]
+        return {"feishu_api": True, "feishu_webhook": False, "channel": "api", "error": ""}
+
+    monkeypatch.setattr("app.services.feishu_pusher.send_feishu_card", fake_send)
+
+    result = await daily_report.push_daily_report_to_feishu("次日策略", "正文")
+
+    assert result["feishu_api"] is True
+    assert result["channel"] == "api"
+
+
 def test_persist_outside_pool_scan_promotes_affordable_watch_names(tmp_path):
     from app.services.quant_lifecycle import TargetPoolStore
     from scripts.daily_report import persist_outside_pool_scan_to_target_pool

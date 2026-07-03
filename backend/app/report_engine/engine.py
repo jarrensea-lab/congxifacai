@@ -17,6 +17,7 @@ from app.report_engine.renderers.bitable_writer import bitable_writer
 from app.services.push_tracker import push_tracker, compute_retry_delay
 from app.services.report_archive import save_markdown_report
 from app.services.strategy_profile import get_strategy_profile
+from app.services.feishu_pusher import send_feishu_card_sync
 from app.utils.logger import logger
 
 
@@ -209,67 +210,55 @@ class ReportEngine:
             logger.error(f"午后风控推送异常: {e}")
             return False
 
-    # ── 带指数退避重试的 Webhook ──────────────────────────
+    # ── 带指数退避重试的飞书卡片推送 ───────────────────────
 
     def _webhook_push_with_retry(self, title: str, content_md: str,
                                  max_retries: Optional[int] = None) -> bool:
-        """Webhook 推送 + 指数退避重试
+        """飞书 OpenAPI 优先、Webhook 兜底推送 + 指数退避重试
 
         分布式场景下避免惊群效应，重试间隔加入随机抖动。
         """
-        if not self.webhook_url or "YOUR_WEBHOOK" in self.webhook_url:
-            return False
-
         max_retries = max_retries or self.WEBHOOK_MAX_RETRIES
 
         for attempt in range(1 + max_retries):
             try:
-                import requests
-                payload = {
-                    "msg_type": "interactive",
-                    "card": {
-                        "header": {
-                            "title": {"tag": "plain_text", "content": title},
-                            "template": (
-                                "red" if any(kw in title for kw in ("风控", "告警"))
-                                else "green" if any(kw in title for kw in ("检查", "无忧"))
-                                else "blue"
-                            ),
-                        },
-                        "elements": [{"tag": "markdown", "content": content_md[:3000]}],
-                    },
-                }
-                resp = requests.post(self.webhook_url, json=payload, timeout=15)
+                from app.config import settings
 
-                if resp.status_code == 200:
-                    logger.info(f"Webhook OK (attempt {attempt+1}): {title}")
+                color = (
+                    "red" if any(kw in title for kw in ("风控", "告警"))
+                    else "green" if any(kw in title for kw in ("检查", "无忧"))
+                    else "blue"
+                )
+                result = send_feishu_card_sync(
+                    title=title,
+                    content=content_md,
+                    webhook_url=self.webhook_url,
+                    color=color,
+                    app_id=getattr(settings, "FEISHU_APP_ID", ""),
+                    app_secret=getattr(settings, "FEISHU_APP_SECRET", ""),
+                    chat_id=getattr(settings, "FEISHU_CHAT_ID", ""),
+                    api_base=getattr(settings, "FEISHU_API_BASE", "https://open.feishu.cn"),
+                )
+
+                if result.get("feishu_api") or result.get("feishu_webhook"):
+                    logger.info(f"Feishu OK (attempt {attempt+1}, channel={result.get('channel', '')}): {title}")
                     return True
 
                 logger.warning(
-                    f"Webhook FAIL (attempt {attempt+1}/{max_retries+1}): "
-                    f"{resp.status_code} - {title}"
+                    f"Feishu FAIL (attempt {attempt+1}/{max_retries+1}): "
+                    f"{result.get('error', '')} - {title}"
                 )
-
-                # 4xx 错误不重试（客户端问题）
-                if 400 <= resp.status_code < 500:
-                    logger.warning(f"Webhook 4xx 不重试: {resp.status_code}")
-                    return False
-
-            except requests.exceptions.Timeout:
-                logger.warning(f"Webhook 超时 (attempt {attempt+1}): {title}")
-            except requests.exceptions.ConnectionError as e:
-                logger.warning(f"Webhook 连接失败 (attempt {attempt+1}): {e}")
             except Exception as e:
-                logger.warning(f"Webhook 异常 (attempt {attempt+1}): {e}")
+                logger.warning(f"Feishu 异常 (attempt {attempt+1}): {e}")
 
             # 最后一次尝试也失败了，不再等待
             if attempt == max_retries:
-                logger.error(f"Webhook 已达最大重试次数 ({max_retries})，放弃: {title}")
+                logger.error(f"Feishu 已达最大重试次数 ({max_retries})，放弃: {title}")
                 return False
 
             # 指数退避 + 随机抖动
             delay = compute_retry_delay(attempt + 1, self.WEBHOOK_BASE_DELAY, 120)
-            logger.info(f"Webhook 将在 {delay:.0f}s 后重试...")
+            logger.info(f"Feishu 将在 {delay:.0f}s 后重试...")
             import time
             time.sleep(delay)
 

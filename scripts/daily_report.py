@@ -1199,23 +1199,24 @@ def save_report_to_obsidian(
 
 async def push_daily_report_to_feishu(title: str, md_content: str) -> dict:
     """Push the daily report summary to Feishu and return a delivery status dict."""
-    webhook_url = os.environ.get('FEISHU_WEBHOOK_URL')
-    if not webhook_url or 'YOUR_WEBHOOK' in webhook_url:
-        return {"feishu_webhook": False, "error": "FEISHU_WEBHOOK_URL 未配置"}
-
     try:
-        from app.services.feishu_pusher import send_webhook_card
+        from app.config import settings
+        from app.services.feishu_pusher import send_feishu_card
 
-        ok = await send_webhook_card(
-            webhook_url,
-            title,
-            build_feishu_summary(md_content),
+        result = await send_feishu_card(
+            title=title,
+            content=build_feishu_summary(md_content),
+            webhook_url=os.environ.get("FEISHU_WEBHOOK_URL") or settings.FEISHU_WEBHOOK_URL,
+            app_id=settings.FEISHU_APP_ID,
+            app_secret=settings.FEISHU_APP_SECRET,
+            chat_id=settings.FEISHU_CHAT_ID,
+            api_base=settings.FEISHU_API_BASE,
         )
-        if ok:
-            return {"feishu_webhook": True, "error": ""}
-        return {"feishu_webhook": False, "error": "Webhook 推送失败"}
+        if result.get("feishu_api") or result.get("feishu_webhook"):
+            return result
+        return {**result, "error": result.get("error") or "飞书推送失败"}
     except Exception as e:
-        return {"feishu_webhook": False, "error": f"飞书推送异常: {e}"}
+        return {"feishu_api": False, "feishu_webhook": False, "error": f"飞书推送异常: {e}"}
 
 
 async def build_target_scores_for_report(
