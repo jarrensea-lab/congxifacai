@@ -89,8 +89,37 @@ async def test_candidate_pool_marks_affordable_volume_breakout_actionable(tmp_pa
     )
 
     assert result["alerts"][0]["action"] == "actionable"
-    assert result["alerts"][0]["suggestion"] == "可试仓，必须人工确认价格和仓位"
+    assert result["alerts"][0]["playbook"] == "breakout_entry"
+    assert result["alerts"][0]["position_shares"] == 300
+    assert result["alerts"][0]["risk_amount"] == 48.0
+    assert "人工复核后可试仓" in result["alerts"][0]["suggestion"]
     assert store.get("002123")["status"] == "actionable"
+
+
+@pytest.mark.asyncio
+async def test_candidate_pool_alert_blocks_when_risk_budget_is_too_small(tmp_path):
+    store = CandidatePoolStore(tmp_path / "candidate_pool.json")
+    store.upsert_recommendations([{"code": "002123", "name": "高波动低价", "reason": "放量突破"}], source="manual")
+
+    result = await evaluate_candidate_pool(
+        store,
+        FakeQuoteSource(
+            {
+                "002123": {
+                    "price": 13.0,
+                    "change_pct": 4.2,
+                    "vol_ratio": 2.6,
+                    "amount_wan": 18000,
+                }
+            }
+        ),
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    assert result["alerts"][0]["action"] == "risk_budget_too_small"
+    assert result["alerts"][0]["playbook"] == "breakout_entry"
+    assert store.get("002123")["status"] == "risk_budget_too_small"
 
 
 def test_position_watch_stop_loss_and_target_emit_alerts(tmp_path):
@@ -117,6 +146,16 @@ def test_lot_size_for_code_respects_board_rules():
     assert lot_size_for_code("300750") == 100
     assert lot_size_for_code("688008") == 200
     assert lot_size_for_code("838000") == 100
+
+
+def test_target_pool_accepts_v8_blocking_statuses(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+
+    assert store.upsert_target(code="000725", name="京东方A", status="risk_budget_too_small") is True
+    assert store.get("000725")["status"] == "risk_budget_too_small"
+
+    assert store.upsert_target(code="000100", name="TCL科技", status="regime_blocks_dip") is True
+    assert store.get("000100")["status"] == "regime_blocks_dip"
 
 
 def test_target_pool_routes_unaffordable_serenity_candidate_to_research_reference(tmp_path):

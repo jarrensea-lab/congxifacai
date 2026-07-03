@@ -227,6 +227,8 @@ class TargetPoolStore(CandidatePoolStore):
         "executable",
         "actionable",
         "blocked_chasing",
+        "risk_budget_too_small",
+        "regime_blocks_dip",
         "position",
         "removed",
         "expired",
@@ -343,7 +345,16 @@ def _is_limit_up_or_chasing(price: float, quote: dict[str, Any], change_pct: flo
     return change_pct >= 9.0
 
 
-def _candidate_alert(item: dict[str, Any], quote: dict[str, Any], available_cash: float) -> dict[str, Any] | None:
+def _candidate_alert(
+    item: dict[str, Any],
+    quote: dict[str, Any],
+    available_cash: float,
+    total_assets: float = 0,
+) -> dict[str, Any] | None:
+    from app.services.market_regime import evaluate_market_regime
+    from app.services.playbook_engine import select_playbook
+    from app.services.position_sizing import calculate_position_size
+
     price = _to_float(quote.get("price"))
     if price <= 0:
         return None
@@ -356,6 +367,25 @@ def _candidate_alert(item: dict[str, Any], quote: dict[str, Any], available_cash
     lot_size = lot_size_for_code(code)
     lot_value = price * lot_size
     affordable = lot_value <= available_cash
+    stop_loss = round(price * 0.95, 2)
+    snapshot = {
+        "code": code,
+        "name": name,
+        "quote": quote,
+        "kline": item.get("kline") or {},
+        "fund_flow": item.get("fund_flow") or {},
+        "market_regime": item.get("market_regime") or {},
+    }
+    playbook = select_playbook(snapshot)
+    regime = evaluate_market_regime(snapshot)
+    sizing = calculate_position_size(
+        code=code,
+        entry_price=price,
+        stop_loss=stop_loss,
+        available_cash=available_cash,
+        total_assets=total_assets,
+        profile=get_strategy_profile(),
+    )
 
     base = {
         "stock_code": code,
@@ -367,6 +397,12 @@ def _candidate_alert(item: dict[str, Any], quote: dict[str, Any], available_cash
         "lot_value": round(lot_value, 2),
         "lot_size": lot_size,
         "affordable": affordable,
+        "playbook": playbook.get("playbook", "watch"),
+        "position_amount": sizing.get("position_amount", 0),
+        "position_shares": sizing.get("shares", 0),
+        "risk_budget": sizing.get("risk_budget", 0),
+        "risk_amount": sizing.get("risk_amount", 0),
+        "stop_loss": stop_loss,
     }
 
     if _is_limit_up_or_chasing(price, quote, change_pct):
@@ -378,13 +414,34 @@ def _candidate_alert(item: dict[str, Any], quote: dict[str, Any], available_cash
             "suggestion": "禁止追高，等回落或次日重新评估",
         }
 
-    if affordable and change_pct >= 3.0 and vol_ratio >= 2.0 and amount_wan >= 10000:
+    if playbook.get("playbook") == "dip_entry" and not regime.get("can_dip", True):
+        return {
+            **base,
+            "level": "low",
+            "action": "regime_blocks_dip",
+            "message": f"{name}({code}) 低吸形态出现，但{regime.get('reason')} 暂不买入。",
+            "suggestion": "等大盘止跌、板块相对强度修复后再复核",
+        }
+
+    if playbook.get("triggered") and sizing.get("block_reason") == "risk_budget_too_small":
+        return {
+            **base,
+            "level": "low",
+            "action": "risk_budget_too_small",
+            "message": f"{name}({code}) {playbook.get('playbook')} 触发，但一手风险超过预算。",
+            "suggestion": f"等待价格回落或止损距离收窄，单笔风险预算约¥{sizing.get('risk_budget', 0):.2f}",
+        }
+
+    if affordable and playbook.get("triggered") and sizing.get("position_amount", 0) > 0:
         return {
             **base,
             "level": "mid",
             "action": "actionable",
-            "message": f"{name}({code}) 放量上涨{change_pct:+.2f}%，量比{vol_ratio:.2f}，成交额{amount_wan:.0f}万。",
-            "suggestion": "可试仓，必须人工确认价格和仓位",
+            "message": (
+                f"{name}({code}) {playbook.get('playbook')} 触发，现价¥{price:.2f}，"
+                f"建议{int(sizing.get('shares', 0))}股，风险约¥{sizing.get('risk_amount', 0):.2f}。"
+            ),
+            "suggestion": f"人工复核后可试仓；止损¥{stop_loss:.2f}",
         }
 
     return None
@@ -395,6 +452,7 @@ async def evaluate_candidate_pool(
     quote_source: Any,
     *,
     available_cash: float,
+    total_assets: float = 0,
 ) -> dict[str, Any]:
     items = store.active_items()
     codes = [item["code"] for item in items if item.get("code")]
@@ -405,7 +463,7 @@ async def evaluate_candidate_pool(
     for item in items:
         code = item.get("code", "")
         quote = quotes.get(code) or {}
-        alert = _candidate_alert(item, quote, available_cash)
+        alert = _candidate_alert(item, quote, available_cash, total_assets)
         if alert:
             alerts.append(alert)
             store.record_decision(code, alert["action"], alert)

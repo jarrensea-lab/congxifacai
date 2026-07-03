@@ -389,6 +389,8 @@ def _action_label(value: str) -> str:
         "executable": "可执行候选",
         "watch": "观察等待",
         "watching": "观察等待",
+        "risk_budget_too_small": "风险预算不足",
+        "regime_blocks_dip": "大盘环境阻断低吸",
         "hold": "持有",
         "research_only": "研究参照",
         "research_reference": "研究参照",
@@ -405,6 +407,8 @@ def _block_reason_label(value: str) -> str:
         "missing_required_data": "关键数据未补齐",
         "price_missing": "实时价格缺失",
         "blocked_chasing": "追高风险",
+        "risk_budget_too_small": "一手风险超过预算",
+        "regime_blocks_dip": "大盘/板块环境阻断低吸",
         "price_not_triggered": "价格/量能/资金未同时触发",
     }
     return labels.get(str(value or "").lower(), _humanize_reason(value) if value else "无")
@@ -1392,6 +1396,46 @@ async def build_outside_pool_scan_for_report(
     )
 
 
+def persist_outside_pool_scan_to_target_pool(
+    rows: list[dict],
+    *,
+    available_cash: float,
+    total_assets: float,
+    store=None,
+) -> int:
+    """Promote affordable outside-pool watch names into the lifecycle pool."""
+    from app.services.quant_lifecycle import TargetPoolStore
+
+    target_pool = store or TargetPoolStore()
+    upserted = 0
+    for row in rows or []:
+        if not row.get("affordable") or row.get("chasing_risk"):
+            continue
+        code = str(row.get("code") or "").strip()
+        if not code:
+            continue
+        ok = target_pool.upsert_target(
+            code=code,
+            name=row.get("name") or code,
+            status="watching",
+            source="small_account_discovery",
+            evidence={
+                "reason": row.get("watch_reason", ""),
+                "trigger_price": row.get("trigger_price"),
+                "stop_loss": row.get("stop_loss"),
+                "target_price": row.get("target_price"),
+                "theme": row.get("theme", ""),
+                "source": row.get("source", "small_account_discovery"),
+            },
+            current_price=row.get("current_price"),
+            available_cash=available_cash,
+            total_assets=total_assets,
+        )
+        if ok:
+            upserted += 1
+    return upserted
+
+
 async def finalize_daily_report(
     *,
     lines: list[str],
@@ -1606,7 +1650,12 @@ async def main():
             existing_codes=existing_codes,
         )
         decision["outside_pool_scan"] = outside_scan
-        print(f"   池外补扫完成: {len(outside_scan)} 个候选", flush=True)
+        promoted = persist_outside_pool_scan_to_target_pool(
+            outside_scan,
+            available_cash=available_cash,
+            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+        )
+        print(f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警", flush=True)
     except Exception as e:
         print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
 
