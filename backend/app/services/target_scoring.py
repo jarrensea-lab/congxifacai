@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.market_regime import evaluate_market_regime
+from app.services.playbook_engine import select_playbook
+from app.services.position_sizing import calculate_position_size
 from app.services.quant_lifecycle import lot_size_for_code
 from app.services.strategy_profile import get_strategy_profile
 
@@ -63,6 +66,7 @@ def score_target(
     code = str(snapshot.get("code") or "").strip()
     name = str(snapshot.get("name") or code)
     quote = snapshot.get("quote") or {}
+    profile = get_strategy_profile()
     price = _to_float(quote.get("price"))
     lot_size = lot_size_for_code(code)
     lot_value = round(price * lot_size, 2) if price > 0 else 0.0
@@ -70,6 +74,20 @@ def score_target(
     missing_data = [key for key in REQUIRED_SOURCES if not _status_ok(snapshot.get(key))]
     stop_loss = round(price * 0.95, 2) if price > 0 else 0
     target_price = round(price * 1.12, 2) if price > 0 else 0
+    regime = evaluate_market_regime(snapshot)
+    playbook = select_playbook(snapshot) if price > 0 else {}
+    sizing = (
+        calculate_position_size(
+            code=code,
+            entry_price=price,
+            stop_loss=stop_loss,
+            available_cash=available_cash,
+            total_assets=total_assets,
+            profile=profile,
+        )
+        if price > 0
+        else {}
+    )
 
     base = {
         "code": code,
@@ -83,6 +101,11 @@ def score_target(
         "stop_loss": stop_loss,
         "target_price": target_price,
         "position_amount": 0,
+        "position_shares": 0,
+        "risk_budget": sizing.get("risk_budget", 0),
+        "risk_amount": 0,
+        "playbook": playbook.get("playbook", "watch"),
+        "market_regime": regime,
         "lot_size": lot_size,
         "lot_value": lot_value,
         "executable_budget": budget,
@@ -124,11 +147,8 @@ def score_target(
 
     technical = _technical_score(snapshot)
     serenity_score = _to_float((snapshot.get("serenity") or {}).get("score"))
-    total_score = round(min(100, technical * 0.7 + serenity_score * 0.3), 1)
+    total_score = round(min(100, technical * 0.7 + serenity_score * 0.3 + _to_float(playbook.get("score_bonus"))), 1)
     change_pct = _to_float(quote.get("change_pct"))
-    vol_ratio = _to_float(quote.get("vol_ratio"))
-    amount_wan = _to_float(quote.get("amount_wan"))
-    position_amount = round(min(budget, lot_value), 2)
 
     if change_pct >= 9:
         return {
@@ -142,7 +162,31 @@ def score_target(
             "next_signal": f"等待回踩至¥{price * 0.97:.2f}附近且不破¥{stop_loss:.2f}，再重新评分。",
         }
 
-    if total_score >= 70 and change_pct >= 3 and vol_ratio >= 2 and amount_wan >= 10000:
+    if sizing.get("block_reason") == "risk_budget_too_small":
+        return {
+            **base,
+            "score": total_score,
+            "action": "watch",
+            "block_reason": "risk_budget_too_small",
+            "stop_loss": stop_loss,
+            "target_price": target_price,
+            "decision_reason": f"{name}({code}) 一手亏损风险超过单笔风险预算，不能为了试错强行买入。",
+            "next_signal": f"等待价格回落或止损距离收窄，使一手风险不超过¥{sizing.get('risk_budget', 0):.2f}。",
+        }
+
+    if playbook.get("playbook") == "dip_entry" and not regime.get("can_dip", True):
+        return {
+            **base,
+            "score": total_score,
+            "action": "watch",
+            "block_reason": "regime_blocks_dip",
+            "stop_loss": stop_loss,
+            "target_price": target_price,
+            "decision_reason": f"{name}({code}) 低吸形态出现，但{regime.get('reason')} 先不接飞刀。",
+            "next_signal": "等大盘止跌、板块相对强度修复后，再重新评估 dip_entry。",
+        }
+
+    if total_score >= 70 and playbook.get("triggered"):
         return {
             **base,
             "score": total_score,
@@ -150,9 +194,11 @@ def score_target(
             "entry_price": round(price, 2),
             "stop_loss": stop_loss,
             "target_price": target_price,
-            "position_amount": position_amount,
-            "decision_reason": f"{name}({code}) 放量突破且账户买得起，可小仓试错，硬止损¥{stop_loss:.2f}。",
-            "next_signal": f"若明日回踩不破¥{stop_loss:.2f}且量比>=2，可按¥{price:.2f}附近人工复核。",
+            "position_amount": sizing.get("position_amount", 0),
+            "position_shares": sizing.get("shares", 0),
+            "risk_amount": sizing.get("risk_amount", 0),
+            "decision_reason": f"{name}({code}) {playbook.get('reason')} 按单笔风险预算试错，硬止损¥{stop_loss:.2f}。",
+            "next_signal": playbook.get("next_signal") or f"若明日回踩不破¥{stop_loss:.2f}，可按¥{price:.2f}附近人工复核。",
         }
 
     return {
@@ -162,6 +208,6 @@ def score_target(
         "block_reason": "price_not_triggered",
         "stop_loss": stop_loss,
         "target_price": target_price,
-        "decision_reason": f"{name}({code}) 数据已覆盖，但趋势/量能/资金未同时触发买入阈值，等待放量突破或回踩确认。",
-        "next_signal": f"明日等价格站稳¥{price:.2f}、量比>=2、成交额>=1亿元且资金流不转弱。",
+        "decision_reason": f"{name}({code}) 数据已覆盖，但{playbook.get('reason', '交易剧本未触发')}，等待交易剧本确认。",
+        "next_signal": playbook.get("next_signal") or f"明日等价格站稳¥{price:.2f}、量比>=2、成交额>=1亿元且资金流不转弱。",
     }

@@ -55,8 +55,51 @@ def test_score_target_returns_buy_for_low_price_volume_breakout():
     assert result["stop_loss"] == 3.04
     assert result["target_price"] > result["entry_price"]
     assert result["executable_budget"] == 3042.8
-    assert result["position_amount"] <= 3042.8
+    assert result["position_amount"] == 960.0
+    assert result["position_shares"] == 300
+    assert result["risk_amount"] == 48.0
+    assert result["playbook"] == "breakout_entry"
     assert result["missing_data"] == []
+
+
+def test_score_target_returns_buy_for_dip_entry_when_pullback_holds_support():
+    snapshot = _base_snapshot(code="002123", price=3.12)
+    snapshot["quote"].update({"change_pct": -1.2, "amount_wan": 7800, "vol_ratio": 1.1})
+    snapshot["kline"]["bars"] = [
+        {"close": 3.0, "high": 3.08, "low": 2.95},
+        {"close": 3.18, "high": 3.24, "low": 3.02},
+        {"close": 3.28, "high": 3.32, "low": 3.11},
+        {"close": 3.12, "high": 3.18, "low": 3.1},
+    ]
+    snapshot["fund_flow"] = {"status": "ok", "net": "资金流出收敛"}
+    snapshot["serenity"] = {"status": "ok", "score": 90, "theme": "测试主题"}
+
+    result = score_target(snapshot, available_cash=6085.61, total_assets=6085.61)
+
+    assert result["action"] == "buy"
+    assert result["playbook"] == "dip_entry"
+    assert result["position_amount"] > 0
+    assert "低吸回踩触发" in result["decision_reason"]
+
+
+def test_score_target_blocks_dip_entry_when_market_regime_is_bad():
+    snapshot = _base_snapshot(code="002123", price=3.12)
+    snapshot["quote"].update({"change_pct": -1.2, "amount_wan": 7800, "vol_ratio": 1.1})
+    snapshot["kline"]["bars"] = [
+        {"close": 3.0, "high": 3.08, "low": 2.95},
+        {"close": 3.18, "high": 3.24, "low": 3.02},
+        {"close": 3.28, "high": 3.32, "low": 3.11},
+        {"close": 3.12, "high": 3.18, "low": 3.1},
+    ]
+    snapshot["fund_flow"] = {"status": "ok", "net": "资金流出收敛"}
+    snapshot["serenity"] = {"status": "ok", "score": 90, "theme": "测试主题"}
+    snapshot["market_regime"] = {"label": "panic", "index_change_pct": -2.4, "breadth": 0.18}
+
+    result = score_target(snapshot, available_cash=6085.61, total_assets=6085.61)
+
+    assert result["action"] == "watch"
+    assert result["block_reason"] == "regime_blocks_dip"
+    assert result["playbook"] == "dip_entry"
 
 
 def test_score_target_checks_affordability_before_missing_data():
