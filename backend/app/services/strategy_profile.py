@@ -15,6 +15,7 @@ STRATEGY_PROFILES: dict[str, dict[str, Any]] = {
         "single_position_limit_pct": 10,
         "standard_single_position_limit_pct": 20,
         "stop_loss_pct": 3,
+        "risk_per_trade_pct": 0.5,
         "allow_high_volatility": False,
     },
     "growth_sprint": {
@@ -26,6 +27,7 @@ STRATEGY_PROFILES: dict[str, dict[str, Any]] = {
         "single_position_limit_pct": 50,
         "standard_single_position_limit_pct": 50,
         "stop_loss_pct": 5,
+        "risk_per_trade_pct": 1,
         "allow_high_volatility": True,
     },
 }
