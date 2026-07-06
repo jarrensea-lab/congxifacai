@@ -561,6 +561,68 @@ def test_build_next_day_strategy_sections_renders_mid_frequency_strategy_line():
     assert "可人工复核买入" not in sections
 
 
+def test_build_next_day_strategy_sections_renders_long_horizon_summary():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-01",
+        target_date="2026-07-02",
+        risk_level=3,
+        final_view="观察",
+        confidence=7,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {"shanghai": 4118.89}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "target_scores": [
+                {
+                    "code": "002123",
+                    "name": "长期测试",
+                    "action": "watch",
+                    "score": 68,
+                    "entry_price": 3.2,
+                    "lot_value": 320,
+                    "block_reason": "price_not_triggered",
+                    "decision_reason": "等待交易剧本确认。",
+                    "long_quality_score": 88,
+                    "thesis_status": "healthy",
+                    "valuation_zone": "accumulation_zone",
+                    "red_line_status": "clear",
+                    "combined_decision_reason": "等待交易剧本确认。长期跟踪：assumptions_intact。",
+                },
+                {
+                    "code": "002456",
+                    "name": "红线测试",
+                    "action": "watch",
+                    "score": 45,
+                    "entry_price": 5.0,
+                    "lot_value": 500,
+                    "block_reason": "long_thesis_broken",
+                    "decision_reason": "中长期 thesis 红线触发。",
+                    "long_quality_score": 0,
+                    "thesis_status": "broken",
+                    "valuation_zone": "fair_zone",
+                    "red_line_status": "triggered",
+                    "combined_decision_reason": "中长期 thesis 红线触发。",
+                },
+            ],
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "### 长期依据摘要" in sections
+    assert "长期测试(002123)" in sections
+    assert "论文成立" in sections
+    assert "积累区" in sections
+    assert "红线触发" in sections
+    assert "风险退出" in sections
+    first_screen = sections[:sections.index("## 二、明日盘中雷达触发池")]
+    assert "accumulation_zone" not in first_screen
+
+
 def test_build_next_day_strategy_sections_does_not_render_raw_judge_reasoning_when_scores_exist():
     from scripts.daily_report import build_next_day_strategy_sections
 

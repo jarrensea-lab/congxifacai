@@ -79,6 +79,8 @@ backend/data/*
 # Runtime data, logs, generated reports and local datasets
 data/*
 !data/.gitkeep
+!data/examples/
+!data/examples/long_thesis.example.json
 !data/serenity/
 data/serenity/*
 !data/serenity/theme_candidates.json

@@ -838,6 +838,7 @@ def _new_entry_action_lines(decision: dict) -> list[str]:
     reason = _humanize_reason(buy.get("decision_reason") or "通过结构化评分和账户可执行性校验。")
     return [
         "- 新开仓结论：可以进入人工复核买入。",
+        f"- 本次动作性质：{_action_nature(buy)}。",
         f"- 候选标的：{label}。",
         f"- 建议试仓金额：{amount}，不得超过报告给出的单票预算。",
         f"- 触发价：{entry} 附近或触发价内，不追高。",
@@ -961,6 +962,73 @@ def _render_mid_frequency_strategy(
     return lines
 
 
+def _thesis_status_label(status: str) -> str:
+    return {
+        "healthy": "论文成立",
+        "weakened": "边际弱化",
+        "broken": "红线触发",
+        "stale": "论文过期",
+    }.get(str(status or ""), "未建论文")
+
+
+def _valuation_zone_label(zone: str) -> str:
+    return {
+        "accumulation_zone": "积累区",
+        "fair_zone": "合理区",
+        "above_fair_zone": "偏贵区",
+        "overpriced_zone": "高估区",
+        "unknown": "待估值",
+    }.get(str(zone or ""), "待估值")
+
+
+def _action_nature(item: dict) -> str:
+    action = str(item.get("action") or item.get("status") or "")
+    thesis_status = str(item.get("thesis_status") or "")
+    valuation_zone = str(item.get("valuation_zone") or "")
+    block_reason = str(item.get("block_reason") or "")
+    if thesis_status == "broken" or block_reason == "long_thesis_broken":
+        return "风险退出"
+    if action in {"add", "increase"}:
+        return "长期加仓"
+    if action == "buy" and thesis_status == "healthy" and valuation_zone == "accumulation_zone":
+        return "长期建仓"
+    if action == "buy":
+        return "短线试错"
+    return "观察复核"
+
+
+def _render_long_horizon_summary(rows: list[dict]) -> list[str]:
+    long_rows = [
+        item for item in rows
+        if item.get("thesis_status") or item.get("long_quality_score") or item.get("red_line_status")
+    ]
+    if not long_rows:
+        return []
+    lines = [
+        "### 长期依据摘要",
+        "",
+        "- 这里只解释中长期 thesis 状态，不单独触发交易动作；可执行动作仍以第一屏和账户风控为准。",
+        "",
+        "| 标的 | 论文状态 | 估值区间 | 长期分 | 红线 | 本次动作性质 | 下一步 |",
+        "|---|---|---|---:|---|---|---|",
+    ]
+    for item in long_rows[:8]:
+        next_step = _humanize_reason(
+            item.get("combined_decision_reason")
+            or item.get("decision_reason")
+            or item.get("long_horizon_reason")
+            or "等待 thesis review 或交易触发信号。"
+        )
+        lines.append(
+            f"| {_cell(_target_label(item), 40)} | {_thesis_status_label(item.get('thesis_status'))} | "
+            f"{_valuation_zone_label(item.get('valuation_zone'))} | {item.get('long_quality_score', 0)} | "
+            f"{'触发' if item.get('red_line_status') == 'triggered' else '未触发'} | "
+            f"{_action_nature(item)} | {_cell(next_step, 140)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _structured_review_summary(target_buckets: dict[str, list[dict]], decision: dict) -> str:
     scores = _target_scores(decision)
     if not scores:
@@ -1020,6 +1088,7 @@ def build_next_day_strategy_sections(
         item for item in _outside_pool_scan(decision)
         if _target_code(item) not in hidden_codes
     ]
+    target_scores = _target_scores(visible_decision)
     target_buckets = _split_target_scores(visible_decision)
     primary = _primary_trade_candidate(visible_decision)
     lines = _render_core_dashboard(
@@ -1072,6 +1141,7 @@ def build_next_day_strategy_sections(
         total_assets=total_assets,
         profile=profile,
     ))
+    lines.extend(_render_long_horizon_summary(target_scores))
     lines.extend(_render_target_bucket(
         "今日可执行标的明细",
         target_buckets["executable"],
@@ -1099,7 +1169,6 @@ def build_next_day_strategy_sections(
         "- 数据源审计：",
     ])
     lines.extend(f"  {line}" for line in build_data_source_audit(market_data=market_data, sentinel_package=sentinel_package))
-    target_scores = _target_scores(visible_decision)
     if target_scores:
         lines.extend([
             "",

@@ -45,7 +45,7 @@ async def health_check():
         "uptime_seconds": int(_time.time() - _server_start_time),
         "deepseek": "ok" if ds_ok else "unavailable",
         "database": "ok" if db_ok else "error",
-        "version": "v8.0.0-dev",
+        "version": "v8.1.0-dev",
     }
 
 
