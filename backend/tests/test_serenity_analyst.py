@@ -386,6 +386,29 @@ class TestSerenityPipelineV2:
         assert "买入" not in report
         assert "卖出" not in report
 
+    def test_pipeline_emits_long_horizon_thesis_inputs(self):
+        pipeline = run_serenity_pipeline("电网设备", available_cash=3085.61, total_assets=3085.61)
+        first = pipeline["candidates"][0]
+
+        assert first["long_assumptions"]
+        assert first["red_lines"]
+        assert first["valuation_questions"]
+        assert first["quarterly_verification_tasks"]
+        assert first["bottleneck_duration"] in {"一次性", "1-2季度", "1-3年", "结构性", "待验证"}
+        assert first["bottleneck_map"]["chokepoint"] == first["chokepoint"]
+        assert "substitution_risk" in first["bottleneck_map"]
+
+    def test_report_contains_long_horizon_inputs_without_trading_language(self):
+        pipeline = run_serenity_pipeline("机器人", available_cash=3085.61, total_assets=3085.61)
+        report = build_serenity_research_report(pipeline)
+
+        assert "## 长期论文输入" in report
+        assert "瓶颈持续性" in report
+        assert "去劣红线" in report
+        assert "替代路径风险" in report
+        assert "买入" not in report
+        assert "卖出" not in report
+
 
 class TestSerenityEvidenceCollector:
     def test_quote_adjustment_downgrades_safety_when_lot_exceeds_cash(self):

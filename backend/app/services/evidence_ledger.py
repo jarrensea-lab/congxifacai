@@ -163,6 +163,73 @@ def build_sentinel_evidence(package: dict[str, Any]) -> list[dict[str, Any]]:
     return records
 
 
+def build_long_horizon_evidence(
+    thesis: dict[str, Any],
+    *,
+    report_date: str | None = None,
+    source_report_path: str = "",
+    data_cutoff_date: str = "",
+) -> list[dict[str, Any]]:
+    """Convert a long-horizon thesis into normalized evidence records."""
+    symbol = str(thesis.get("symbol") or thesis.get("code") or "").strip()
+    name = str(thesis.get("name") or symbol)
+    day = report_date or str(thesis.get("date") or "")[:10]
+    confidence = str(thesis.get("confidence") or "C")
+    common = {
+        "date": day,
+        "code": symbol,
+        "name": name,
+        "source": "long_horizon",
+        "confidence": confidence,
+        "source_report_path": source_report_path or str(thesis.get("source_report_path") or ""),
+        "data_cutoff_date": data_cutoff_date or str(thesis.get("data_cutoff_date") or ""),
+        "enters_strategy": False,
+        "enters_target_pool": bool(_is_a_share_code(symbol)),
+    }
+    records: list[dict[str, Any]] = [
+        {
+            **common,
+            "type": "long_thesis",
+            "summary": str(thesis.get("core_thesis") or "")[:240],
+            "quality_score": thesis.get("quality_score", 0),
+            "valuation_anchor": thesis.get("valuation_anchor") or {},
+            "thesis_status": thesis.get("thesis_status", "forming"),
+        }
+    ]
+
+    for item in thesis.get("assumptions") or []:
+        if not isinstance(item, dict):
+            continue
+        assumption_id = str(item.get("id") or item.get("claim") or "")
+        records.append({
+            **common,
+            "type": "long_assumption",
+            "source_id": assumption_id,
+            "summary": str(item.get("claim") or "")[:240],
+            "assumption_status": item.get("status", "unverified"),
+            "verification": item.get("verification", ""),
+            "frequency": item.get("frequency", ""),
+        })
+
+    for item in thesis.get("red_lines") or []:
+        if not isinstance(item, dict):
+            continue
+        red_line_id = str(item.get("id") or item.get("condition") or "")
+        records.append({
+            **common,
+            "type": "long_red_line",
+            "source_id": red_line_id,
+            "summary": str(item.get("condition") or "")[:240],
+            "severity": item.get("severity", "warning"),
+            "red_line_status": item.get("status", "clear"),
+            "action": item.get("action", "review"),
+        })
+
+    for record in records:
+        record["evidence_id"] = _stable_id(record)
+    return records
+
+
 def build_sentinel_evidence_context(package: dict[str, Any] | None) -> str:
     """Render a compact evidence summary for strategy and debate prompts."""
     if not package:

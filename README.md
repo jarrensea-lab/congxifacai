@@ -4,7 +4,7 @@
 
 **恭喜发财**是一个运行在 Codex 之上的自动化 A 股交易智能助手，由多角色 AI 辩论引擎驱动，覆盖盘前策略、盘中监控到收盘复盘的全交易流程。
 
-当前 feature 分支版本 `v8.0.0-dev`，核心方向是“盈利操作系统”：市场状态、交易剧本、风险预算、事件提醒和复盘闭环。迭代方向见 [ROADMAP.md](ROADMAP.md)。
+当前 feature 分支版本 `v8.1.0-dev`，核心方向是“盈利操作系统 + 中长期研究闭环”：市场状态、交易剧本、风险预算、事件提醒、长期 thesis 和复盘闭环。迭代方向见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -110,6 +110,20 @@ scripts/install-congxicai-v7-launchd.sh
 ---
 
 ## 核心技术特性
+
+### v8.1.0-dev 中长期研究闭环
+
+`v8.1.0-dev` 将 ai-berkshire 式中长期研究方法接入恭喜发财主链路，但保持交易边界：长期 thesis 不会单独触发买入，P6 飞书长期事件提醒仍需人工确认后开启。
+
+- **长期 thesis 存储**：新增长期论文 store，记录核心假设、红线、估值锚和复核记录。
+- **长期状态入池但不扫短线**：Target Pool 支持 `long_research`、`long_watch`、`accumulation_zone`、`thesis_review`、`exit_candidate` 等状态，默认不进入短线 active scan。
+- **Evidence Ledger 长期证据**：长期论文、假设和红线生成稳定 evidence id，保留 `confidence`、`source_report_path`、`data_cutoff_date`。
+- **评分拆分**：`target_scoring.py` 新增 `score_long_quality()`，长期质量分只作为约束和解释字段，不绕过交易剧本与账户风控。
+- **Serenity 升级**：Serenity 输出长期假设、去劣红线、估值问题、季度核验任务、瓶颈持续性和替代路径风险。
+- **日报接入**：次日主报告增加“长期依据摘要”和“本次动作性质”，第一屏仍保持可执行动作优先。
+
+执行文档：[v8.1 Long Horizon Integration Plan](docs/worklists/2026-07-06-v8-1-long-horizon-integration-plan.md)。
+架构契约：[Long Horizon Contract](docs/architecture/long-horizon-contract.md)。
 
 ### v8.0.0-dev 盈利操作系统
 

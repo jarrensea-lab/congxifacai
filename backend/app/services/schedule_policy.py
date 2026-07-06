@@ -18,8 +18,13 @@ def _today() -> date:
     return date.today()
 
 
-def main_report_target_date(run_date: date | None = None) -> date:
+def main_report_target_date(
+    run_date: date | None = None,
+    target_date_override: date | None = None,
+) -> date:
     """Return the trading day served by a main report generated on run_date."""
+    if target_date_override is not None:
+        return target_date_override
     day = run_date or _today()
     return next_trading_day(day)
 

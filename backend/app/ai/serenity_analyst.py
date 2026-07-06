@@ -885,6 +885,115 @@ def _research_tier(score: float, red_flags: List[Dict[str, Any]]) -> str:
     return "初步线索"
 
 
+def _assumption_status(score: int) -> str:
+    if score >= 6:
+        return "intact"
+    if score >= 4:
+        return "weakened"
+    return "broken"
+
+
+def _bottleneck_duration(scores: Dict[str, int]) -> str:
+    demand = scores.get("需求确定性", 0)
+    bottleneck = scores.get("瓶颈强度", 0)
+    transmission = scores.get("传导清晰度", 0)
+    purity = scores.get("业务纯度", 0)
+    if demand >= 8 and bottleneck >= 8 and transmission >= 7 and purity >= 7:
+        return "结构性"
+    if bottleneck >= 8 and transmission >= 7:
+        return "1-3年"
+    if bottleneck >= 6:
+        return "1-2季度"
+    if bottleneck <= 3:
+        return "一次性"
+    return "待验证"
+
+
+def _build_long_horizon_inputs(
+    *,
+    code: str,
+    chokepoint: str,
+    chain_position: str,
+    scores: Dict[str, int],
+    flags: List[Dict[str, Any]],
+    verify_next: str,
+) -> Dict[str, Any]:
+    duration = _bottleneck_duration(scores)
+    substitution_risk = (
+        "高：瓶颈强度或传导清晰度不足，可能被替代方案绕过。"
+        if scores.get("瓶颈强度", 0) <= 4 or scores.get("传导清晰度", 0) <= 4
+        else "待跟踪：持续核验客户、价格、产能和替代技术路径。"
+    )
+    verification = verify_next or "核验公告、财报、订单、客户结构和价格数据。"
+    red_lines = [
+        {
+            "id": "evidence_strength_floor",
+            "condition": "证据强度低于 4，说明故事缺少公告、财报、订单或客户交叉验证。",
+            "severity": "high",
+            "status": "triggered" if scores.get("证据强度", 0) <= 3 else "clear",
+        },
+        {
+            "id": "downside_safety_floor",
+            "condition": "下行安全低于 3，说明估值或小账户承受力不足。",
+            "severity": "high",
+            "status": "triggered" if scores.get("下行安全", 0) <= 2 else "clear",
+        },
+        {
+            "id": "substitution_or_bypass",
+            "condition": "出现替代技术、客户绕开、产能过剩或价格快速下滑。",
+            "severity": "medium",
+            "status": "clear",
+        },
+    ]
+    for flag in flags:
+        red_lines.append({
+            "id": f"red_flag_{flag.get('id', 'unknown')}",
+            "condition": flag.get("label", "Serenity 红旗信号触发"),
+            "severity": flag.get("severity", "medium"),
+            "status": "triggered",
+        })
+    return {
+        "long_assumptions": [
+            {
+                "id": "demand_persistence",
+                "claim": "需求不是一次性题材，能在多个季度继续传导。",
+                "status": _assumption_status(scores.get("需求确定性", 0)),
+                "metric": "需求确定性",
+            },
+            {
+                "id": "bottleneck_duration",
+                "claim": f"{chokepoint or '关键瓶颈'} 至少具备 {duration} 的持续性。",
+                "status": _assumption_status(scores.get("瓶颈强度", 0)),
+                "metric": "瓶颈强度",
+            },
+            {
+                "id": "financial_transmission",
+                "claim": f"{chain_position or '产业链位置'} 的变化可以传导到公司收入或毛利。",
+                "status": _assumption_status(scores.get("传导清晰度", 0)),
+                "metric": "传导清晰度",
+            },
+        ],
+        "red_lines": red_lines,
+        "valuation_questions": [
+            "当前估值是否已经充分反映瓶颈持续性？",
+            "若收入传导延后一到两个季度，安全边际是否仍成立？",
+            "一手金额、流动性和回撤空间是否适合当前小账户？",
+        ],
+        "quarterly_verification_tasks": [
+            verification,
+            "每季度复核瓶颈持续性、替代路径、订单兑现、毛利率和库存变化。",
+        ],
+        "bottleneck_duration": duration,
+        "bottleneck_map": {
+            "code": code,
+            "chain_position": chain_position,
+            "chokepoint": chokepoint,
+            "duration": duration,
+            "substitution_risk": substitution_risk,
+        },
+    }
+
+
 def score_company_v2(
     name: str,
     code: str,
@@ -913,6 +1022,14 @@ def score_company_v2(
     actionability = "research_watchlist"
     if high_flag_count or normalized_scores["证据强度"] <= 3 or normalized_scores["下行安全"] <= 2:
         actionability = "reject_for_now"
+    long_horizon_inputs = _build_long_horizon_inputs(
+        code=code,
+        chokepoint=chokepoint,
+        chain_position=chain_position,
+        scores=normalized_scores,
+        flags=flags,
+        verify_next=verify_next,
+    )
 
     return {
         "name": name,
@@ -936,6 +1053,7 @@ def score_company_v2(
         "actionability": actionability,
         "notes": notes,
         "verify_next": verify_next,
+        **long_horizon_inputs,
     }
 
 
@@ -1312,6 +1430,32 @@ def build_serenity_research_report(pipeline: Dict[str, Any]) -> str:
             ])
     else:
         lines.append("暂无可拆解标的。")
+
+    lines.extend([
+        "",
+        "## 长期论文输入",
+        "",
+        "| 标的 | 瓶颈持续性 | 核心假设 | 去劣红线 | 替代路径风险 |",
+        "|---|:---:|---|---|---|",
+    ])
+    if candidates:
+        for item in candidates:
+            assumptions = "；".join(
+                f"{assumption.get('id', '')}:{assumption.get('status', '')}"
+                for assumption in item.get("long_assumptions", [])[:3]
+            )
+            red_lines = "；".join(
+                f"{red_line.get('id', '')}:{red_line.get('status', '')}"
+                for red_line in item.get("red_lines", [])[:3]
+            )
+            bottleneck_map = item.get("bottleneck_map") or {}
+            lines.append(
+                f"| {item['name']}({item['code']}) | {item.get('bottleneck_duration', '待验证')} "
+                f"| {assumptions or '待补假设'} | {red_lines or '待补红线'} "
+                f"| {bottleneck_map.get('substitution_risk', '待核验')} |"
+            )
+    else:
+        lines.append("| 暂无 | - | 需要先补候选池与证据源 | 需要先补红线 | 待核验 |")
 
     lines.extend([
         "",

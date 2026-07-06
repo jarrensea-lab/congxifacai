@@ -1,5 +1,32 @@
 # 恭喜发财 更新日志
 
+## v8.1.0-dev (2026-07-06) — Long Horizon Integration：中长期研究闭环
+
+### 顶层方向
+- ✅ **ai-berkshire 方法论全面接入主链路**：不是新增独立模块，而是贯穿 Long Thesis、Evidence Ledger、Target Pool、Target Scoring、Serenity、日报和后续实验复盘。
+- ✅ **5 个交易日 shadow-mode 实验计划**：P0-P5 已具备本地/报告内实验条件；P6 飞书长期事件提醒、真实生产候选池写入和长期状态影响生产动作仍需人工确认后开启。
+- ✅ **触发权责写入计划**：Codex 可自动触发 inert/dry-run 阶段；真实通知、真实候选池写入、paper-only 转 production 等边界必须由用户手动确认。
+
+### 长期 thesis 与证据层
+- ✅ 新增 `backend/app/services/long_thesis.py`：长期 thesis store、假设/红线/过期状态评估、复核记录追加。
+- ✅ 新增 `data/examples/long_thesis.example.json` 与 `docs/architecture/long-horizon-contract.md`，固定长期论文结构和交易边界。
+- ✅ `EvidenceLedgerStore` 支持 `long_thesis`、`long_assumption`、`long_red_line`，写入 `confidence`、`source_report_path`、`data_cutoff_date` 并生成稳定 `evidence_id`。
+
+### Target Pool 与评分
+- ✅ Target Pool 新增长期状态：`long_research`、`long_watch`、`accumulation_zone`、`tactical_watch`、`thesis_review`、`exit_candidate`，但默认不进入短线 active scan。
+- ✅ `target_scoring.py` 新增 `score_long_quality()`，输出 `long_quality_score`、`thesis_status`、`valuation_zone`、`red_line_status`、`combined_decision_reason`。
+- ✅ 长期 thesis 只能作为约束和解释字段；红线触发会阻断交易动作，长期质量分不能绕过交易剧本单独触发 `buy`。
+
+### Serenity 与报告
+- ✅ Serenity 输出长期假设、去劣红线、估值问题、季度核验任务、瓶颈持续性和替代路径风险。
+- ✅ Serenity 归档报告新增“长期论文输入”区，继续保持 research-only，不输出交易动作。
+- ✅ 次日主报告新增“长期依据摘要”和“本次动作性质”，第一屏仍保持可执行动作优先。
+
+### 验证
+- `PYTHONPATH=.:backend .venv/bin/pytest -q backend/tests/test_long_thesis.py backend/tests/test_quant_lifecycle.py backend/tests/test_profit_evidence_pipeline.py backend/tests/test_target_scoring.py backend/tests/test_serenity_analyst.py backend/tests/test_serenity_financial_evidence.py backend/tests/test_daily_report_delivery.py backend/tests/test_report_engine.py`：`122 passed`。
+- `.venv/bin/python -m ruff check backend scripts`：通过。
+- `git diff --check`：通过。
+
 ## v8.0.0-dev (2026-07-03) — 盈利操作系统：Regime + Playbook + Risk Budget + Event Alert
 
 ### 顶层方向

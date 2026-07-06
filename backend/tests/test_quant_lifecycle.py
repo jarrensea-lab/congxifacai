@@ -158,6 +158,23 @@ def test_target_pool_accepts_v8_blocking_statuses(tmp_path):
     assert store.get("000100")["status"] == "regime_blocks_dip"
 
 
+def test_target_pool_long_horizon_states_are_not_intraday_scan_active(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+
+    for code, status in [
+        ("000001", "long_research"),
+        ("000002", "long_watch"),
+        ("000003", "accumulation_zone"),
+        ("000004", "tactical_watch"),
+        ("000005", "thesis_review"),
+        ("000006", "exit_candidate"),
+    ]:
+        assert store.upsert_target(code=code, name=f"长期{code}", status=status) is True
+
+    assert {item["code"] for item in store.active_items()} == set()
+    assert store.get("000003")["status"] == "accumulation_zone"
+
+
 def test_target_pool_routes_unaffordable_serenity_candidate_to_research_reference(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
 

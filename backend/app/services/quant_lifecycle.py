@@ -120,6 +120,16 @@ def _has_data_insufficient_marker(rec: dict[str, Any]) -> bool:
     return any("数据不足" in str(field or "") or "观望" in str(field or "") for field in fields)
 
 
+LONG_HORIZON_STATUSES = {
+    "long_research",
+    "long_watch",
+    "accumulation_zone",
+    "tactical_watch",
+    "thesis_review",
+    "exit_candidate",
+}
+
+
 class CandidatePoolStore:
     """File-backed production candidate pool.
 
@@ -152,7 +162,14 @@ class CandidatePoolStore:
             item
             for item in items.values()
             if isinstance(item, dict)
-            and item.get("status") not in {"removed", "expired", "research_only", "research_reference"}
+            and item.get("status")
+            not in {
+                "removed",
+                "expired",
+                "research_only",
+                "research_reference",
+                *LONG_HORIZON_STATUSES,
+            }
         ]
 
     def upsert_recommendations(self, recommendations: list[dict[str, Any]], source: str) -> int:
@@ -229,6 +246,7 @@ class TargetPoolStore(CandidatePoolStore):
         "blocked_chasing",
         "risk_budget_too_small",
         "regime_blocks_dip",
+        *LONG_HORIZON_STATUSES,
         "position",
         "removed",
         "expired",

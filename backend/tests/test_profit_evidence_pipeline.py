@@ -3,6 +3,7 @@ import pytest
 from app.services.quant_lifecycle import TargetPoolStore
 from app.services.evidence_ledger import (
     EvidenceLedgerStore,
+    build_long_horizon_evidence,
     build_sentinel_evidence,
     build_sentinel_evidence_context,
     upsert_sentinel_evidence_to_target_pool,
@@ -95,6 +96,36 @@ def test_sentinel_evidence_context_is_strategy_input_summary():
     assert "半导体" in context
     assert "澜起科技(688008)" in context
     assert "减持" in context
+
+
+def test_long_horizon_evidence_records_thesis_assumptions_and_red_lines():
+    thesis = {
+        "symbol": "002123",
+        "name": "测试长期标的",
+        "core_thesis": "长期论文成立，但等待价格进入积累区。",
+        "assumptions": [
+            {"id": "a1", "claim": "订单增长", "status": "verified"},
+        ],
+        "red_lines": [
+            {"id": "r1", "condition": "订单被证伪", "severity": "critical", "status": "clear"},
+        ],
+        "valuation_anchor": {"accumulation_zone": [3.2, 3.8]},
+        "quality_score": 76,
+        "confidence": "B",
+    }
+
+    evidence = build_long_horizon_evidence(
+        thesis,
+        report_date="2026-07-06",
+        source_report_path="/tmp/long-thesis.md",
+        data_cutoff_date="2026-07-06",
+    )
+
+    assert {item["type"] for item in evidence} == {"long_thesis", "long_assumption", "long_red_line"}
+    assert all(item["evidence_id"].startswith("ev_") for item in evidence)
+    assert all(item["confidence"] == "B" for item in evidence)
+    assert evidence[0]["source_report_path"] == "/tmp/long-thesis.md"
+    assert evidence[0]["data_cutoff_date"] == "2026-07-06"
 
 
 @pytest.mark.asyncio

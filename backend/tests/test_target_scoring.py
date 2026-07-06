@@ -1,4 +1,4 @@
-from app.services.target_scoring import score_target
+from app.services.target_scoring import score_long_quality, score_target
 
 
 def _base_snapshot(code="002123", price=3.2):
@@ -130,3 +130,62 @@ def test_score_target_names_missing_data_instead_of_generic_insufficient():
     assert result["stop_loss"] == 3.04
     assert result["target_price"] == 3.58
     assert "补齐" in result["next_signal"]
+
+
+def test_score_target_carries_long_thesis_quality_without_overriding_trade_trigger():
+    snapshot = _base_snapshot(code="002123", price=3.2)
+    snapshot["quote"].update({"change_pct": 1.2, "vol_ratio": 1.1, "amount_wan": 8200})
+    snapshot["serenity"] = {"status": "ok", "score": 82, "theme": "测试主题"}
+    long_thesis = {
+        "symbol": "002123",
+        "quality_score": 88,
+        "thesis_status": "healthy",
+        "valuation_anchor": {"fair_price": 4.0, "accumulation_price": 3.3, "overpriced_price": 5.2},
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "condition": "毛利率跌破25%", "status": "clear"}],
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+        long_thesis=long_thesis,
+    )
+
+    assert result["action"] == "watch"
+    assert result["block_reason"] == "price_not_triggered"
+    assert result["long_quality_score"] == 88
+    assert result["thesis_status"] == "healthy"
+    assert result["valuation_zone"] == "accumulation_zone"
+    assert result["red_line_status"] == "clear"
+    assert result["long_horizon_reason"] == "assumptions_intact"
+    assert "长期跟踪：assumptions_intact" in result["combined_decision_reason"]
+
+    long_quality = score_long_quality(snapshot, long_thesis)
+    assert long_quality["long_quality_score"] == 88
+    assert long_quality["valuation_zone"] == "accumulation_zone"
+
+
+def test_score_target_blocks_trade_when_long_thesis_red_line_is_triggered():
+    long_thesis = {
+        "symbol": "002123",
+        "quality_score": 91,
+        "thesis_status": "healthy",
+        "valuation_anchor": {"fair_price": 4.0, "accumulation_price": 3.3, "overpriced_price": 5.2},
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "condition": "毛利率跌破25%", "status": "triggered"}],
+    }
+
+    result = score_target(
+        _base_snapshot(code="002123", price=3.2),
+        available_cash=6085.61,
+        total_assets=6085.61,
+        long_thesis=long_thesis,
+    )
+
+    assert result["action"] == "watch"
+    assert result["block_reason"] == "long_thesis_broken"
+    assert result["long_quality_score"] == 0
+    assert result["thesis_status"] == "broken"
+    assert result["red_line_status"] == "triggered"
+    assert "中长期 thesis 红线触发" in result["decision_reason"]

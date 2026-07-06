@@ -1,0 +1,57 @@
+{
+  "symbol": "002123",
+  "name": "测试长期标的",
+  "horizon": "6-36m",
+  "thesis_status": "forming",
+  "core_thesis": "公司处于可验证的产业链瓶颈环节，未来两个季度需要用订单、收入和毛利率确认论文是否成立。",
+  "assumptions": [
+    {
+      "id": "a1",
+      "claim": "瓶颈业务订单在未来两个季度持续增长",
+      "verification": "quarterly_order_or_revenue",
+      "frequency": "quarterly",
+      "status": "unverified"
+    },
+    {
+      "id": "a2",
+      "claim": "瓶颈业务毛利率不低于30%",
+      "verification": "quarterly_financial",
+      "frequency": "quarterly",
+      "status": "unverified"
+    },
+    {
+      "id": "a3",
+      "claim": "替代技术或新增产能不会在一个季度内明显削弱瓶颈",
+      "verification": "industry_news_and_peer_filings",
+      "frequency": "monthly",
+      "status": "unverified"
+    }
+  ],
+  "red_lines": [
+    {
+      "id": "r1",
+      "condition": "核心订单或客户导入被公告、财报或可靠新闻证伪",
+      "severity": "critical",
+      "status": "clear",
+      "action": "exit_review"
+    },
+    {
+      "id": "r2",
+      "condition": "连续两个季度经营现金流明显弱于净利润且无法解释",
+      "severity": "warning",
+      "status": "clear",
+      "action": "thesis_review"
+    }
+  ],
+  "valuation_anchor": {
+    "fair_zone": [4.0, 5.2],
+    "accumulation_zone": [3.2, 3.8],
+    "overpriced_zone": [6.5, 99.0],
+    "method": "pe_ps_fcf_cross_check"
+  },
+  "quality_score": 0,
+  "confidence": "B",
+  "evidence_ids": [],
+  "source_report_path": "",
+  "data_cutoff_date": "2026-07-06"
+}

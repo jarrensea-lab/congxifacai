@@ -167,7 +167,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
-    version="8.0.0-dev",
+    version="8.1.0-dev",
     lifespan=lifespan,
 )
 
