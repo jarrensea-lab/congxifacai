@@ -29,6 +29,15 @@ SENTINEL_OUTPUT_ROOT = Path(os.getenv("CONGXI_SENTINEL_OUTPUT_ROOT", os.path.joi
 from app.services.strategy_profile import get_strategy_profile
 
 
+def _read_iso_date_env(name: str):
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        return datetime.strptime(raw, "%Y-%m-%d").date()
+    except ValueError as exc:
+        raise ValueError(f"{name} must be YYYY-MM-DD, got {raw!r}") from exc
+
 
 def build_feishu_summary(md_content: str, limit: int = 2500) -> str:
     """Build a short Feishu card body while pointing to the local full report."""
@@ -1500,7 +1509,10 @@ async def main():
     from app.services.portfolio_store import recalculate_portfolio, sync_db_from_user_portfolio
 
     now = datetime.now()
-    today = now.strftime('%Y-%m-%d')
+    report_date_override = _read_iso_date_env("CONGXI_REPORT_DATE")
+    target_date_override = _read_iso_date_env("CONGXI_TARGET_DATE")
+    report_date = report_date_override or now.date()
+    today = report_date.isoformat()
     time_str = now.strftime('%H:%M')
 
     print(f"📋 每日综合报告 — {today}", flush=True)
@@ -1665,7 +1677,7 @@ async def main():
     try:
         from app.services.schedule_policy import main_report_target_date
 
-        target_date = main_report_target_date(now.date()).isoformat()
+        target_date = main_report_target_date(report_date, target_date_override).isoformat()
     except Exception:
         target_date = today
     # 标题 + 元信息

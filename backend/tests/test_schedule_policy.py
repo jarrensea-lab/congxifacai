@@ -23,6 +23,13 @@ def test_trading_day_evening_targets_next_trading_day():
     assert main_report_target_date(date(2026, 6, 29)).isoformat() == "2026-06-30"
 
 
+def test_main_report_target_date_allows_manual_backfill_override():
+    assert main_report_target_date(
+        date(2026, 7, 6),
+        target_date_override=date(2026, 7, 6),
+    ).isoformat() == "2026-07-06"
+
+
 def test_premarket_calibration_only_runs_on_trading_day():
     assert should_run_premarket_calibration(date(2026, 6, 29), time(8, 50)) is True
     assert should_run_premarket_calibration(date(2026, 6, 28), time(8, 50)) is False
