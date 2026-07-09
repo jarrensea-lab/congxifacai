@@ -62,6 +62,23 @@ def test_score_target_returns_buy_for_low_price_volume_breakout():
     assert result["missing_data"] == []
 
 
+def test_score_target_blocks_high_position_breakout():
+    snapshot = _base_snapshot(code="002123", price=6.82)
+    snapshot["quote"].update({"change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000})
+    snapshot["kline"]["bars"] = [
+        {"close": 6.0 + idx * 0.04, "high": 6.05 + idx * 0.04, "low": 5.95 + idx * 0.04}
+        for idx in range(20)
+    ]
+
+    result = score_target(snapshot, available_cash=6085.61, total_assets=6085.61)
+
+    assert result["action"] == "watch"
+    assert result["block_reason"] == "blocked_high_position"
+    assert result["playbook"] == "breakout_watch"
+    assert result["score"] <= 68
+    assert "不再按突破追买" in result["decision_reason"]
+
+
 def test_score_target_returns_buy_for_dip_entry_when_pullback_holds_support():
     snapshot = _base_snapshot(code="002123", price=3.12)
     snapshot["quote"].update({"change_pct": -1.2, "amount_wan": 7800, "vol_ratio": 1.1})

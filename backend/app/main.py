@@ -2,7 +2,7 @@
 import asyncio
 import json
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 
 import httpx
 from fastapi import FastAPI
@@ -24,6 +24,7 @@ from app.ai.cloud_client import cloud
 from app.utils.logger import logger
 from app.utils.trading_calendar import is_trading_day
 from app.data_sources.tencent_client import TencentDataSource
+from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
 from app.data_sources.eastmoney_client import EastmoneyDataSource
 from app.data_sources.akshare_news import AKShareNewsClient
 from app.data_sources.akshare_market import AKShareMarketClient
@@ -115,9 +116,21 @@ async def lifespan(app: FastAPI):
         misfire_grace_time=3600,
     )
     scheduler.add_job(
+        _run_intraday_alert_scan_with_status,
+        CronTrigger(hour='9-11,13-14', minute='*/5', day_of_week='mon-fri', timezone='Asia/Shanghai'),
+        id='intraday_alert_scan', name='盘中事件触发扫描', replace_existing=True,
+        misfire_grace_time=120,
+    )
+    scheduler.add_job(
         _run_review_with_status,
         CronTrigger(hour=15, minute=5, day_of_week='mon-fri', timezone='Asia/Shanghai'),
         id='review', name='收盘复盘', replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        _run_prediction_lab_with_status,
+        CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Shanghai'),
+        id='prediction_lab', name='预测账本采集与到期评估', replace_existing=True,
         misfire_grace_time=3600,
     )
     scheduler.add_job(
@@ -151,7 +164,7 @@ async def lifespan(app: FastAPI):
             logger.info(f"已清理旧调度任务: {stale_job_id}")
         except Exception:
             pass
-    logger.info("旺财V7.5-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中/收盘 + Bot轮询)")
+    logger.info("旺财V7.5-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中5分钟事件扫描 + 预测账本 + 盘中/收盘 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -167,7 +180,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
-    version="8.1.0-dev",
+    version="8.2.0-dev",
     lifespan=lifespan,
 )
 
@@ -219,6 +232,7 @@ generation_status = {
     "review": {"running": False, "started_at": None},
     "afternoon": {"running": False, "started_at": None},
     "intraday": {"running": False, "started_at": None},
+    "event_scan": {"running": False, "started_at": None},
 }
 
 def _get_holdings_data(db: Session) -> dict:
@@ -323,13 +337,30 @@ def _format_lifecycle_alerts(alerts: list[dict]) -> str:
     return build_alert_digest(alerts, title="候选池/持仓生命周期提醒")
 
 
-async def _scan_candidate_pool_and_push(stage: str, available_cash: float, total_assets: float = 0) -> dict:
+def _positions_map(positions: list[Position]) -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for p in positions:
+        result[p.stock_code] = {
+            "shares": int(p.quantity or 0),
+            "market_value": round(float(p.market_value or 0) / 100, 2),
+            "avg_cost": round(float(p.avg_cost or 0) / 100, 2),
+        }
+    return result
+
+
+async def _scan_candidate_pool_and_push(
+    stage: str,
+    available_cash: float,
+    total_assets: float = 0,
+    positions: dict[str, dict] | None = None,
+) -> dict:
     try:
         result = await evaluate_candidate_pool(
             CandidatePoolStore(),
-            TencentDataSource(),
+            FastRealtimeMarketDataSource(),
             available_cash=float(available_cash or 0),
             total_assets=float(total_assets or 0),
+            positions=positions,
         )
     except Exception as exc:
         logger.warning(f"{stage}候选池扫描失败: {exc}")
@@ -347,10 +378,75 @@ async def _scan_candidate_pool_and_push(stage: str, available_cash: float, total
     return result
 
 
+def _in_intraday_alert_window(now: datetime | None = None) -> bool:
+    now = now or datetime.now()
+    current = now.time()
+    return time(9, 35) <= current <= time(11, 25) or time(13, 0) <= current <= time(14, 50)
+
+
 def _account_cash_and_total(acc: SimAccount | None) -> tuple[float, float]:
     if not acc:
         return 0.0, 0.0
     return acc.cash / 100, acc.total_value / 100
+
+
+async def _run_intraday_alert_scan_with_status():
+    """High-frequency event scan for entries, add-ons, take-profit and stop-loss."""
+    if not is_trading_day() or not _in_intraday_alert_window():
+        return
+    gs = generation_status["event_scan"]
+    if gs["running"]:
+        return
+    gs["running"] = True
+    gs["started_at"] = str(datetime.now())
+    try:
+        logger.info("--- 盘中事件触发扫描 ---")
+        db = SessionLocal()
+        try:
+            try:
+                sync_db_from_user_portfolio(db)
+            except Exception as exc:
+                logger.warning(f"盘中事件扫描持仓同步失败，继续使用数据库现状: {exc}")
+            positions = db.query(Position).filter(Position.quantity > 0).all()
+            codes = [p.stock_code for p in positions if p.stock_code]
+            position_quotes = await TencentDataSource().fetch_batch(codes) if codes else {}
+
+            for p in positions:
+                rt = position_quotes.get(p.stock_code) or {}
+                price = rt.get("price", 0) or 0
+                if price <= 0:
+                    continue
+                price_fen = int(float(price) * 100)
+                p.market_price = price_fen
+                p.market_value = p.quantity * price_fen
+                p.unrealized_pnl = p.market_value - (p.avg_cost * p.quantity)
+            db.commit()
+
+            position_watch = PositionWatchStore()
+            watch_alerts = evaluate_position_watch(position_watch, position_quotes)
+            deliverable_watch_alerts = notification_gate.filter_alerts(watch_alerts, stage="盘中持仓")
+            if deliverable_watch_alerts:
+                _feishu_webhook_push("旺财V7.5 盘中持仓触发", _format_lifecycle_alerts(deliverable_watch_alerts))
+
+            acc = db.query(SimAccount).first()
+            cash, total_assets = _account_cash_and_total(acc)
+            lifecycle_result = await _scan_candidate_pool_and_push(
+                "盘中",
+                cash,
+                total_assets,
+                positions=_positions_map(positions),
+            )
+            logger.info(
+                "盘中事件扫描完成: "
+                f"position_alerts={len(watch_alerts)} delivered_position={len(deliverable_watch_alerts)} "
+                f"candidate_alerts={len(lifecycle_result.get('alerts', []))}"
+            )
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.error(f"盘中事件触发扫描异常: {exc}", exc_info=True)
+    finally:
+        gs["running"] = False
 
 
 def _get_today_risk_alerts(db: Session, today: datetime | None = None) -> list[RiskAlert]:
@@ -667,7 +763,12 @@ async def _run_afternoon_with_status():
                     _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(deliverable_watch_alerts))
             acc = db.query(SimAccount).first()
             cash, total_assets = _account_cash_and_total(acc)
-            lifecycle_result = await _scan_candidate_pool_and_push("午后", cash, total_assets)
+            lifecycle_result = await _scan_candidate_pool_and_push(
+                "午后",
+                cash,
+                total_assets,
+                positions=_positions_map(positions),
+            )
             lifecycle_alerts = lifecycle_result.get("alerts", [])
 
             # 统一推送午后风控（有警告红色/无警告绿色）
@@ -840,6 +941,71 @@ async def _run_sentinel_review_with_status():
         logger.info(f"Sentinel绩效回看完成: {result.stdout[:800]}")
     except Exception as e:
         logger.error(f"Sentinel绩效回看异常: {e}", exc_info=True)
+
+
+async def _run_prediction_lab_with_status():
+    """Collect prediction samples and evaluate recently due horizons."""
+    if not is_trading_day():
+        return
+    try:
+        import subprocess
+        import sys
+        from app.config import PROJECT_ROOT
+
+        project_root = f"{PROJECT_ROOT}/.."
+        script_path = f"{project_root}/scripts/run_prediction_lab.py"
+        today = date.today()
+        report_date = str(today)
+        logger.info("=== 预测账本采集启动 ===")
+        collect = await asyncio.to_thread(
+            subprocess.run,
+            [
+                sys.executable,
+                script_path,
+                "collect",
+                "--date",
+                report_date,
+                "--universe",
+                "target_pool",
+                "--limit",
+                "200",
+            ],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        if collect.returncode != 0:
+            logger.warning(f"预测账本采集失败: {collect.stderr[:800]}")
+        else:
+            logger.info(f"预测账本采集完成: {collect.stdout[:800]}")
+
+        for offset in range(1, 11):
+            prediction_date = str(today - timedelta(days=offset))
+            result = await asyncio.to_thread(
+                subprocess.run,
+                [
+                    sys.executable,
+                    script_path,
+                    "evaluate",
+                    "--date",
+                    prediction_date,
+                    "--as-of",
+                    report_date,
+                    "--limit",
+                    "600",
+                ],
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                timeout=300,
+            )
+            if result.returncode == 0:
+                logger.info(f"预测账本到期评估完成 {prediction_date}: {result.stdout[:500]}")
+            else:
+                logger.debug(f"预测账本到期评估跳过 {prediction_date}: {result.stderr[:300]}")
+    except Exception as e:
+        logger.error(f"预测账本任务异常: {e}", exc_info=True)
 
 
 async def _startup_health_check():

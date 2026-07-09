@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -30,6 +31,10 @@ from app.ai.sentinel_role_performance import (
 from app.data_sources.horizon_news_importer import (
     import_default_tushare_news_events,
     write_sentinel_news_events,
+)
+from app.services.recommendation_review import (
+    build_recommendation_review,
+    render_recommendation_review_markdown,
 )
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "data" / "sentinel"
@@ -102,10 +107,19 @@ def run_review_job(report_date: str, output_root: str | Path = DEFAULT_OUTPUT_RO
         suggestions=suggestions,
         output_root=root,
     )
+    execution_review = asyncio.run(build_recommendation_review())
+    review_json_path = root / "reports" / f"{report_date}_recommendation_execution_review.json"
+    review_md_path = root / "reports" / f"{report_date}_recommendation_execution_review.md"
+    review_json_path.parent.mkdir(parents=True, exist_ok=True)
+    review_json_path.write_text(json.dumps(execution_review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    review_md_path.write_text(render_recommendation_review_markdown(execution_review), encoding="utf-8")
     return {
         "mode": "review",
         "date": report_date,
         "outcome_count": len(outcomes),
+        "execution_review_count": execution_review.get("executed", {}).get("count", 0),
+        "execution_review": str(review_json_path),
+        "execution_review_report": str(review_md_path),
         **paths,
     }
 

@@ -156,6 +156,7 @@ def score_target(
         "risk_budget": sizing.get("risk_budget", 0),
         "risk_amount": 0,
         "playbook": playbook.get("playbook", "watch"),
+        "range_position_pct": playbook.get("range_position_pct"),
         "market_regime": regime,
         "lot_size": lot_size,
         "lot_value": lot_value,
@@ -222,6 +223,17 @@ def score_target(
     research_score = long_quality if long_quality > 0 else serenity_score
     total_score = round(min(100, technical * 0.7 + research_score * 0.3 + _to_float(playbook.get("score_bonus"))), 1)
     change_pct = _to_float(quote.get("change_pct"))
+
+    if playbook.get("block_reason") == "blocked_high_position":
+        return finish({
+            "score": min(total_score, 68),
+            "action": "watch",
+            "block_reason": "blocked_high_position",
+            "stop_loss": stop_loss,
+            "target_price": target_price,
+            "decision_reason": f"{name}({code}) {playbook.get('reason')} 先观察，不给建仓指令。",
+            "next_signal": playbook.get("next_signal") or f"等待回踩至¥{price * 0.97:.2f}附近并重新评分。",
+        })
 
     if change_pct >= 9:
         return finish({

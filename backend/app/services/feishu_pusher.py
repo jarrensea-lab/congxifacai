@@ -168,36 +168,44 @@ def send_feishu_card_sync(
 ) -> dict:
     """同步场景使用的飞书卡片推送。"""
     import asyncio
+    import threading
+
+    async def _send() -> dict:
+        return await send_feishu_card(
+            title=title,
+            content=content,
+            webhook_url=webhook_url,
+            color=color,
+            app_id=app_id,
+            app_secret=app_secret,
+            chat_id=chat_id,
+            api_base=api_base,
+        )
 
     try:
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            return {"feishu_api": False, "feishu_webhook": False, "channel": "", "error": "event_loop_running"}
-        return loop.run_until_complete(
-            send_feishu_card(
-                title=title,
-                content=content,
-                webhook_url=webhook_url,
-                color=color,
-                app_id=app_id,
-                app_secret=app_secret,
-                chat_id=chat_id,
-                api_base=api_base,
-            )
-        )
+        asyncio.get_running_loop()
     except RuntimeError:
-        return asyncio.run(
-            send_feishu_card(
-                title=title,
-                content=content,
-                webhook_url=webhook_url,
-                color=color,
-                app_id=app_id,
-                app_secret=app_secret,
-                chat_id=chat_id,
-                api_base=api_base,
-            )
-        )
+        return asyncio.run(_send())
+
+    result: dict[str, object] = {}
+
+    def _runner() -> None:
+        try:
+            result["value"] = asyncio.run(_send())
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value", {
+        "feishu_api": False,
+        "feishu_webhook": False,
+        "channel": "",
+        "error": "threaded_sync_push_failed",
+    })
 
 
 def push_report_to_feishu(webhook_url: str, title: str, report_md: str, chat_id: str = None) -> dict:

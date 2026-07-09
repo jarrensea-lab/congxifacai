@@ -400,6 +400,7 @@ def _action_label(value: str) -> str:
         "watching": "观察等待",
         "risk_budget_too_small": "风险预算不足",
         "regime_blocks_dip": "大盘环境阻断低吸",
+        "blocked_high_position": "区间高位观察",
         "hold": "持有",
         "research_only": "研究参照",
         "research_reference": "研究参照",
@@ -416,6 +417,7 @@ def _block_reason_label(value: str) -> str:
         "missing_required_data": "关键数据未补齐",
         "price_missing": "实时价格缺失",
         "blocked_chasing": "追高风险",
+        "blocked_high_position": "近20日区间高位",
         "risk_budget_too_small": "一手风险超过预算",
         "regime_blocks_dip": "大盘/板块环境阻断低吸",
         "price_not_triggered": "价格/量能/资金未同时触发",
@@ -1307,7 +1309,7 @@ async def build_target_scores_for_report(
     from app.ai.serenity_financial_evidence import fetch_financial_evidence
     from app.data_sources.akshare_market import AKShareMarketClient
     from app.data_sources.akshare_news import AKShareNewsClient
-    from app.data_sources.tencent_client import TencentDataSource
+    from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
     from app.services.quant_lifecycle import TargetPoolStore
     from app.services.target_scoring import score_target
     from app.services.target_snapshot import build_target_snapshot
@@ -1347,7 +1349,7 @@ async def build_target_scores_for_report(
     if not items:
         return []
 
-    quote_source = TencentDataSource()
+    quote_source = FastRealtimeMarketDataSource()
     market_source = CachedMarketSource()
     news_source = AKShareNewsClient()
     scores: list[dict] = []
@@ -1571,7 +1573,7 @@ async def finalize_daily_report(
 
 
 async def main():
-    from app.data_sources.tencent_client import TencentDataSource
+    from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
     from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
@@ -1616,7 +1618,7 @@ async def main():
 
     # ===== 2. 获取行情 =====
     print("📊 获取实时行情...", flush=True)
-    tc = TencentDataSource()
+    tc = FastRealtimeMarketDataSource()
     strategy_profile = get_strategy_profile()
     available_cash = float(portfolio.get("available_cash", portfolio.get("cash", 0)) or 0)
     market_data = {

@@ -244,6 +244,8 @@ class TargetPoolStore(CandidatePoolStore):
         "executable",
         "actionable",
         "blocked_chasing",
+        "blocked_high_position",
+        "cooldown_after_loss",
         "risk_budget_too_small",
         "regime_blocks_dip",
         *LONG_HORIZON_STATUSES,
@@ -337,18 +339,28 @@ class PositionWatchStore:
         *,
         stop_loss_price: float | None = None,
         target_price: float | None = None,
+        entry_price: float | None = None,
         source: str = "manual",
     ) -> None:
         payload = self.load()
         items = payload.setdefault("items", {})
         clean = _clean_code(code)
         existing = items.get(clean, {})
+        resolved_stop = stop_loss_price if stop_loss_price is not None else existing.get("stop_loss_price")
+        resolved_target = target_price if target_price is not None else existing.get("target_price")
+        if resolved_target is None:
+            entry = _to_float(entry_price)
+            stop = _to_float(resolved_stop)
+            if entry <= 0 and stop > 0:
+                entry = stop / 0.95
+            if entry > 0:
+                resolved_target = round(entry * 1.08, 2)
         items[clean] = {
             **existing,
             "code": clean,
             "name": name or existing.get("name") or clean,
-            "stop_loss_price": stop_loss_price if stop_loss_price is not None else existing.get("stop_loss_price"),
-            "target_price": target_price if target_price is not None else existing.get("target_price"),
+            "stop_loss_price": resolved_stop,
+            "target_price": resolved_target,
             "source": source,
             "updated_at": _now(),
         }
@@ -363,11 +375,25 @@ def _is_limit_up_or_chasing(price: float, quote: dict[str, Any], change_pct: flo
     return change_pct >= 9.0
 
 
+def _looks_like_breakout_quote(quote: dict[str, Any]) -> bool:
+    return (
+        _to_float(quote.get("change_pct")) >= 3
+        and _to_float(quote.get("vol_ratio")) >= 2
+        and _to_float(quote.get("amount_wan") or quote.get("amount")) >= 10000
+    )
+
+
+def _has_recent_kline(item: dict[str, Any], min_bars: int = 10) -> bool:
+    bars = ((item.get("kline") or {}).get("bars") or [])
+    return isinstance(bars, list) and len(bars) >= min_bars
+
+
 def _candidate_alert(
     item: dict[str, Any],
     quote: dict[str, Any],
     available_cash: float,
     total_assets: float = 0,
+    position: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     from app.services.market_regime import evaluate_market_regime
     from app.services.playbook_engine import select_playbook
@@ -404,6 +430,11 @@ def _candidate_alert(
         total_assets=total_assets,
         profile=get_strategy_profile(),
     )
+    held_shares = int(_to_float((position or {}).get("shares")))
+    held_value = _to_float((position or {}).get("market_value"))
+    is_existing_position = held_shares > 0 or held_value > 0
+    profile = get_strategy_profile()
+    single_limit = _to_float(total_assets) * (_to_float(profile.get("single_position_limit_pct"), 50) / 100)
 
     base = {
         "stock_code": code,
@@ -432,6 +463,15 @@ def _candidate_alert(
             "suggestion": "禁止追高，等回落或次日重新评估",
         }
 
+    if playbook.get("block_reason") == "blocked_high_position":
+        return {
+            **base,
+            "level": "low",
+            "action": "blocked_high_position",
+            "message": f"{name}({code}) {playbook.get('reason')}",
+            "suggestion": playbook.get("next_signal") or "不追买；等待回踩确认后重新评分",
+        }
+
     if playbook.get("playbook") == "dip_entry" and not regime.get("can_dip", True):
         return {
             **base,
@@ -451,6 +491,29 @@ def _candidate_alert(
         }
 
     if affordable and playbook.get("triggered") and sizing.get("position_amount", 0) > 0:
+        if is_existing_position:
+            next_lot_value = price * lot_size
+            if single_limit > 0 and held_value + next_lot_value > single_limit:
+                return {
+                    **base,
+                    "level": "low",
+                    "action": "position_limit_reached",
+                    "message": (
+                        f"{name}({code}) 已持仓且{playbook.get('playbook')}触发，但加一手后"
+                        f"仓位约¥{held_value + next_lot_value:.2f}，超过单票仓位上限¥{single_limit:.2f}。"
+                    ),
+                    "suggestion": "不加仓；等待仓位降下来或总资产提升后再复核",
+                }
+            return {
+                **base,
+                "level": "mid",
+                "action": "add_position",
+                "message": (
+                    f"{name}({code}) 已持仓，{playbook.get('playbook')} 触发，现价¥{price:.2f}，"
+                    f"可人工复核加仓{int(sizing.get('shares', 0))}股，风险约¥{sizing.get('risk_amount', 0):.2f}。"
+                ),
+                "suggestion": f"加仓前确认未超单票上限；新增仓位止损¥{stop_loss:.2f}",
+            }
         return {
             **base,
             "level": "mid",
@@ -471,6 +534,7 @@ async def evaluate_candidate_pool(
     *,
     available_cash: float,
     total_assets: float = 0,
+    positions: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     items = store.active_items()
     codes = [item["code"] for item in items if item.get("code")]
@@ -481,7 +545,15 @@ async def evaluate_candidate_pool(
     for item in items:
         code = item.get("code", "")
         quote = quotes.get(code) or {}
-        alert = _candidate_alert(item, quote, available_cash, total_assets)
+        scan_item = item
+        if _looks_like_breakout_quote(quote) and not _has_recent_kline(item) and hasattr(quote_source, "fetch_kline"):
+            try:
+                kline = await quote_source.fetch_kline(code, "day", count=20)
+                if isinstance(kline, dict) and kline.get("bars"):
+                    scan_item = {**item, "kline": kline}
+            except Exception:
+                scan_item = item
+        alert = _candidate_alert(scan_item, quote, available_cash, total_assets, (positions or {}).get(code))
         if alert:
             alerts.append(alert)
             store.record_decision(code, alert["action"], alert)
