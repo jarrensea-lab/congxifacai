@@ -15,6 +15,26 @@ def test_select_playbook_prefers_breakout_when_volume_confirms():
     assert result["score_bonus"] == 0
 
 
+def test_select_playbook_blocks_high_position_breakout_until_pullback():
+    bars = [
+        {"close": 6.0 + idx * 0.04, "high": 6.05 + idx * 0.04, "low": 5.95 + idx * 0.04}
+        for idx in range(20)
+    ]
+
+    result = select_playbook(
+        {
+            "quote": {"price": 6.82, "change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000},
+            "kline": {"bars": bars},
+            "fund_flow": {"net": "净流入"},
+        }
+    )
+
+    assert result["triggered"] is False
+    assert result["playbook"] == "breakout_watch"
+    assert result["block_reason"] == "blocked_high_position"
+    assert result["range_position_pct"] >= 80
+
+
 def test_select_playbook_triggers_dip_entry_on_pullback_holding_support():
     result = select_playbook(
         {

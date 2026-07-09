@@ -39,6 +39,7 @@ def test_sync_db_from_user_portfolio_replaces_stale_position(tmp_path):
 
         pos = db.query(Position).filter(Position.stock_code == "000100").first()
         assert result["positions_synced"] == 1
+        assert result["total_assets"] == 2024.89
         assert pos.quantity == 100
         assert pos.avg_cost == 498
         assert pos.market_price == 480
@@ -47,6 +48,57 @@ def test_sync_db_from_user_portfolio_replaces_stale_position(tmp_path):
         db.query(Position).delete()
         db.commit()
         db.close()
+
+
+def test_sync_db_from_user_portfolio_counts_new_position_in_assets(tmp_path):
+    from app.database import SessionLocal
+    from app.models import Position
+    from app.services.portfolio_store import sync_db_from_user_portfolio
+
+    portfolio_path = tmp_path / "user_portfolio.json"
+    portfolio_path.write_text(json.dumps({
+        "positions": [{
+            "code": "600839",
+            "name": "四川长虹",
+            "shares": 100,
+            "avg_cost": 6.701,
+            "current_price": 6.54,
+        }],
+        "available_cash": 4704.51,
+    }), encoding="utf-8")
+
+    db = SessionLocal()
+    try:
+        db.query(Position).delete()
+        db.commit()
+
+        result = sync_db_from_user_portfolio(db, str(portfolio_path))
+
+        assert result["positions_synced"] == 1
+        assert result["total_assets"] == 5358.51
+    finally:
+        db.query(Position).delete()
+        db.commit()
+        db.close()
+
+
+def test_recalculate_portfolio_updates_cash_and_total_assets():
+    from app.services.portfolio_store import recalculate_portfolio
+
+    portfolio = recalculate_portfolio({
+        "available_cash": 4704.51,
+        "cash": 6085.61,
+        "positions": [{
+            "code": "600839",
+            "shares": 100,
+            "avg_cost": 6.701,
+            "current_price": 6.54,
+        }],
+    })
+
+    assert portfolio["cash"] == 4704.51
+    assert portfolio["total_value"] == 654.0
+    assert portfolio["total_assets"] == 5358.51
 
 
 def test_sync_db_from_empty_user_portfolio_clears_positions_and_reports_assets(tmp_path):

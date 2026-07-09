@@ -196,6 +196,39 @@ class TushareDataSource(BaseDataSource):
 
     # ===== 辅助 =====
 
+    def fetch_stock_basic(self, *, limit: int | None = None) -> List[Dict[str, Any]]:
+        """Fetch active A-share universe metadata for broad prediction sampling."""
+        if not self._available:
+            return []
+        try:
+            df = self._pro.stock_basic(
+                exchange="",
+                list_status="L",
+                fields="ts_code,symbol,name,area,industry,market,list_date",
+            )
+            if df is None or df.empty:
+                return []
+            rows: List[Dict[str, Any]] = []
+            for _, row in df.iterrows():
+                symbol = str(row.get("symbol") or "").strip()
+                if not symbol:
+                    continue
+                rows.append({
+                    "code": symbol,
+                    "name": str(row.get("name") or symbol),
+                    "industry": str(row.get("industry") or ""),
+                    "market": str(row.get("market") or ""),
+                    "area": str(row.get("area") or ""),
+                    "list_date": str(row.get("list_date") or ""),
+                    "source": "tushare_stock_basic",
+                })
+                if limit is not None and len(rows) >= limit:
+                    break
+            return rows
+        except Exception as e:
+            logger.debug(f"Tushare stock_basic failed: {e}")
+            return []
+
     def _to_ts_code(self, code: str) -> str:
         """转成 Tushare 格式: 000001 → 000001.SZ, 600000 → 600000.SH"""
         code = code.replace("sh", "").replace("sz", "").replace("bj", "")

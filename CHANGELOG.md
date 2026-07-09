@@ -1,5 +1,32 @@
 # 恭喜发财 更新日志
 
+## v8.2.0-dev (2026-07-10) — Prediction Ledger + Scrapling Realtime Kline：预测账本与实时 K 线闭环
+
+### 顶层方向
+- ✅ **预测能力工程化**：不再只复盘用户真实成交样本，新增全市场/候选池 T+1/T+3/T+5 预测账本，把每天的可检验预测沉淀为样本。
+- ✅ **从“预测失败解释”转向“样本回看调参”**：预测记录包含特征、触发理由、预期方向、预期收益和置信度；到期后验证方向命中、实际收益、收益误差和超额收益。
+- ✅ **复盘有调参权力但不黑箱自动改仓**：预测回看按触发理由生成 `downweight_trigger` / `upweight_trigger` / `keep_weight` 建议，默认先进入报告和审计，不直接绕过风控改买卖动作。
+
+### 实时数据与预测账本
+- ✅ **Scrapling 实时 K 线源**：新增 `backend/app/data_sources/realtime_kline_scraper.py`，用 Scrapling 抓东方财富 `push2his` K 线；本机实测 1分钟 K 线中位延迟约 95ms，快于腾讯日 K 和新浪 quote。
+- ✅ **快速行情门面**：新增 `backend/app/data_sources/realtime_market_data.py`，实时 quote 保留腾讯，K 线优先走 Scrapling/Eastmoney，失败再退回腾讯。
+- ✅ **预测账本服务**：新增 `backend/app/services/prediction_lab.py` 和 `scripts/run_prediction_lab.py`，支持 `target_pool` 与 `tushare_all` 股票池，生成 T+1/T+3/T+5 预测记录并到期评估。
+- ✅ **Tushare 全 A 股票池入口**：`TushareDataSource.fetch_stock_basic()` 可返回活跃上市 A 股基础信息，后续可用于分批全市场采样。
+
+### 策略与复盘
+- ✅ **高位追买降级**：`playbook_engine.py` 增加近 20 日区间位置拦截，放量上涨但处于区间 80% 以上时转为 `blocked_high_position / breakout_watch`，不再提示建仓或加仓。
+- ✅ **候选池盘中 5 分钟事件扫描**：新增盘中高频事件扫描，覆盖候选池建仓/加仓触发、持仓止损和止盈提醒，并通过 `notification_gate.py` 做冷却去重。
+- ✅ **真实执行复盘**：新增 `recommendation_review.py` 与 `scripts/review_recommendation_outcomes.py`，读取本地真实持仓/已平仓记录，按收益、入场区间和行为 flags 打分。
+- ✅ **Sentinel review 接入真实执行评分**：`scripts/run_sentinel.py --mode review` 会同时输出 `recommendation_execution_review`，避免 advice performance 只有空样本。
+
+### 依赖
+- ✅ 新增 `scrapling`、`playwright`、`browserforge`。当前 Eastmoney JSON 抓取不启动浏览器，因此不要求安装 Playwright 浏览器。
+
+### 验证
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests/test_realtime_kline_scraper.py backend/tests/test_scrapling_fetcher.py backend/tests/test_prediction_lab.py backend/tests/test_quant_lifecycle.py backend/tests/test_target_scoring.py backend/tests/test_playbook_engine.py backend/tests/test_notification_gate.py backend/tests/test_feishu_pusher.py backend/tests/test_portfolio_state.py -q`：`52 passed`。
+- `PYTHONPATH=.:backend .venv/bin/python -m ruff check ...`：通过。
+- `PYTHONPATH=.:backend .venv/bin/python - <<'PY' import app.main; print({'main_import':'ok'}) PY`：通过。
+
 ## v8.1.0-dev (2026-07-06) — Long Horizon Integration：中长期研究闭环
 
 ### 顶层方向

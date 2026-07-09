@@ -26,6 +26,21 @@ def _fund_flow_ok(fund_flow: dict[str, Any]) -> bool:
     return "净流出" not in text or any(token in text for token in ("收敛", "转正", "回流"))
 
 
+def _recent_range_position_pct(bars: list[dict[str, Any]], price: float, lookback: int = 20) -> float | None:
+    recent = bars[-lookback:] if len(bars) >= 10 else []
+    highs = [_to_float(item.get("high") or item.get("close")) for item in recent]
+    lows = [_to_float(item.get("low") or item.get("close")) for item in recent]
+    highs = [item for item in highs if item > 0]
+    lows = [item for item in lows if item > 0]
+    if not highs or not lows:
+        return None
+    high = max(highs)
+    low = min(lows)
+    if high <= low:
+        return None
+    return max(0.0, min(100.0, (price - low) / (high - low) * 100))
+
+
 def select_playbook(snapshot: dict[str, Any]) -> dict[str, Any]:
     """Pick the first triggered playbook, with breakout before dip by default."""
     quote = snapshot.get("quote") or {}
@@ -36,6 +51,7 @@ def select_playbook(snapshot: dict[str, Any]) -> dict[str, Any]:
     change_pct = _to_float(quote.get("change_pct"))
     vol_ratio = _to_float(quote.get("vol_ratio"))
     amount_wan = _to_float(quote.get("amount_wan"))
+    range_position_pct = _recent_range_position_pct(bars, price)
 
     base = {
         "playbook": "watch",
@@ -43,6 +59,8 @@ def select_playbook(snapshot: dict[str, Any]) -> dict[str, Any]:
         "score_bonus": 0,
         "reason": "",
         "next_signal": "",
+        "range_position_pct": range_position_pct,
+        "block_reason": "",
     }
 
     if price <= 0:
@@ -53,6 +71,14 @@ def select_playbook(snapshot: dict[str, Any]) -> dict[str, Any]:
         }
 
     if change_pct >= 3 and vol_ratio >= 2 and amount_wan >= 10000:
+        if range_position_pct is not None and range_position_pct >= 80:
+            return {
+                **base,
+                "playbook": "breakout_watch",
+                "block_reason": "blocked_high_position",
+                "reason": f"放量上涨但位于近20日区间高位({range_position_pct:.1f}%)，不再按突破追买。",
+                "next_signal": f"等待回踩到近20日区间80%以下或回踩不破¥{price * 0.97:.2f}后重新评分。",
+            }
         return {
             **base,
             "playbook": "breakout_entry",

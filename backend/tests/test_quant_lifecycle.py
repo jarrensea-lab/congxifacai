@@ -12,11 +12,15 @@ from app.services.quant_lifecycle import (
 
 
 class FakeQuoteSource:
-    def __init__(self, quotes):
+    def __init__(self, quotes, klines=None):
         self.quotes = quotes
+        self.klines = klines or {}
 
     async def fetch_batch(self, codes):
         return {code: self.quotes[code] for code in codes if code in self.quotes}
+
+    async def fetch_kline(self, code, period="day", count=20):
+        return self.klines.get(code, {"code": code, "period": period, "bars": []})
 
 
 def test_candidate_pool_keeps_data_insufficient_recommendation_for_followup(tmp_path):
@@ -97,6 +101,38 @@ async def test_candidate_pool_marks_affordable_volume_breakout_actionable(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_candidate_pool_blocks_high_position_breakout_after_kline_enrichment(tmp_path):
+    store = CandidatePoolStore(tmp_path / "candidate_pool.json")
+    store.upsert_recommendations([{"code": "002123", "name": "高位突破", "reason": "放量突破"}], source="manual")
+    bars = [
+        {"close": 6.0 + idx * 0.04, "high": 6.05 + idx * 0.04, "low": 5.95 + idx * 0.04}
+        for idx in range(20)
+    ]
+
+    result = await evaluate_candidate_pool(
+        store,
+        FakeQuoteSource(
+            {
+                "002123": {
+                    "price": 6.82,
+                    "change_pct": 4.2,
+                    "vol_ratio": 2.6,
+                    "amount_wan": 18000,
+                }
+            },
+            {"002123": {"code": "002123", "period": "day", "bars": bars}},
+        ),
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    assert result["alerts"][0]["action"] == "blocked_high_position"
+    assert result["alerts"][0]["playbook"] == "breakout_watch"
+    assert "不再按突破追买" in result["alerts"][0]["message"]
+    assert store.get("002123")["status"] == "blocked_high_position"
+
+
+@pytest.mark.asyncio
 async def test_candidate_pool_alert_blocks_when_risk_budget_is_too_small(tmp_path):
     store = CandidatePoolStore(tmp_path / "candidate_pool.json")
     store.upsert_recommendations([{"code": "002123", "name": "高波动低价", "reason": "放量突破"}], source="manual")
@@ -135,6 +171,69 @@ def test_position_watch_stop_loss_and_target_emit_alerts(tmp_path):
     assert target_alerts[0]["level"] == "mid"
 
 
+def test_position_watch_infers_default_take_profit_from_stop_loss(tmp_path):
+    store = PositionWatchStore(tmp_path / "position_watch.json")
+
+    store.upsert_plan("600900", "长江电力", stop_loss_price=26.64)
+
+    item = store.get("600900")
+    assert item["stop_loss_price"] == 26.64
+    assert item["target_price"] == 30.29
+
+
+@pytest.mark.asyncio
+async def test_candidate_pool_distinguishes_existing_position_add_alert(tmp_path):
+    store = CandidatePoolStore(tmp_path / "candidate_pool.json")
+    store.upsert_recommendations([{"code": "300002", "name": "神州泰岳", "reason": "放量突破"}], source="manual")
+
+    result = await evaluate_candidate_pool(
+        store,
+        FakeQuoteSource(
+            {
+                "300002": {
+                    "price": 7.8,
+                    "change_pct": 4.2,
+                    "vol_ratio": 2.6,
+                    "amount_wan": 18000,
+                }
+            }
+        ),
+        available_cash=6000,
+        total_assets=12000,
+        positions={"300002": {"shares": 100, "market_value": 780}},
+    )
+
+    assert result["alerts"][0]["action"] == "add_position"
+    assert "加仓" in result["alerts"][0]["message"]
+    assert store.get("300002")["status"] == "add_position"
+
+
+@pytest.mark.asyncio
+async def test_candidate_pool_marks_position_limit_reached_for_add(tmp_path):
+    store = CandidatePoolStore(tmp_path / "candidate_pool.json")
+    store.upsert_recommendations([{"code": "300002", "name": "神州泰岳", "reason": "放量突破"}], source="manual")
+
+    result = await evaluate_candidate_pool(
+        store,
+        FakeQuoteSource(
+            {
+                "300002": {
+                    "price": 7.8,
+                    "change_pct": 4.2,
+                    "vol_ratio": 2.6,
+                    "amount_wan": 18000,
+                }
+            }
+        ),
+        available_cash=6000,
+        total_assets=12000,
+        positions={"300002": {"shares": 500, "market_value": 5900}},
+    )
+
+    assert result["alerts"][0]["action"] == "position_limit_reached"
+    assert "仓位上限" in result["alerts"][0]["message"]
+
+
 def test_alert_level_normalizes_medium_to_mid():
     assert normalize_alert_level("medium") == "mid"
     assert normalize_alert_level("mid") == "mid"
@@ -156,6 +255,9 @@ def test_target_pool_accepts_v8_blocking_statuses(tmp_path):
 
     assert store.upsert_target(code="000100", name="TCL科技", status="regime_blocks_dip") is True
     assert store.get("000100")["status"] == "regime_blocks_dip"
+
+    assert store.upsert_target(code="000725", name="京东方A", status="blocked_high_position") is True
+    assert store.get("000725")["status"] == "blocked_high_position"
 
 
 def test_target_pool_long_horizon_states_are_not_intraday_scan_active(tmp_path):

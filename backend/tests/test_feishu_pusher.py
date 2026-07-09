@@ -145,3 +145,29 @@ async def test_send_api_card_reuses_cached_tenant_token(monkeypatch):
     message_requests = [url for url in requests if url.endswith("/im/v1/messages")]
     assert len(token_requests) == 1
     assert len(message_requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_send_feishu_card_sync_inside_running_loop(monkeypatch):
+    calls = []
+
+    async def fake_send(**kwargs):
+        calls.append(kwargs)
+        return {
+            "feishu_api": False,
+            "feishu_webhook": True,
+            "channel": "webhook",
+            "error": "",
+        }
+
+    monkeypatch.setattr(feishu_pusher, "send_feishu_card", fake_send)
+
+    result = feishu_pusher.send_feishu_card_sync(
+        title="盘中告警",
+        content="风险触发",
+        webhook_url="https://example.test/webhook",
+    )
+
+    assert result["feishu_webhook"] is True
+    assert result["channel"] == "webhook"
+    assert calls[0]["title"] == "盘中告警"

@@ -57,8 +57,12 @@ class NotificationGate:
     ACTION_COOLDOWN_MINUTES = {
         "actionable": 30,
         "blocked_chasing": 60,
+        "blocked_high_position": 60,
+        "cooldown_after_loss": 240,
         "risk_budget_too_small": 60,
         "regime_blocks_dip": 60,
+        "add_position": 30,
+        "position_limit_reached": 60,
         "stop_loss": 10,
         "take_profit": 30,
     }

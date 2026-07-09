@@ -4,7 +4,7 @@
 
 **恭喜发财**是一个运行在 Codex 之上的自动化 A 股交易智能助手，由多角色 AI 辩论引擎驱动，覆盖盘前策略、盘中监控到收盘复盘的全交易流程。
 
-当前 feature 分支版本 `v8.1.0-dev`，核心方向是“盈利操作系统 + 中长期研究闭环”：市场状态、交易剧本、风险预算、事件提醒、长期 thesis 和复盘闭环。迭代方向见 [ROADMAP.md](ROADMAP.md)。
+当前 feature 分支版本 `v8.2.0-dev`，核心方向是“预测账本 + 实时 K 线 + 绩效闭环”：用 Scrapling 抓取最快实时 K 线，沉淀全市场 T+1/T+3/T+5 预测样本，并把真实执行复盘反向约束下一次策略。迭代方向见 [ROADMAP.md](ROADMAP.md)。
 
 ---
 
@@ -50,6 +50,7 @@ scripts/install-congxicai-v7-launchd.sh
 11:35 ── 午盘快速分析推送至飞书
 14:00 ── 午后风险检查
 15:05 ── 收盘复盘
+15:25 ── 预测账本采集与到期评估
 20:30 ── 次日投资策略主报告（服务下一交易日）
 21:00 ── Sentinel 绩效回看与归档
 ```
@@ -70,6 +71,8 @@ scripts/install-congxicai-v7-launchd.sh
 │       ├── data_sources/     # 多源数据层
 │       │   ├── tushare_client.py    # Tushare 数据
 │       │   ├── tencent_client.py    # 腾讯行情
+│       │   ├── realtime_kline_scraper.py # Scrapling + 东方财富实时 K 线
+│       │   ├── realtime_market_data.py   # 快速实时行情门面
 │       │   └── eastmoney_client.py  # 东方财富
 │       ├── engine/           # 分析/回测/策略工作流
 │       │   ├── analysis.py   # 市场数据分析
@@ -81,6 +84,8 @@ scripts/install-congxicai-v7-launchd.sh
 │       │   ├── quant_lifecycle.py  # 生产候选池/持仓池扫描与提醒
 │       │   ├── target_snapshot.py  # 单标的结构化数据快照
 │       │   ├── target_scoring.py   # 账户可执行评分
+│       │   ├── prediction_lab.py   # T+1/T+3/T+5 预测账本与回看
+│       │   ├── recommendation_review.py # 真实执行复盘评分
 │       │   ├── market_regime.py    # 市场状态过滤
 │       │   ├── playbook_engine.py  # breakout/dip 交易剧本选择
 │       │   ├── position_sizing.py  # 风险预算仓位计算
@@ -110,6 +115,18 @@ scripts/install-congxicai-v7-launchd.sh
 ---
 
 ## 核心技术特性
+
+### v8.2.0-dev 预测账本与实时 K 线闭环
+
+`v8.2.0-dev` 将系统从“只复盘真实成交”推进到“每天生成可验证预测样本”：不再只研究用户买过的个股，而是对 Target Pool 或 Tushare 全 A 股票池生成 T+1/T+3/T+5 预测记录，到期后自动验证方向命中、收益误差、超额收益和触发理由表现。
+
+- **Scrapling 实时 K 线**：实测本机最快实时 K 线源为东方财富 `push2his` 1分钟 K 线，中位延迟约 95ms；`realtime_kline_scraper.py` 用 Scrapling 抓取 Eastmoney K 线，支持 `1m/5m/15m/30m/60m/day`。
+- **快速行情门面**：`realtime_market_data.py` 保留腾讯实时 quote，K 线优先走 Scrapling/Eastmoney，失败再退回腾讯，避免单一源故障影响盘中扫描和报告评分。
+- **高位追买拦截**：`playbook_engine.py` 增加近 20 日区间位置判断，放量上涨但位于区间 80% 以上时降级为 `blocked_high_position / breakout_watch`，不再直接给建仓或加仓建议。
+- **预测账本**：`prediction_lab.py` 对候选池或全 A 股票池生成 T+1/T+3/T+5 预测记录，字段包括价格、涨幅、量比、成交额、区间位置、均线、5日涨幅、预测方向、预期收益、置信度和触发理由。
+- **到期评估**：`scripts/run_prediction_lab.py evaluate` 会在 K 线走出后验证预测，输出方向命中、实际收益、收益误差、基准超额和触发理由表现；15:25 定时任务会采集当天样本并回看近 10 天到期样本。
+- **真实执行复盘**：`recommendation_review.py` 读取本地持仓/已平仓记录、实时行情和 K 线，计算真实执行样本的收益、入场区间、行为分和问题 flags，并接入 Sentinel 21:00 review。
+- **策略调整建议**：预测回看会按触发理由聚合表现，生成 `downweight_trigger`、`upweight_trigger` 或 `keep_weight` 建议；当前默认只产出可审计建议，不自动黑箱改参数。
 
 ### v8.1.0-dev 中长期研究闭环
 

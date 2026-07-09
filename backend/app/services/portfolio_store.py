@@ -58,6 +58,10 @@ def recalculate_portfolio(portfolio: dict[str, Any]) -> dict[str, Any]:
         portfolio.get("total_pnl", 0) + portfolio.get("realized_pnl", 0),
         2,
     )
+    available_cash = round(float(portfolio.get("available_cash", portfolio.get("cash", 0)) or 0), 2)
+    portfolio["available_cash"] = available_cash
+    portfolio["cash"] = available_cash
+    portfolio["total_assets"] = round(available_cash + portfolio["total_value"], 2)
     portfolio["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     return portfolio
 
@@ -107,6 +111,7 @@ def sync_db_from_user_portfolio(db: Session, path: str | None = None) -> dict[st
     elif "cash" in portfolio:
         acc.cash = _fen(portfolio.get("cash", 0))
 
+    db.flush()
     market_value_fen = sum(p.market_value for p in db.query(Position).filter(Position.quantity > 0).all())
     acc.total_value = acc.cash + acc.frozen + market_value_fen
     acc.total_pnl = acc.total_value - acc.initial_capital
