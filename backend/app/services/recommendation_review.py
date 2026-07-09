@@ -94,12 +94,37 @@ def _trade_rows(portfolio: dict[str, Any]) -> list[dict[str, Any]]:
     return rows
 
 
+def _empty_review(system_gap: str) -> dict[str, Any]:
+    return {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "executed": {
+            "count": 0,
+            "avg_return_pct": 0.0,
+            "win_rate_pct": 0.0,
+            "avg_behavior_score": 0.0,
+            "total_pnl": 0.0,
+            "problem_flags": [],
+        },
+        "portfolio": {
+            "realized_pnl": 0,
+            "total_pnl": 0,
+            "total_pnl_all": 0,
+            "total_assets": 0,
+        },
+        "items": [],
+        "system_gap": system_gap,
+    }
+
+
 async def build_recommendation_review(
     *,
     portfolio_path: str | None = None,
     quote_source: Any | None = None,
 ) -> dict[str, Any]:
-    portfolio = recalculate_portfolio(load_user_portfolio(portfolio_path))
+    try:
+        portfolio = recalculate_portfolio(load_user_portfolio(portfolio_path))
+    except FileNotFoundError:
+        return _empty_review("portfolio_missing")
     quote_source = quote_source or FastRealtimeMarketDataSource()
     rows = _trade_rows(portfolio)
     codes = list(dict.fromkeys(row["code"] for row in rows))
@@ -161,6 +186,10 @@ async def build_recommendation_review(
 
 def render_recommendation_review_markdown(review: dict[str, Any]) -> str:
     executed = review.get("executed") or {}
+    if review.get("system_gap") == "portfolio_missing":
+        gap_conclusion = "- 未找到本地持仓文件，真实执行复盘本次只输出空样本。"
+    else:
+        gap_conclusion = "- 项目原有 Sentinel advice_performance 未记录本轮真实执行样本，导致推荐行为没有进入绩效闭环。"
     lines = [
         f"# 推荐执行复盘评分 - {review.get('generated_at', '')[:10]}",
         "",
@@ -190,7 +219,7 @@ def render_recommendation_review_markdown(review: dict[str, Any]) -> str:
         "",
         "## 复盘结论",
         "",
-        "- 项目原有 Sentinel advice_performance 未记录本轮真实执行样本，导致推荐行为没有进入绩效闭环。",
+        gap_conclusion,
         "- 行为分低的主要原因会集中在 high_position_entry / upper_range_entry / loss_after_entry。",
         "- 修复方向：高位放量突破不再直接给买入，只能转为 blocked_high_position 观察，等待回踩后重新评分。",
     ])
