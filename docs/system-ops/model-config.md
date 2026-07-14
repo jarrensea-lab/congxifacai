@@ -21,9 +21,13 @@
 
 ## 数据库配置
 
-| 配置项 | 默认值 | 说明 |
+| 环境变量 | 默认值 | 说明 |
 |--------|--------|------|
-| `DATABASE_PATH` | `{PROJECT_ROOT}/data/stock_data.db` | SQLite 数据库文件路径 |
+| `CONGXI_STATE_DIR` | `~/Library/Application Support/congxicai-v7` | 本机运行时状态根目录 |
+| `CONGXI_DATABASE_PATH` | `${CONGXI_STATE_DIR}/stock_data.db` | 业务 SQLite 路径覆盖 |
+| `CONGXI_SCHEDULER_DATABASE_PATH` | `${CONGXI_STATE_DIR}/scheduler_jobs.db` | APScheduler SQLite 路径覆盖 |
+
+业务库和调度库必须保持为两个文件。真实持仓与现金事实源仍是 `data/user_portfolio.json`；迁移数据库不会修改该文件。
 
 ## 缓存配置
 
@@ -59,6 +63,9 @@ FEISHU_WEBHOOK_URL=https://open.feishu.cn/open-apis/bot/v2/hook/xxx
 # 服务端口
 SERVER_PORT=8000
 FRONTEND_PORT=3000
+
+# 本机运行时状态目录（通常无需修改）
+CONGXI_STATE_DIR=/Users/zhuchenyuan/Library/Application Support/congxicai-v7
 ```
 
 ## Ollama 客户端参数

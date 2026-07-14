@@ -22,11 +22,17 @@
 - ✅ **真实执行复盘**：新增 `recommendation_review.py` 与 `scripts/review_recommendation_outcomes.py`，读取本地真实持仓/已平仓记录，按收益、入场区间和行为 flags 打分。
 - ✅ **Sentinel review 接入真实执行评分**：`scripts/run_sentinel.py --mode review` 会同时输出 `recommendation_execution_review`，避免 advice performance 只有空样本。
 
+### 运行稳定性
+- ✅ **运行时数据库移出外置盘**：业务 SQLite 默认迁移到 `~/Library/Application Support/congxicai-v7/stock_data.db`，降低外置卷短暂不可用导致常驻服务退出或数据库锁异常的风险。
+- ✅ **调度库独立**：APScheduler 作业使用独立 `scheduler_jobs.db`，不再与业务表共享同一 SQLite 文件。
+- ✅ **可验证迁移**：新增只复制、不删除源库的迁移 CLI，包含 SQLite backup、完整性检查、逐表行数对比、目标拒绝覆盖和时间戳回滚备份。
+
 ### 依赖
 - ✅ 新增 `scrapling`、`playwright`、`browserforge`。当前 Eastmoney JSON 抓取不启动浏览器，因此不要求安装 Playwright 浏览器。
 
 ### 验证
 - `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests/test_realtime_kline_scraper.py backend/tests/test_scrapling_fetcher.py backend/tests/test_prediction_lab.py backend/tests/test_quant_lifecycle.py backend/tests/test_target_scoring.py backend/tests/test_playbook_engine.py backend/tests/test_notification_gate.py backend/tests/test_feishu_pusher.py backend/tests/test_portfolio_state.py -q`：`52 passed`。
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests -q`：`304 passed`，包含本地业务库/独立调度库路径、活跃 WAL 迁移、半迁移回滚、拒绝覆盖与 sidecar 防护。
 - `PYTHONPATH=.:backend .venv/bin/python -m ruff check ...`：通过。
 - `PYTHONPATH=.:backend .venv/bin/python - <<'PY' import app.main; print({'main_import':'ok'}) PY`：通过。
 
