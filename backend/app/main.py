@@ -3,6 +3,7 @@ import asyncio
 import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
@@ -190,9 +191,10 @@ app = FastAPI(
 debate_engine = AIDebateEngine()
 feishu = FeishuNotifier()
 feishu_v6 = feishu_channels
+Path(settings.SCHEDULER_DATABASE_PATH).expanduser().parent.mkdir(parents=True, exist_ok=True)
 scheduler = AsyncIOScheduler(
     jobstores={
-        "default": SQLAlchemyJobStore(url=f"sqlite:///{settings.DATABASE_PATH}")
+        "default": SQLAlchemyJobStore(url=f"sqlite:///{settings.SCHEDULER_DATABASE_PATH}")
     },
     job_defaults={
         "misfire_grace_time": 300,  # 5分钟容错

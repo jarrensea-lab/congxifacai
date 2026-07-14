@@ -7,7 +7,9 @@ def pytest_configure(config):
     """在导入任何应用模块前，用临时路径覆盖数据库路径"""
     tmp_dir = tempfile.mkdtemp(prefix="congxi_test_")
     db_path = os.path.join(tmp_dir, "test.db")
+    scheduler_db_path = os.path.join(tmp_dir, "scheduler.db")
     os.environ["CONGXI_DATABASE_PATH"] = db_path
+    os.environ["CONGXI_SCHEDULER_DATABASE_PATH"] = scheduler_db_path
     # 确保目录存在
     os.makedirs(tmp_dir, exist_ok=True)
     # 存储临时目录以便清理

@@ -307,13 +307,25 @@ DeepSeek API: 约 ¥0.10/交易日，月均 ¥2.20
 
 ---
 
+## 运行时数据库
+
+- 业务状态默认写入本机磁盘 `~/Library/Application Support/congxicai-v7/stock_data.db`。
+- APScheduler 作业独立写入 `~/Library/Application Support/congxicai-v7/scheduler_jobs.db`，避免调度写锁与业务查询共用一个 SQLite 文件。
+- 可用 `CONGXI_STATE_DIR` 修改共同根目录，或用 `CONGXI_DATABASE_PATH`、`CONGXI_SCHEDULER_DATABASE_PATH` 分别覆盖。
+- `data/user_portfolio.json` 仍是真实账户持仓与现金的事实源；数据库迁移不会改写该文件。
+- 外置项目目录中的旧数据库只作为回滚副本保留，不再作为常驻服务默认写入位置。
+
+迁移现有数据库时使用 `scripts/migrate_runtime_databases.py`。脚本采用 SQLite backup API、临时文件和原子替换，执行完整性与逐表行数校验，并拒绝覆盖已有目标库。
+
+---
+
 ## 目录说明
 
 | 目录 | 用途 |
 |------|------|
 | `backend/` | FastAPI 后端服务 |
 | `scripts/` | 启动脚本、守护进程、数据初始化 |
-| `data/` | 运行时数据（数据库、策略输出） |
+| `data/` | 项目数据、策略输出与真实账户 JSON；SQLite 常驻库默认位于本机状态目录 |
 | `docs/` | 设计文档、知识库 |
 | `memory/` | Codex 项目上下文记忆 |
 

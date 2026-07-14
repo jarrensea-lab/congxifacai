@@ -7,8 +7,8 @@ from sqlalchemy.orm import declarative_base
 from sqlalchemy.orm import sessionmaker
 from app.config import settings
 
-# 支持 CONGXI_DATABASE_PATH 环境变量覆盖（CI/测试环境使用临时数据库）
-_db_path = os.environ.get("CONGXI_DATABASE_PATH") or settings.DATABASE_PATH
+# settings 已统一解析 CONGXI_DATABASE_PATH 与本机默认运行目录。
+_db_path = settings.DATABASE_PATH
 if _db_path != ":memory:":
     Path(_db_path).expanduser().parent.mkdir(parents=True, exist_ok=True)
 

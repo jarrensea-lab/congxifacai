@@ -1,5 +1,8 @@
 """应用配置"""
 import os
+from dataclasses import dataclass
+from pathlib import Path
+
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from functools import lru_cache
@@ -10,6 +13,30 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _env_path = os.path.join(PROJECT_ROOT, "..", ".env.local")
 if os.path.exists(_env_path):
     load_dotenv(_env_path)
+
+
+@dataclass(frozen=True)
+class RuntimeDatabasePaths:
+    business: str
+    scheduler: str
+
+
+def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
+    """Resolve mutable SQLite files onto the local home disk by default."""
+    state_dir = Path(
+        os.getenv("CONGXI_STATE_DIR")
+        or "~/Library/Application Support/congxicai-v7"
+    ).expanduser()
+    business = Path(
+        os.getenv("CONGXI_DATABASE_PATH") or state_dir / "stock_data.db"
+    ).expanduser()
+    scheduler = Path(
+        os.getenv("CONGXI_SCHEDULER_DATABASE_PATH") or state_dir / "scheduler_jobs.db"
+    ).expanduser()
+    return RuntimeDatabasePaths(business=str(business), scheduler=str(scheduler))
+
+
+_runtime_database_paths = resolve_runtime_database_paths()
 
 # v6: 云端模型 (全功能通过 DeepSeek, 可扩展 Qwen)
 CLOUD_MODELS = {
@@ -61,7 +88,8 @@ class Settings(BaseSettings):
     SERVER_PORT: int = 8000
 
     # 数据库
-    DATABASE_PATH: str = os.path.join(PROJECT_ROOT, "data", "stock_data.db")
+    DATABASE_PATH: str = _runtime_database_paths.business
+    SCHEDULER_DATABASE_PATH: str = _runtime_database_paths.scheduler
 
     # 缓存配置
     CACHE_MAX_SIZE: int = 1000

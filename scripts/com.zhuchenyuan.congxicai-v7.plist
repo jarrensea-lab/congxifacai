@@ -19,6 +19,8 @@
         <string>/Users/zhuchenyuan/AI/workflows/恭喜发财/backend</string>
         <key>CONGXI_STRATEGY_MODE</key>
         <string>growth_sprint</string>
+        <key>CONGXI_STATE_DIR</key>
+        <string>/Users/zhuchenyuan/Library/Application Support/congxicai-v7</string>
     </dict>
 
     <key>WorkingDirectory</key>
