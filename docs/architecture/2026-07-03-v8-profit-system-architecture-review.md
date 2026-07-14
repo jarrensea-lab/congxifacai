@@ -315,7 +315,7 @@ snapshot -> score_target -> buy/watch/research_only
 
 ### 5.2 问题二：风控参数和收益目标互相拧巴
 
-当前 `growth_sprint` 目标是 30 天争取 +10%，但参数是：
+审查当时的 `growth_sprint` 目标是 30 天争取 +10%，但参数是：
 
 - 单票上限 50%。
 - 单笔硬止损 5%。
@@ -329,6 +329,8 @@ snapshot -> score_target -> buy/watch/research_only
 现在按仓位上限控制风险
 应该按每笔允许亏损金额控制风险
 ```
+
+> 2026-07-14 决策更新：当前生产 profile 已统一为单笔账户风险 2%、止损 10%、最低目标 20%，并强制最低盈亏比 2:1。评分、候选池扫描、持仓兜底和报告共用 `strategy_profile.py` 的计算函数。
 
 ### 5.3 问题三：强势确认逻辑被误当成总策略
 
@@ -489,7 +491,7 @@ radar_candidate 只雷达，不入生产池
 
 ### 8.2 Strategy Profile
 
-新增字段：
+审查时建议新增字段（当前 `growth_sprint` 的 `risk_per_trade_pct` 已按 2026-07-14 决策调整为 2.0）：
 
 ```json
 {

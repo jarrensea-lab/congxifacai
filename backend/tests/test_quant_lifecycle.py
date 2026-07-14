@@ -94,8 +94,11 @@ async def test_candidate_pool_marks_affordable_volume_breakout_actionable(tmp_pa
 
     assert result["alerts"][0]["action"] == "actionable"
     assert result["alerts"][0]["playbook"] == "breakout_entry"
+    assert result["alerts"][0]["stop_loss"] == 2.88
+    assert result["alerts"][0]["target_price"] == 3.84
+    assert result["alerts"][0]["risk_budget"] == 121.71
     assert result["alerts"][0]["position_shares"] == 300
-    assert result["alerts"][0]["risk_amount"] == 48.0
+    assert result["alerts"][0]["risk_amount"] == 96.0
     assert "人工复核后可试仓" in result["alerts"][0]["suggestion"]
     assert store.get("002123")["status"] == "actionable"
 

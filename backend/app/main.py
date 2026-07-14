@@ -853,67 +853,22 @@ async def _run_review_with_status():
         gs["running"] = False
 
 async def _run_daily_report_with_status():
-    """收盘全景报告 — 升级版：交易回顾+持仓+风控+系统健康"""
+    """次日投资策略主报告."""
     if not should_run_main_report():
         logger.info(schedule_reason("main_report"))
         return
     try:
-        logger.info("=== 收盘全景报告 ===")
-        today = str(date.today())
+        logger.info(schedule_reason("main_report"))
+        logger.info("=== 次日投资策略主报告 ===")
+        from scripts import daily_report
 
-        db = SessionLocal()
-        try:
-            positions = db.query(Position).filter(Position.quantity > 0).all()
-            pos_list = []
-            for p in positions:
-                cost = p.avg_cost / 100 if p.avg_cost else 0
-                price = p.market_price / 100 if p.market_price else 0
-                pos_list.append({
-                    "code": p.stock_code, "name": p.stock_name,
-                    "quantity": p.quantity, "cost": cost,
-                    "current_price": price, "market_price": price,
-                })
-
-            acc = db.query(SimAccount).first()
-            cash = acc.cash / 100 if acc else 0
-            mv = sum(p.market_value for p in positions) / 100 if positions else 0
-
-            risk_alerts = _get_today_risk_alerts(db)
-            alert_list = []
-            for a in risk_alerts:
-                alert_list.append({
-                    "stock_code": a.stock_code, "stock_name": a.stock_name,
-                    "alert_type": a.alert_type, "alert_level": a.alert_level,
-                    "alert_message": a.alert_message, "suggestion": a.suggestion or "",
-                })
-        finally:
-            db.close()
-
-        health = {
-            "api_service": True,
-            "deepseek_api": await cloud.is_available() if hasattr(cloud, 'is_available') else False,
-            "qwen_api": await _check_qwen(),
-            "tencent_data": await _check_data_source("tencent"),
-            "eastmoney_data": await _check_data_source("eastmoney"),
-            "tushare_data": await _check_data_source("tushare"),
-            "tasks_success": len([j for j in scheduler.get_jobs()]),
-            "tasks_fail": 0,
-        }
-
-        perf = {
-            "daily_pnl": 0, "daily_pnl_pct": 0, "cumulative_pnl": 0,
-            "win_rate": 0, "position_count": len(pos_list),
-            "total_assets": cash + mv, "available_cash": cash,
-        }
-
-        await report_engine.push_closing(
-            date=today, positions=pos_list, alerts=alert_list,
-            performance=perf, market_summary="收盘市场概况",
-            system_health=health, preview="明日关注标的待生成",
-        )
-        logger.info("=== 收盘全景报告完成 ===")
+        report_path = await daily_report.main()
+        if report_path:
+            logger.info(f"=== 次日投资策略主报告完成: {report_path} ===")
+        else:
+            logger.warning("次日投资策略主报告结束但未返回报告路径")
     except Exception as e:
-        logger.error(f"收盘全景报告异常: {e}", exc_info=True)
+        logger.error(f"次日投资策略主报告异常: {e}", exc_info=True)
 
 
 async def _run_sentinel_review_with_status():

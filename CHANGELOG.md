@@ -14,6 +14,8 @@
 - ✅ **Tushare 全 A 股票池入口**：`TushareDataSource.fetch_stock_basic()` 可返回活跃上市 A 股基础信息，后续可用于分批全市场采样。
 
 ### 策略与复盘
+- ✅ **风险收益口径统一**：`growth_sprint` 采用单笔账户风险 2%、止损 10%、最低目标 20%（盈亏比至少 2:1）；评分、候选池扫描、持仓兜底和主报告共用同一组计算函数。
+- ✅ **次日策略报告收口**：飞书只发送持仓动作、短线触发池和中长线关注池，完整数据/角色/研究审计保留在 Obsidian；收盘跌破止损改为次日首个 15 分钟确认，确认前禁止补仓。
 - ✅ **高位追买降级**：`playbook_engine.py` 增加近 20 日区间位置拦截，放量上涨但处于区间 80% 以上时转为 `blocked_high_position / breakout_watch`，不再提示建仓或加仓。
 - ✅ **候选池盘中 5 分钟事件扫描**：新增盘中高频事件扫描，覆盖候选池建仓/加仓触发、持仓止损和止盈提醒，并通过 `notification_gate.py` 做冷却去重。
 - ✅ **真实执行复盘**：新增 `recommendation_review.py` 与 `scripts/review_recommendation_outcomes.py`，读取本地真实持仓/已平仓记录，按收益、入场区间和行为 flags 打分。

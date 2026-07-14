@@ -24,9 +24,14 @@ DEFAULT_ARCHIVE_DIR = os.path.join(
 ARCHIVE_DIR = os.getenv("CONGXI_REPORT_ARCHIVE_DIR", DEFAULT_ARCHIVE_DIR)
 DELIVERY_STATUS_FILENAME = "delivery_status.json"
 SENTINEL_OUTPUT_ROOT = Path(os.getenv("CONGXI_SENTINEL_OUTPUT_ROOT", os.path.join(PROJECT_ROOT, "data", "sentinel")))
+FEISHU_SUMMARY_END_MARKER = "<!-- FEISHU_SUMMARY_END -->"
 
 
-from app.services.strategy_profile import get_strategy_profile
+from app.services.strategy_profile import (
+    calculate_stop_loss_price,
+    calculate_target_price,
+    get_strategy_profile,
+)
 
 
 def _read_iso_date_env(name: str):
@@ -39,11 +44,12 @@ def _read_iso_date_env(name: str):
         raise ValueError(f"{name} must be YYYY-MM-DD, got {raw!r}") from exc
 
 
-def build_feishu_summary(md_content: str, limit: int = 2500) -> str:
-    """Build a short Feishu card body while pointing to the local full report."""
-    if len(md_content) <= limit:
-        return md_content
-    return md_content[:limit].rstrip() + "\n\n...*(完整报告已保存至 Obsidian 报告目录)*"
+def build_feishu_summary(md_content: str, limit: int = 3000) -> str:
+    """Build the execution summary while keeping the audit appendix in Obsidian."""
+    summary = md_content.split(FEISHU_SUMMARY_END_MARKER, 1)[0].rstrip()
+    if len(summary) <= limit:
+        return summary
+    return summary[:limit].rstrip() + "\n\n...*(完整报告已保存至 Obsidian 报告目录)*"
 
 
 def build_execution_guard(
@@ -70,7 +76,8 @@ def build_execution_guard(
     lines.append(f"- 策略模式：{profile['title']}；目标：{profile['target']}。")
     lines.append(
         f"- 风险闸门：账户最大回撤 -{profile['max_drawdown_pct']}%，"
-        f"单票上限 {single_pct:.0f}%，单笔硬止损 {profile['stop_loss_pct']}%。"
+        f"单票上限 {single_pct:.0f}%，单笔账户风险 {profile['risk_per_trade_pct']}%，"
+        f"止损 {profile['stop_loss_pct']}%，最低目标 {profile.get('target_profit_pct', 12)}%。"
     )
     lines.append(f"- 账户可用现金 ¥{available_cash:,.2f}，{reserve_pct:.0f}%现金底线约 ¥{reserve_cash:,.2f}。")
     if profile["mode"] == "growth_sprint":
@@ -441,8 +448,11 @@ def _humanize_reason(value) -> str:
     text = text.replace("lot_size_exceeded", "买不起最小交易单位")
     text = text.replace("missing_required_data", "关键数据未补齐")
     text = text.replace("small_account_discovery", "小账户低价候选")
+    text = text.replace("breakout_entry", "放量突破买点")
+    text = text.replace("dip_entry", "回踩买点")
     text = text.replace("缺少结构化数据项", "缺少关键数据")
     text = text.replace("池外小账户补扫", "小账户低价候选扫描")
+    text = text.replace("。，", "，").replace("。。", "。")
     return text
 
 
@@ -788,6 +798,295 @@ def _holding_action_lines(positions: list[dict], total_assets: float) -> list[st
     return lines
 
 
+def _position_watch_items(decision: dict) -> dict:
+    watch = decision.get("position_watch") if isinstance(decision, dict) else None
+    if isinstance(watch, dict):
+        items = watch.get("items", watch)
+        if isinstance(items, dict):
+            return items
+    return {}
+
+
+def _watch_for_position(pos: dict, watch_items: dict) -> dict:
+    code = _target_code(pos)
+    item = watch_items.get(code) if isinstance(watch_items, dict) else None
+    return item if isinstance(item, dict) else {}
+
+
+def _holding_stop_breaches(positions: list[dict], decision: dict) -> list[dict]:
+    watch_items = _position_watch_items(decision)
+    breaches: list[dict] = []
+    for pos in positions:
+        watch = _watch_for_position(pos, watch_items)
+        stop_loss = watch.get("stop_loss_price") or watch.get("stop_loss")
+        try:
+            stop_price = float(stop_loss or 0)
+            price = float(pos.get("current_price", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if not price or not stop_price or price > stop_price:
+            continue
+        breaches.append({
+            "label": _target_label(pos),
+            "shares": int(pos.get("shares", pos.get("position", 0)) or 0),
+            "price": price,
+            "stop_loss": stop_price,
+        })
+    return breaches
+
+
+def _price_from_item(item: dict):
+    for key in ("current_price", "price", "entry_price", "trigger_price"):
+        value = item.get(key)
+        try:
+            price = float(value or 0)
+        except (TypeError, ValueError):
+            price = 0
+        if price > 0:
+            return price
+    return None
+
+
+def _trigger_from_item(item: dict):
+    return item.get("trigger_price") or item.get("entry_price") or item.get("current_price") or item.get("max_entry_price")
+
+
+def _stop_from_item(item: dict):
+    return item.get("stop_loss") or item.get("stop_loss_price")
+
+
+def _target_from_item(item: dict):
+    return item.get("target_price") or item.get("take_profit") or item.get("take_profit_price")
+
+
+def _planned_holding_period(item: dict) -> str:
+    for key in ("holding_period", "planned_holding_period", "period"):
+        value = item.get(key)
+        if value:
+            return _cell(value, 36)
+    if item.get("thesis_status") or item.get("long_quality_score"):
+        return "1-3个月跟踪，5/20日复核"
+    return "5-20个交易日观察"
+
+
+def _trend_text(item: dict) -> str:
+    parts = []
+    if item.get("thesis_status"):
+        parts.append(_thesis_status_label(item.get("thesis_status")))
+    if item.get("valuation_zone"):
+        parts.append(_valuation_zone_label(item.get("valuation_zone")))
+    if item.get("long_quality_score") is not None:
+        parts.append(f"长期分{item.get('long_quality_score')}")
+    return " / ".join(parts) if parts else "趋势待验证"
+
+
+def _project_status_section(
+    *,
+    report_date: str,
+    target_date: str,
+    risk_level: int,
+    final_view: str,
+    confidence,
+    positions: list[dict],
+    available_cash: float,
+    total_assets: float,
+    market_data: dict,
+    analysis_report: dict,
+    sentinel_package: dict | None,
+    profile: dict,
+    budget_blocked_count: int,
+    stop_breach_alerts: list[dict] | None = None,
+) -> list[str]:
+    lines = [
+        "## 一、系统和项目工作状态",
+        "",
+        f"- 系统结论：主报告已生成；服务交易日 {target_date}；报告日 {report_date}；R{risk_level}；置信度 {confidence}/10。",
+        f"- 策略模式：{profile['title']}；目标：{profile['target']}。",
+        "- 策略结论：执行动作以下方“明日持仓策略/短线关注/中长线关注”三张表为准；AI裁判原文已归档。",
+        f"- 账户状态：持仓 {len(positions)} 只；可用现金 {_money(available_cash)}；总资产 {_money(total_assets)}。",
+        f"- 行情/评分：{_market_effect_line(risk_level, analysis_report, market_data)}。",
+        f"- 风控校验：预算阻断 {budget_blocked_count} 只；主报告以结构化评分为准，角色投票和裁判原文只留在 Obsidian。",
+    ]
+    if stop_breach_alerts:
+        breach_text = "；".join(
+            f"{item['label']} 已跌破止损 {_money(item['stop_loss'])}（现价 {_money(item['price'])}，{item['shares']}股）"
+            for item in stop_breach_alerts[:3]
+        )
+        lines.append(
+            f"- 开盘前硬风控：{breach_text}；新开仓暂停，优先处理风险仓；"
+            "次日首个15分钟仍未收回止损线则执行退出，确认前禁止补仓/抢反弹。"
+        )
+    if sentinel_package:
+        status = (sentinel_package.get("source_status") or {}).get("status", "unknown")
+        themes = sentinel_package.get("top_themes") or []
+        theme_text = "、".join(
+            f"{item.get('name')}({item.get('count')})" for item in themes[:3] if isinstance(item, dict)
+        ) or "无明确主题"
+        dives = sentinel_package.get("serenity_deep_dives") or []
+        dive_names = []
+        for dive in dives[:3]:
+            path = str(dive.get("learning_report_path") or "")
+            name = os.path.basename(path) if path else str(dive.get("theme") or "未记录路径")
+            dive_names.append(name)
+        lines.append(
+            f"- Sentinel：状态 {status}；抓取 {sentinel_package.get('event_count', 0)} 条，关键 {sentinel_package.get('key_event_count', 0)} 条；主题 {theme_text}。"
+        )
+        lines.append(f"- Serenity：研究 {len(dives)} 个主题；" + ("、".join(dive_names) if dive_names else "本次无深挖文件。"))
+    else:
+        lines.append("- Sentinel/Serenity：本次无可用研究包；主报告只使用行情、持仓和结构化评分。")
+    lines.append("")
+    return lines
+
+
+def _holding_strategy_section(
+    *,
+    positions: list[dict],
+    total_assets: float,
+    decision: dict,
+) -> list[str]:
+    lines = [
+        "## 二、明日持仓策略",
+        "",
+    ]
+    if not positions:
+        return lines + [
+            "- 当前无持仓：明天没有卖出动作；只按短线池触发条件人工复核。",
+            "",
+        ]
+
+    watch_items = _position_watch_items(decision)
+    lines.extend([
+        "| 持仓 | 现价/成本 | 止损 | 止盈 | 明日动作 | 触发条件 |",
+        "|---|---:|---:|---:|---|---|",
+    ])
+    for pos in positions:
+        shares = int(pos.get("shares", pos.get("position", 0)) or 0)
+        price = float(pos.get("current_price", 0) or 0)
+        cost = pos.get("avg_cost") or pos.get("cost_price") or pos.get("average_cost")
+        value = float(pos.get("current_value", shares * price) or 0)
+        ratio = value / total_assets * 100 if total_assets else 0
+        watch = _watch_for_position(pos, watch_items)
+        stop_loss = watch.get("stop_loss_price") or watch.get("stop_loss")
+        target_price = watch.get("target_price") or watch.get("take_profit_price")
+        try:
+            risk_reference_price = float(cost or 0) or price
+        except (TypeError, ValueError):
+            risk_reference_price = price
+        if not stop_loss and risk_reference_price:
+            stop_loss = calculate_stop_loss_price(risk_reference_price)
+        if not target_price and risk_reference_price:
+            target_price = calculate_target_price(risk_reference_price)
+        action = "持有观察"
+        trigger = f"跌破 {_money(stop_loss)} 卖；接近 {_money(target_price)} 止盈；不加仓。"
+        try:
+            if price and stop_loss and price <= float(stop_loss):
+                action = "次日确认止损"
+                trigger = (
+                    f"收盘已跌破 {_money(stop_loss)}；次日首个15分钟仍未收回 {_money(stop_loss)}，"
+                    f"卖出{shares}股；确认前不加仓。"
+                )
+            elif price and target_price and price >= float(target_price):
+                action = "止盈优先"
+                trigger = f"接近/突破 {_money(target_price)}，卖出或至少减仓。"
+        except (TypeError, ValueError):
+            pass
+        if ratio >= 40:
+            trigger += " 仓位偏高，不加仓。"
+        lines.append(
+            f"| {_cell(_target_label(pos), 32)} | {_money(price)} / {_money(cost)} | {_money(stop_loss)} | "
+            f"{_money(target_price)} | {action} | {_cell(trigger, 96)} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _short_pool_rows(decision: dict, *, excluded_codes: set[str] | None = None) -> list[dict]:
+    excluded = excluded_codes or set()
+    rows = []
+    seen: set[str] = set()
+    for item in _split_target_scores(decision)["executable"] + _split_target_scores(decision)["watching"]:
+        if item.get("thesis_status") or item.get("long_quality_score"):
+            continue
+        code = _target_code(item)
+        if not code or code in excluded or code in seen:
+            continue
+        rows.append(item)
+        seen.add(code)
+    for item in _affordable_outside_targets(decision):
+        code = _target_code(item)
+        if not code or code in excluded or code in seen:
+            continue
+        rows.append(item)
+        seen.add(code)
+    return rows
+
+
+def _short_pool_section(decision: dict, *, excluded_codes: set[str] | None = None) -> list[str]:
+    rows = _short_pool_rows(decision, excluded_codes=excluded_codes)
+    lines = [
+        "## 三、短线关注标的池",
+        "",
+        "| 标的 | 状态 | 现价 | 触发价格 | 止损 | 止盈 | 入选原因 | 重点 |",
+        "|---|---|---:|---:|---:|---:|---|---|",
+    ]
+    if not rows:
+        lines.append("| 暂无 | 不下单 | - | - | - | - | 无短线可执行候选 | - |")
+        lines.append("")
+        return lines
+    for idx, item in enumerate(rows[:6]):
+        reason = _humanize_reason(item.get("decision_reason") or item.get("watch_reason") or item.get("reason"))
+        focus = "重点关注" if idx < 3 else "一般关注"
+        action = str(item.get("action") or item.get("status") or "")
+        state = "可执行" if action in {"buy", "add", "increase"} else "等待触发（未触发不买）"
+        lines.append(
+            f"| {_cell(_target_label(item), 28)} | {state} | {_money(_price_from_item(item))} | {_money(_trigger_from_item(item))} | "
+            f"{_money(_stop_from_item(item))} | {_money(_target_from_item(item))} | {_cell(reason or '等待量价资金触发', 60)} | {focus} |"
+        )
+    lines.append("")
+    return lines
+
+
+def _long_pool_rows(decision: dict) -> list[dict]:
+    long_rows = []
+    for item in _target_scores(decision):
+        if item.get("thesis_status") or item.get("long_quality_score") or str(item.get("action") or "") in {"research_only", "research_reference"}:
+            long_rows.append(item)
+    return long_rows
+
+
+def _long_pool_section(decision: dict, *, budget_blocked_count: int = 0) -> list[str]:
+    rows = _long_pool_rows(decision)
+    lines = [
+        "## 四、中长线关注标的池",
+        "",
+        "| 标的 | 现价 | 触发价格 | 止损 | 止盈 | 发展趋势 | 计划持有周期 | 入选原因 |",
+        "|---|---:|---:|---:|---:|---|---|---|",
+    ]
+    if not rows:
+        if budget_blocked_count:
+            lines.append(
+                f"| 暂无 | - | - | - | - | 中长线研究不是没有；研究层仍有 {budget_blocked_count} 只预算阻断标的 | - | 明细在 Obsidian，不作为当前账户策略 |"
+            )
+        else:
+            lines.append("| 暂无 | - | - | - | - | Serenity/长线研究未形成可跟踪配置 | - | 只在 Obsidian 查看研究细节 |")
+        lines.append("")
+        return lines
+    for item in rows[:6]:
+        reason = _humanize_reason(
+            item.get("combined_decision_reason")
+            or item.get("decision_reason")
+            or item.get("long_horizon_reason")
+            or item.get("reason")
+        )
+        lines.append(
+            f"| {_cell(_target_label(item), 28)} | {_money(_price_from_item(item))} | {_money(_trigger_from_item(item))} | "
+            f"{_money(_stop_from_item(item))} | {_money(_target_from_item(item))} | {_cell(_trend_text(item), 36)} | "
+            f"{_planned_holding_period(item)} | {_cell(reason or '等待趋势和估值复核', 60)} |"
+        )
+    lines.append("")
+    return lines
+
+
 def _new_entry_action_lines(decision: dict) -> list[str]:
     buy = _first_executable_target(decision)
     if not buy:
@@ -1079,7 +1378,7 @@ def build_next_day_strategy_sections(
     sentinel_package: dict | None,
     strategy_profile: dict | None = None,
 ) -> list[str]:
-    """Build the profit-first opening sections of the main report."""
+    """Build the concise Feishu-first next-day strategy sections."""
     profile = strategy_profile or get_strategy_profile()
     total_assets = total_assets or available_cash
     buy_budget, _ = _buy_budget_for_profile(available_cash, total_assets, profile)
@@ -1090,43 +1389,40 @@ def build_next_day_strategy_sections(
         item for item in _outside_pool_scan(decision)
         if _target_code(item) not in hidden_codes
     ]
-    target_scores = _target_scores(visible_decision)
-    target_buckets = _split_target_scores(visible_decision)
-    primary = _primary_trade_candidate(visible_decision)
-    lines = _render_core_dashboard(
+    stop_breach_alerts = _holding_stop_breaches(positions, visible_decision)
+    lines: list[str] = []
+    lines.extend(_project_status_section(
+        report_date=report_date,
         target_date=target_date,
         risk_level=risk_level,
         final_view=final_view,
+        confidence=confidence,
         positions=positions,
         available_cash=available_cash,
         total_assets=total_assets,
-        decision=visible_decision,
-        analysis_report=analysis_report,
         market_data=market_data,
+        analysis_report=analysis_report,
+        sentinel_package=sentinel_package,
         profile=profile,
-    )
-    lines.extend(_render_trigger_pool(visible_decision, primary, hidden_codes))
+        budget_blocked_count=len(hidden_codes),
+        stop_breach_alerts=stop_breach_alerts,
+    ))
+    lines.extend(_holding_strategy_section(
+        positions=positions,
+        total_assets=total_assets,
+        decision=visible_decision,
+    ))
+    holding_codes = {_target_code(item) for item in positions if _target_code(item)}
+    lines.extend(_short_pool_section(visible_decision, excluded_codes=holding_codes))
+    lines.extend(_long_pool_section(visible_decision, budget_blocked_count=len(hidden_codes)))
+    lines.append("- 说明：Sentinel/Serenity 的原始抓取、深挖全文和角色辩论细节保留在 Obsidian，不在飞书主报告展开。")
+    lines.append("")
+    target_scores = _target_scores(visible_decision)
+    target_buckets = _split_target_scores(visible_decision)
     lines.extend([
-        "## 三、持仓与市场风控",
+        FEISHU_SUMMARY_END_MARKER,
         "",
-        f"- 策略模式：{profile['title']}；目标：{profile['target']}。",
-        "- 验收口径：不承诺收益，只验证报告、风控、人工复核和后续复盘是否按规则执行。",
-        f"- 置信度：{confidence}/10。",
-        f"- 账户处理：{build_final_action_summary(positions, available_cash, total_assets, profile)}",
-        "",
-        "### 持仓处理",
-        "",
-    ])
-    lines.extend(_holding_action_lines(positions, total_assets))
-    lines.extend([
-        "",
-        "### 机器可执行校验",
-        "",
-    ])
-    lines.extend(build_execution_guard(positions, available_cash, total_assets, profile).splitlines())
-    lines.extend([
-        "",
-        "## 四、后台风控与策略审计",
+        "## 五、后台风控与策略审计",
         "",
     ])
     lines.extend(_render_budget_blocks(
@@ -1143,34 +1439,18 @@ def build_next_day_strategy_sections(
         total_assets=total_assets,
         profile=profile,
     ))
-    lines.extend(_render_long_horizon_summary(target_scores))
-    lines.extend(_render_target_bucket(
-        "今日可执行标的明细",
-        target_buckets["executable"],
-        "暂无通过账户预算、最小交易单位、行情触发和风控过滤的标的。",
-    ))
-    lines.extend(_render_target_bucket(
-        "观察等待触发标的",
-        target_buckets["watching"],
-        "暂无观察标的；若 Sentinel/Serenity 有新线索，先进入研究参照或观察等待触发。",
-    ))
-    lines.extend(_render_target_bucket(
-        "研究参照标的",
-        target_buckets["research_reference"],
-        "暂无研究参照标的；买不起一手或只具备产业链锚点价值的标的会放在这里。",
-    ))
-    lines.extend(_render_target_bucket(
-        "今日剔除标的",
-        target_buckets["removed"],
-        "暂无剔除标的。",
-    ))
     lines.extend([
-        "",
-        "## 五、数据覆盖与评分审计",
+        "## 六、数据覆盖与评分审计",
         "",
         "- 数据源审计：",
     ])
-    lines.extend(f"  {line}" for line in build_data_source_audit(market_data=market_data, sentinel_package=sentinel_package))
+    lines.extend(
+        f"  {line}"
+        for line in build_data_source_audit(
+            market_data=market_data,
+            sentinel_package=sentinel_package,
+        )
+    )
     if target_scores:
         lines.extend([
             "",
@@ -1180,10 +1460,10 @@ def build_next_day_strategy_sections(
             "|---|---:|---|---|---|",
         ])
         for item in target_scores:
-            missing = item.get("missing_data") or []
             lines.append(
                 f"| {_cell(_target_label(item), 40)} | {item.get('score', 0)} | "
-                f"{_action_label(item.get('action') or item.get('status'))} | {_cell(_missing_data_text(missing), 80)} | "
+                f"{_action_label(item.get('action') or item.get('status'))} | "
+                f"{_cell(_missing_data_text(item.get('missing_data') or []), 80)} | "
                 f"{_cell(_block_reason_label(item.get('block_reason')), 80)} |"
             )
     else:
@@ -1191,32 +1471,22 @@ def build_next_day_strategy_sections(
             "",
             "- 标的评分：本次未生成结构化 target_scores；不能把研究线索直接当成买入建议。",
         ])
+    lines.extend(["", *build_role_vote_audit(decision, hidden_codes=hidden_codes), ""])
+    review_summary = _structured_review_summary(target_buckets, visible_decision)
+    if hidden_codes and not target_scores:
+        review_summary = (
+            f"结构化评分摘要：飞书可见标的 0 只；预算阻断 {len(hidden_codes)} 只。"
+            "AI裁判原文保留在本地辩论快照；主报告不展示买不起标的或其幻觉价格。"
+        )
     lines.extend([
-        "",
-        "- 辩论权重说明：Serenity研究员提供产业链瓶颈证据，不直接下买卖指令；守夜人风控否决优先生效。",
-        "",
-    ])
-    lines.extend(build_role_vote_audit(decision, hidden_codes=hidden_codes))
-    if target_scores or hidden_codes:
-        review_summary = _structured_review_summary(target_buckets, visible_decision)
-        if hidden_codes and not target_scores:
-            review_summary = (
-                f"结构化评分摘要：主报告可见标的 0 只；预算阻断 {len(hidden_codes)} 只已隐藏。"
-                "AI裁判原文保留在本地辩论快照；主报告不展示买不起标的或其幻觉价格。"
-            )
-    else:
-        review_summary = _structured_review_summary(target_buckets, visible_decision)
-    lines.extend([
-        "",
-        "## 六、复盘与自迭代",
+        "## 七、复盘与自迭代",
         "",
         f"- 本报告生成日：{report_date}",
         f"- 裁判采用/否决说明：{review_summary}",
-        "- 每个进入可执行池的标的必须留存触发价、止损、目标位、账户预算和证据编号。",
-        "- 每个观察标的按 1/3/5/20 日回看：符合预期进可执行池，不符合预期剔除。",
-        "- 每个研究参照标的只验证方向和产业链假设，买得起且行情触发后才允许迁移到观察/可执行池。",
+        "- 可执行标的必须留存触发价、止损、目标位、账户预算和证据编号。",
+        "- 观察标的按 1/3/5/20 日回看；符合预期才允许迁移到可执行池。",
         "",
-        "## 七、研究归档链接",
+        "### 研究归档",
         "",
     ])
     lines.extend(_research_archive_lines(sentinel_package, roles, decision))
@@ -1446,8 +1716,8 @@ async def build_outside_pool_scan_for_report(
         elif volume_clue:
             reason = "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。"
         trigger_price = _round_price(price if price > 0 and affordable else seed.get("max_entry_price") or 0)
-        stop_loss = _round_price(trigger_price * 0.95) if trigger_price > 0 and affordable else None
-        target_price = _round_price(trigger_price * 1.12) if trigger_price > 0 and affordable else None
+        stop_loss = calculate_stop_loss_price(trigger_price, profile) if trigger_price > 0 and affordable else None
+        target_price = calculate_target_price(trigger_price, profile) if trigger_price > 0 and affordable else None
         rows.append({
             **seed,
             "name": quote.get("name") or seed["name"],
@@ -1742,6 +2012,13 @@ async def main():
         print(f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警", flush=True)
     except Exception as e:
         print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
+
+    try:
+        from app.services.quant_lifecycle import PositionWatchStore
+
+        decision["position_watch"] = PositionWatchStore().load()
+    except Exception as e:
+        print(f"   ⚠️ 持仓止损/止盈计划读取失败，报告降级继续: {e}", flush=True)
 
     # ===== 4. 构建综合Markdown报告 =====
     lines = []
