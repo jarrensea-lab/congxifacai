@@ -16,6 +16,33 @@ RISK_LEVELS = {
 }
 
 
+def _contains_degraded_output(value) -> bool:
+    if isinstance(value, dict):
+        if value.get("degraded") is True or bool(value.get("error")):
+            return True
+        return any(_contains_degraded_output(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_degraded_output(item) for item in value)
+    return False
+
+
+def build_production_gate(engine_result: dict) -> dict:
+    """Fail closed before AI recommendations can enter the production pool."""
+    quality = engine_result.get("quality") if isinstance(engine_result, dict) else None
+    reasons: list[str] = []
+    if not isinstance(quality, dict) or quality.get("pass") is not True:
+        reasons.append("quality_check_failed")
+    if _contains_degraded_output((engine_result or {}).get("debate", {})):
+        reasons.append("degraded_role_output")
+    if _contains_degraded_output((engine_result or {}).get("final", {})):
+        reasons.append("degraded_judge_output")
+    return {
+        "allowed": not reasons,
+        "reasons": reasons,
+        "quality_score": quality.get("score", 0) if isinstance(quality, dict) else 0,
+    }
+
+
 async def run_debate(analysis_report: dict, strategy_type: str = "premarket") -> dict:
     """执行 AI 辩论 — V6: DeepSeek 云端多模型并行辩论
 
@@ -157,6 +184,7 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
         "recommended_risk_level": risk_level,
         "debate_timestamp": str(datetime.now()),
         "quality": result.get("quality", {}),
+        "production_gate": build_production_gate(result),
         "judge_thinking": result.get("judge_thinking", ""),
     }
 

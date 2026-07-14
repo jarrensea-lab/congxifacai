@@ -204,6 +204,8 @@ scripts/install-congxicai-v7-launchd.sh
 
 `growth_sprint` 只改变报告和人工复核的风险边界，不承诺收益，也不触发自动交易。v8 的实际买入股数会再经过 `position_sizing.py` 的风险预算倒推。需要恢复保守档时设置 `CONGXI_STRATEGY_MODE=capital_preservation`。AI 原文若出现旧仓位或现金规则，以报告中的“机器可执行校验”为准。
 
+AI 推荐进入生产候选池采用 fail-closed：裁判质量校验必须明确通过，且任一角色/裁判输出不得带有 `degraded` 或 `error` 标记。校验服务异常、空响应或降级结果仍可进入本地快照和报告审计，但不会写入生产候选池。
+
 ### 飞书全通道
 
 当前生产优先使用 **飞书 OpenAPI 群聊卡片**，Webhook 群机器人作为兜底，用于盘前策略、风险预警、午盘简报和系统日报摘要。
