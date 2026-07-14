@@ -16,11 +16,12 @@ set -euo pipefail
 
 PROJECT_DIR="${CONGXI_PROJECT_DIR:-/Users/zhuchenyuan/AI/workflows/恭喜发财}"
 REPORT_DIR="${CONGXI_REPORT_ARCHIVE_DIR:-/Users/zhuchenyuan/AI/projects/司库/01-资料采集/量化投资/恭喜发财报告}"
+CONGXI_STATE_DIR="${CONGXI_STATE_DIR:-${HOME}/Library/Application Support/congxicai-v7}"
 LOG_DIR="${HOME}/Library/Logs/congxicai-v7"
 HOST="127.0.0.1"
 PORT="8000"
 
-mkdir -p "${LOG_DIR}"
+mkdir -p "${LOG_DIR}" "${CONGXI_STATE_DIR}"
 
 if ! cd "${PROJECT_DIR}"; then
   echo "ERROR: launchd cannot enter project directory: ${PROJECT_DIR}" >&2
@@ -41,6 +42,7 @@ fi
 
 export PYTHONPATH="${PROJECT_DIR}/backend"
 export CONGXI_PROJECT_DIR="${PROJECT_DIR}"
+export CONGXI_STATE_DIR
 export CONGXI_STRATEGY_MODE="${CONGXI_STRATEGY_MODE:-growth_sprint}"
 
 exec "${PROJECT_DIR}/.venv/bin/python" -m uvicorn app.main:app \
