@@ -8,7 +8,11 @@ from app.services.long_thesis import evaluate_thesis_status
 from app.services.playbook_engine import select_playbook
 from app.services.position_sizing import calculate_position_size
 from app.services.quant_lifecycle import lot_size_for_code
-from app.services.strategy_profile import get_strategy_profile
+from app.services.strategy_profile import (
+    calculate_stop_loss_price,
+    calculate_target_price,
+    get_strategy_profile,
+)
 
 
 REQUIRED_SOURCES = ("quote", "kline", "fund_flow", "financial")
@@ -122,8 +126,8 @@ def score_target(
     lot_value = round(price * lot_size, 2) if price > 0 else 0.0
     budget = _buy_budget(available_cash, total_assets)
     missing_data = [key for key in REQUIRED_SOURCES if not _status_ok(snapshot.get(key))]
-    stop_loss = round(price * 0.95, 2) if price > 0 else 0
-    target_price = round(price * 1.12, 2) if price > 0 else 0
+    stop_loss = calculate_stop_loss_price(price, profile)
+    target_price = calculate_target_price(price, profile)
     regime = evaluate_market_regime(snapshot)
     playbook = select_playbook(snapshot) if price > 0 else {}
     long_view = score_long_quality(snapshot, long_thesis)

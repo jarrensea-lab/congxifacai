@@ -8,7 +8,11 @@ from pathlib import Path
 from typing import Any
 
 from app.config import PROJECT_ROOT
-from app.services.strategy_profile import get_strategy_profile
+from app.services.strategy_profile import (
+    calculate_stop_loss_price,
+    calculate_target_price,
+    get_strategy_profile,
+)
 
 
 def default_candidate_pool_path() -> Path:
@@ -411,7 +415,9 @@ def _candidate_alert(
     lot_size = lot_size_for_code(code)
     lot_value = price * lot_size
     affordable = lot_value <= available_cash
-    stop_loss = round(price * 0.95, 2)
+    profile = get_strategy_profile()
+    stop_loss = calculate_stop_loss_price(price, profile)
+    target_price = calculate_target_price(price, profile)
     snapshot = {
         "code": code,
         "name": name,
@@ -428,12 +434,11 @@ def _candidate_alert(
         stop_loss=stop_loss,
         available_cash=available_cash,
         total_assets=total_assets,
-        profile=get_strategy_profile(),
+        profile=profile,
     )
     held_shares = int(_to_float((position or {}).get("shares")))
     held_value = _to_float((position or {}).get("market_value"))
     is_existing_position = held_shares > 0 or held_value > 0
-    profile = get_strategy_profile()
     single_limit = _to_float(total_assets) * (_to_float(profile.get("single_position_limit_pct"), 50) / 100)
 
     base = {
@@ -452,6 +457,7 @@ def _candidate_alert(
         "risk_budget": sizing.get("risk_budget", 0),
         "risk_amount": sizing.get("risk_amount", 0),
         "stop_loss": stop_loss,
+        "target_price": target_price,
     }
 
     if _is_limit_up_or_chasing(price, quote, change_pct):
@@ -512,7 +518,7 @@ def _candidate_alert(
                     f"{name}({code}) 已持仓，{playbook.get('playbook')} 触发，现价¥{price:.2f}，"
                     f"可人工复核加仓{int(sizing.get('shares', 0))}股，风险约¥{sizing.get('risk_amount', 0):.2f}。"
                 ),
-                "suggestion": f"加仓前确认未超单票上限；新增仓位止损¥{stop_loss:.2f}",
+                "suggestion": f"加仓前确认未超单票上限；新增仓位止损¥{stop_loss:.2f}，目标¥{target_price:.2f}",
             }
         return {
             **base,
@@ -522,7 +528,7 @@ def _candidate_alert(
                 f"{name}({code}) {playbook.get('playbook')} 触发，现价¥{price:.2f}，"
                 f"建议{int(sizing.get('shares', 0))}股，风险约¥{sizing.get('risk_amount', 0):.2f}。"
             ),
-            "suggestion": f"人工复核后可试仓；止损¥{stop_loss:.2f}",
+            "suggestion": f"人工复核后可试仓；止损¥{stop_loss:.2f}，目标¥{target_price:.2f}",
         }
 
     return None

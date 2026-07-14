@@ -52,7 +52,7 @@ def test_build_next_day_strategy_sections_include_required_blocks():
         report_date="2026-06-28",
         target_date="2026-06-29",
         risk_level=1,
-        final_view="空仓观望",
+        final_view="对长江电力执行小仓位分批加仓",
         confidence=9,
         positions=[],
         available_cash=3085.6,
@@ -81,24 +81,306 @@ def test_build_next_day_strategy_sections_include_required_blocks():
     ))
 
     for heading in (
-        "## 一、明日【唯一】实盘狙击标的（可执行）",
-        "## 二、明日盘中雷达触发池",
-        "## 三、持仓与市场风控",
-        "## 四、后台风控与策略审计",
-        "## 五、数据覆盖与评分审计",
-        "## 六、复盘与自迭代",
-        "## 七、研究归档链接",
+        "## 一、系统和项目工作状态",
+        "## 二、明日持仓策略",
+        "## 三、短线关注标的池",
+        "## 四、中长线关注标的池",
     ):
         assert heading in sections
-    assert "当前持仓怎么处理" in sections
-    assert "是否需要卖" in sections
-    assert "核心主攻" in sections
-    assert "明日盘中雷达触发池" in sections
+    assert "系统结论" in sections
+    assert "Sentinel" in sections
+    assert "Serenity" in sections
     assert "2026-06-29" in sections
     assert "AI半导体" in sections
-    assert "Serenity 深挖" in sections
     assert "2026-06-28_Serenity深挖-AI半导体.md" in sections
-    assert "完整辩论记录" in sections
+    assert "明日【唯一】实盘狙击标的" not in sections
+    assert "核心主攻" not in sections
+    assert "复盘与自迭代" in sections
+    assert "数据覆盖与评分审计" in sections
+
+
+def test_build_next_day_strategy_sections_is_concise_enough_for_feishu():
+    from scripts.daily_report import build_feishu_summary, build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-12",
+        target_date="2026-07-13",
+        risk_level=4,
+        final_view="空仓观望",
+        confidence=7,
+        positions=[
+            {
+                "code": "000725",
+                "name": "京东方A",
+                "shares": 100,
+                "avg_cost": 8.011,
+                "current_price": 7.59,
+                "current_value": 759,
+            },
+            {
+                "code": "600839",
+                "name": "四川长虹",
+                "shares": 100,
+                "avg_cost": 6.701,
+                "current_price": 6.83,
+                "current_value": 683,
+            },
+        ],
+        available_cash=1739.31,
+        total_assets=5984.31,
+        market_data={"indices": {"shanghai": 3500}},
+        analysis_report={"overall_bias": "neutral", "limit_up_count": 30, "limit_down_count": 8},
+        decision={
+            "position_watch": {
+                "items": {
+                    "000725": {"stop_loss_price": 7.61, "target_price": 8.65},
+                    "600839": {"stop_loss_price": 6.37, "target_price": 7.24},
+                }
+            },
+            "target_scores": [
+                {
+                    "code": "301583",
+                    "name": "托伦斯",
+                    "action": "watch",
+                    "score": 60,
+                    "current_price": 22.3,
+                    "trigger_price": 22.0,
+                    "stop_loss": 20.9,
+                    "target_price": 24.6,
+                    "decision_reason": "等待量能和资金流确认。",
+                },
+                {
+                    "code": "002123",
+                    "name": "长期测试",
+                    "action": "watch",
+                    "score": 68,
+                    "current_price": 3.2,
+                    "trigger_price": 3.1,
+                    "stop_loss": 2.95,
+                    "target_price": 3.7,
+                    "long_quality_score": 88,
+                    "thesis_status": "healthy",
+                    "valuation_zone": "accumulation_zone",
+                    "decision_reason": "产业趋势保持，等待交易剧本确认。",
+                },
+            ],
+            "outside_pool_scan": [
+                {
+                    "code": "000629",
+                    "name": "钒钛股份",
+                    "current_price": 3.55,
+                    "trigger_price": 3.55,
+                    "stop_loss": 3.37,
+                    "target_price": 3.98,
+                    "suggested_amount": 355.0,
+                    "affordable": True,
+                    "watch_reason": "已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。",
+                }
+            ],
+        },
+        roles={},
+        sentinel_package={
+            "event_count": 1200,
+            "key_event_count": 80,
+            "top_themes": [{"name": "AI端侧", "count": 18}],
+            "serenity_deep_dives": [{"theme": "AI端侧", "learning_report_path": "/tmp/serenity.md"}],
+            "source_status": {"status": "ok"},
+        },
+    ))
+
+    summary = build_feishu_summary(sections)
+
+    assert len(summary) <= 3000
+    assert "完整报告已保存至 Obsidian" not in summary
+    assert "数据覆盖与评分审计" in sections
+    assert "数据覆盖与评分审计" not in summary
+    for heading in (
+        "## 一、系统和项目工作状态",
+        "## 二、明日持仓策略",
+        "## 三、短线关注标的池",
+        "## 四、中长线关注标的池",
+    ):
+        assert heading in summary
+    assert "京东方A(000725)" in summary
+    assert "次日首个15分钟仍未收回 ¥7.61，卖出100股" in summary
+    assert "| 标的 | 状态 | 现价 | 触发价格 | 止损 | 止盈 | 入选原因 | 重点 |" in summary
+    assert "等待触发（未触发不买）" in summary
+    assert "| 标的 | 现价 | 触发价格 | 止损 | 止盈 | 发展趋势 | 计划持有周期 | 入选原因 |" in summary
+
+
+def test_build_next_day_strategy_sections_holding_stop_loss_is_explicit():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-12",
+        target_date="2026-07-13",
+        risk_level=4,
+        final_view="空仓观望",
+        confidence=7,
+        positions=[{
+            "code": "000725",
+            "name": "京东方A",
+            "shares": 100,
+            "avg_cost": 8.011,
+            "current_price": 7.59,
+            "current_value": 759,
+        }],
+        available_cash=1739.31,
+        total_assets=5984.31,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "position_watch": {
+                "items": {"000725": {"stop_loss_price": 7.61, "target_price": 8.65}}
+            },
+            "target_scores": [],
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "京东方A(000725)" in sections
+    assert "次日确认止损" in sections
+    assert "次日首个15分钟仍未收回 ¥7.61，卖出100股" in sections
+    assert "小仓位分批加仓" not in sections
+    assert "执行动作以下方" in sections
+    assert "数据不足，建议观望" not in sections
+
+
+def test_holding_without_watch_plan_uses_active_profile_stop_and_target():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-12",
+        target_date="2026-07-13",
+        risk_level=3,
+        final_view="持有观察",
+        confidence=7,
+        positions=[{
+            "code": "000725",
+            "name": "京东方A",
+            "shares": 100,
+            "avg_cost": 8.0,
+            "current_price": 7.5,
+            "current_value": 750.0,
+        }],
+        available_cash=1200.0,
+        total_assets=2000.0,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={},
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "¥7.20" in sections
+    assert "¥9.60" in sections
+
+
+def test_build_next_day_strategy_sections_promotes_breached_stop_to_first_screen():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-12",
+        target_date="2026-07-13",
+        risk_level=4,
+        final_view="观察科技线反弹",
+        confidence=7,
+        positions=[{
+            "code": "000725",
+            "name": "京东方A",
+            "shares": 100,
+            "avg_cost": 8.011,
+            "current_price": 7.59,
+            "current_value": 759,
+        }],
+        available_cash=1739.31,
+        total_assets=5984.31,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "position_watch": {
+                "items": {"000725": {"stop_loss_price": 7.61, "target_price": 8.65}}
+            },
+            "target_scores": [{
+                "code": "000629",
+                "name": "钒钛股份",
+                "action": "buy",
+                "current_price": 3.55,
+                "trigger_price": 3.55,
+                "stop_loss": 3.37,
+                "target_price": 3.98,
+                "decision_reason": "低价股放量。",
+            }],
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    first_screen = sections[:sections.index("## 二、明日持仓策略")]
+    assert "开盘前硬风控" in first_screen
+    assert "京东方A(000725) 已跌破止损 ¥7.61" in first_screen
+    assert "新开仓暂停" in first_screen
+    assert "优先处理风险仓" in first_screen
+    assert "次日首个15分钟" in first_screen
+
+
+def test_build_next_day_strategy_sections_excludes_current_holdings_from_new_entry_pool():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-12",
+        target_date="2026-07-13",
+        risk_level=3,
+        final_view="等待触发",
+        confidence=7,
+        positions=[{
+            "code": "000725",
+            "name": "京东方A",
+            "shares": 100,
+            "current_price": 7.59,
+            "current_value": 759,
+        }],
+        available_cash=1739.31,
+        total_assets=5984.31,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "position_watch": {
+                "items": {"000725": {"stop_loss_price": 7.61, "target_price": 8.65}}
+            },
+            "target_scores": [
+                {
+                    "code": "000725",
+                    "name": "京东方A",
+                    "action": "buy",
+                    "current_price": 7.59,
+                    "trigger_price": 7.61,
+                    "stop_loss": 6.85,
+                    "target_price": 8.65,
+                    "decision_reason": "候选池残留记录。",
+                },
+                {
+                    "code": "000629",
+                    "name": "钒钛股份",
+                    "action": "buy",
+                    "current_price": 3.55,
+                    "trigger_price": 3.55,
+                    "stop_loss": 3.2,
+                    "target_price": 3.98,
+                    "decision_reason": "已通过结构化评分。",
+                },
+            ],
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    short_pool = sections[
+        sections.index("## 三、短线关注标的池"):sections.index("## 四、中长线关注标的池")
+    ]
+    assert "京东方A(000725)" not in short_pool
+    assert "钒钛股份(000629)" in short_pool
 
 
 def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
@@ -167,25 +449,22 @@ def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
         strategy_profile=get_strategy_profile("growth_sprint"),
     ))
 
-    dashboard = sections.index("## 一、明日【唯一】实盘狙击标的（可执行）")
-    trigger_pool = sections.index("## 二、明日盘中雷达触发池")
-    risk = sections.index("## 三、持仓与市场风控")
-    audit = sections.index("## 四、后台风控与策略审计")
-    assert dashboard < trigger_pool < risk < audit
+    system = sections.index("## 一、系统和项目工作状态")
+    holdings = sections.index("## 二、明日持仓策略")
+    short_pool = sections.index("## 三、短线关注标的池")
+    long_pool = sections.index("## 四、中长线关注标的池")
+    assert system < holdings < short_pool < long_pool
 
-    first_screen = sections[:trigger_pool]
-    assert "核心主攻：钒钛股份(000629)" in first_screen
-    assert "买入逻辑：已具备量能线索，博弈低价股资金回流" in first_screen
-    assert "一手约¥355.00" in first_screen
-    assert "止损位：¥3.37" in first_screen
-    assert "第一目标位：¥3.98" in first_screen
-    assert "池外小账户补扫" not in first_screen
+    first_screen = sections[:short_pool]
+    short_screen = sections[short_pool:long_pool]
+    assert "钒钛股份(000629)" in short_screen
+    assert "已具备量能线索" in short_screen
+    assert "¥3.55" in short_screen
+    assert "¥3.37" in short_screen
+    assert "¥3.98" in short_screen
+    assert "池外小账户补扫" not in short_screen
 
-    audit_screen = sections[audit:]
-    assert "账户预算不足阻断" in audit_screen
-    assert "预算阻断 1 只" in audit_screen
-    assert "北方华创" not in sections
-    assert "角色投票审计" in audit_screen
+    assert "预算阻断 1 只" in sections
     assert "AI原文价格错配" not in sections
     assert "现价325元高于区间30%" not in sections
     assert "赚钱效应" in first_screen
@@ -215,7 +494,7 @@ def test_load_sentinel_research_package_falls_back_to_latest(monkeypatch, tmp_pa
 
 
 def test_build_next_day_strategy_sections_render_role_votes():
-    from scripts.daily_report import build_next_day_strategy_sections
+    from scripts.daily_report import build_feishu_summary, build_next_day_strategy_sections
 
     sections = "\n".join(build_next_day_strategy_sections(
         report_date="2026-07-01",
@@ -244,8 +523,13 @@ def test_build_next_day_strategy_sections_render_role_votes():
         sentinel_package=None,
     ))
 
-    assert "## 五、数据覆盖与评分" in sections
-    assert "角色投票审计" in sections
+    assert "## 一、系统和项目工作状态" in sections
+    assert "角色投票和裁判原文只留在 Obsidian" in sections
+    summary = build_feishu_summary(sections)
+    assert "688008" not in summary
+    assert "猎手 7分" not in summary
+    assert "Serenity 8分" not in summary
+    assert "ev_test" not in summary
     assert "688008" in sections
     assert "猎手 7分" in sections
     assert "Serenity 8分" in sections
@@ -256,7 +540,7 @@ def test_build_next_day_strategy_sections_render_role_votes():
     assert "主报告以结构化评分为准" in sections
 
 
-def test_build_next_day_strategy_sections_separates_executable_and_research_reference():
+def test_build_next_day_strategy_sections_hides_budget_blocked_research_reference_from_feishu():
     from scripts.daily_report import build_next_day_strategy_sections
 
     sections = "\n".join(build_next_day_strategy_sections(
@@ -298,17 +582,53 @@ def test_build_next_day_strategy_sections_separates_executable_and_research_refe
         sentinel_package=None,
     ))
 
-    assert "### 今日可执行标的" in sections
+    assert "## 三、短线关注标的池" in sections
     assert "低价突破(002123)" in sections
-    assert "### 研究参照标的" in sections
+    assert "## 四、中长线关注标的池" in sections
     assert "澜起科技(688008)" not in sections
     assert "预算阻断 1 只" in sections
-    assert "买不起最小交易单位" not in sections
     assert "数据不足，建议观望" not in sections
 
 
-def test_build_next_day_strategy_sections_excludes_legacy_report_order():
+def test_build_next_day_strategy_sections_explains_long_research_exists_when_budget_blocked():
     from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-01",
+        target_date="2026-07-02",
+        risk_level=4,
+        final_view="等待触发",
+        confidence=7,
+        positions=[],
+        available_cash=1739.31,
+        total_assets=5984.31,
+        market_data={"indices": {}},
+        analysis_report={"overall_bias": "neutral"},
+        decision={
+            "target_scores": [
+                {
+                    "code": "688008",
+                    "name": "澜起科技",
+                    "action": "research_only",
+                    "entry_price": 268.06,
+                    "lot_value": 53612,
+                    "block_reason": "lot_size_exceeded",
+                    "decision_reason": "买不起最小交易单位，仅作半导体研究锚点。",
+                }
+            ],
+        },
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "澜起科技(688008)" not in sections
+    assert "中长线研究不是没有" in sections
+    assert "研究层仍有 1 只预算阻断标的" in sections
+    assert "明细在 Obsidian" in sections
+
+
+def test_build_next_day_strategy_sections_excludes_legacy_report_order():
+    from scripts.daily_report import build_feishu_summary, build_next_day_strategy_sections
 
     sections = "\n".join(build_next_day_strategy_sections(
         report_date="2026-07-01",
@@ -328,8 +648,12 @@ def test_build_next_day_strategy_sections_excludes_legacy_report_order():
 
     assert "## 📈 一、市场概况" not in sections
     assert "## 🧠 三、AI 多维度分析" not in sections
-    assert sections.index("## 一、明日【唯一】实盘狙击标的（可执行）") < sections.index("## 二、明日盘中雷达触发池")
-    assert sections.index("## 二、明日盘中雷达触发池") < sections.index("## 四、后台风控与策略审计")
+    assert sections.index("## 一、系统和项目工作状态") < sections.index("## 二、明日持仓策略")
+    assert sections.index("## 三、短线关注标的池") < sections.index("## 四、中长线关注标的池")
+    assert "明日【唯一】实盘狙击标的" not in sections
+    summary = build_feishu_summary(sections)
+    assert "后台风控与策略审计" in sections
+    assert "后台风控与策略审计" not in summary
 
 
 def test_build_next_day_strategy_sections_renders_outside_pool_scan_when_no_buy():
@@ -379,13 +703,10 @@ def test_build_next_day_strategy_sections_renders_outside_pool_scan_when_no_buy(
     ))
 
     assert "### 池外小账户补扫" not in sections
-    assert "核心主攻：钒钛股份(000629)" in sections
-    assert "账户可买上限价" in sections
-    assert "触发价参考" in sections
+    assert "钒钛股份(000629)" in sections
+    assert "触发价格" in sections
     assert "¥3.37" in sections
     assert "¥3.98" in sections
-    assert "一手约¥355.00" in sections
-    assert "买入逻辑" in sections
     assert "small_account_discovery" not in sections
 
 
@@ -466,7 +787,7 @@ def test_build_next_day_strategy_sections_hides_internal_enums_and_translates_mi
                     "target_price": 25.31,
                     "block_reason": "missing_required_data",
                     "missing_data": ["kline", "fund_flow"],
-                    "decision_reason": "缺少结构化数据项：kline、fund_flow；先补数据，不使用泛化观望兜底。",
+                    "decision_reason": "缺少结构化数据项：kline、fund_flow；未触发 breakout_entry 或 dip_entry，先补数据，不使用泛化观望兜底。",
                     "next_signal": "补齐kline、fund_flow，并恢复实时价格后再给触发价。",
                 },
             ],
@@ -495,6 +816,8 @@ def test_build_next_day_strategy_sections_hides_internal_enums_and_translates_mi
         "missing_required_data",
         "lot_size_exceeded",
         "small_account_discovery",
+        "breakout_entry",
+        "dip_entry",
         "fund_flow",
         "kline",
     ]
@@ -502,8 +825,9 @@ def test_build_next_day_strategy_sections_hides_internal_enums_and_translates_mi
         assert token not in sections
     assert "个股资金流" in sections
     assert "K线" in sections
-    assert "研究参照" in sections
-    assert "账户可买上限价" in sections
+    assert "放量突破买点" in sections
+    assert "回踩买点" in sections
+    assert "预算阻断 1 只" in sections
 
 
 def test_build_next_day_strategy_sections_renders_mid_frequency_strategy_line():
@@ -551,13 +875,10 @@ def test_build_next_day_strategy_sections_renders_mid_frequency_strategy_line():
         strategy_profile=get_strategy_profile("growth_sprint"),
     ))
 
-    assert "### 中低频观察/配置线" in sections
-    assert "当前没有形成中低频观察/配置候选" in sections
+    assert "## 四、中长线关注标的池" in sections
     assert "北方华创(002371)" not in sections
-    assert "账户总资产至少" not in sections
-    assert "¥3,042.80" in sections
-    assert "¥30.42" in sections
-    assert "价格回落至" not in sections
+    assert "预算阻断 1 只" in sections
+    assert "¥935.36" not in sections
     assert "可人工复核买入" not in sections
 
 
@@ -613,13 +934,12 @@ def test_build_next_day_strategy_sections_renders_long_horizon_summary():
         sentinel_package=None,
     ))
 
-    assert "### 长期依据摘要" in sections
+    assert "## 四、中长线关注标的池" in sections
     assert "长期测试(002123)" in sections
     assert "论文成立" in sections
     assert "积累区" in sections
     assert "红线触发" in sections
-    assert "风险退出" in sections
-    first_screen = sections[:sections.index("## 二、明日盘中雷达触发池")]
+    first_screen = sections[:sections.index("## 四、中长线关注标的池")]
     assert "accumulation_zone" not in first_screen
 
 
@@ -657,8 +977,8 @@ def test_build_next_day_strategy_sections_does_not_render_raw_judge_reasoning_wh
 
     assert "AI原文误写" not in sections
     assert "¥17000" not in sections
-    assert "结构化评分摘要" in sections
-    assert "预算阻断 1 只已隐藏" in sections
+    assert "主报告以结构化评分为准" in sections
+    assert "预算阻断 1 只" in sections
 
 
 def test_build_next_day_strategy_sections_does_not_render_raw_role_vote_reasons():
@@ -735,8 +1055,8 @@ async def test_build_outside_pool_scan_for_report_adds_live_quote_context(monkey
     assert tcl["lot_value"] == 480.0
     assert tcl["affordable"] is True
     assert tcl["trigger_price"] == 4.8
-    assert tcl["stop_loss"] == 4.56
-    assert tcl["target_price"] == 5.38
+    assert tcl["stop_loss"] == 4.32
+    assert tcl["target_price"] == 5.76
     assert tcl["suggested_amount"] == 480.0
     assert "量能线索" in tcl["watch_reason"]
 
@@ -863,6 +1183,10 @@ def test_growth_sprint_profile_uses_confirmed_high_return_limits(monkeypatch):
     assert profile["mode"] == "growth_sprint"
     assert profile["max_drawdown_pct"] == 10
     assert profile["single_position_limit_pct"] == 50
+    assert profile["stop_loss_pct"] == 10
+    assert profile["risk_per_trade_pct"] == 2
+    assert profile["target_profit_pct"] == 20
+    assert profile["min_reward_risk_ratio"] == 2
     assert profile["allow_high_volatility"] is True
 
     guard = build_execution_guard(
@@ -896,8 +1220,7 @@ def test_growth_sprint_profile_uses_confirmed_high_return_limits(monkeypatch):
 
     assert "策略模式：高收益试验模式" in sections
     assert "目标：30天内争取 +10%" in sections
-    assert "验收口径：不承诺收益" in sections
-    assert "Serenity研究员" in sections
+    assert "Sentinel/Serenity" in sections
 
 
 def test_empty_portfolio_action_summary_has_no_stale_holding_action():
