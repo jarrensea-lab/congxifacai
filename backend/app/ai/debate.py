@@ -550,10 +550,10 @@ class AIDebateEngine:
             text = result.get("content", "")
             if text:
                 return self._parse_json(text)
-            return {"pass": True, "score": 5, "issues": ["校验调用失败"], "summary": "未能校验"}
+            return {"pass": False, "score": 0, "issues": ["校验调用失败"], "summary": "未能校验，禁止进入生产池"}
         except Exception as e:
             logger.error(f"输出校验异常: {e}")
-            return {"pass": True, "score": 5, "issues": [str(e)], "summary": "校验异常"}
+            return {"pass": False, "score": 0, "issues": [str(e)], "summary": "校验异常，禁止进入生产池"}
 
     def _parse_json(self, text: str) -> Dict:
         text = text.strip()

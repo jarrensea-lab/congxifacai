@@ -330,6 +330,23 @@ def _decision_recommendations(decision: dict) -> list[dict]:
     return recommendations
 
 
+def persist_premarket_recommendations(
+    debate_result: dict,
+    decision: dict,
+    *,
+    store: CandidatePoolStore | None = None,
+) -> int:
+    """Write AI recommendations only after an explicit fail-closed approval."""
+    gate = debate_result.get("production_gate") if isinstance(debate_result, dict) else None
+    if not isinstance(gate, dict) or gate.get("allowed") is not True:
+        return 0
+    target_store = store or CandidatePoolStore()
+    return target_store.upsert_recommendations(
+        _decision_recommendations(decision),
+        source="premarket",
+    )
+
+
 notification_gate = NotificationGate()
 
 
@@ -542,11 +559,19 @@ async def _run_premarket_with_status():
         from app.services.quote_enrichment import enrich_decision_with_realtime_quotes
         from app.services.report_templates import strategy_report_md
         decision = await enrich_decision_with_realtime_quotes(decision, TencentDataSource())
-        candidate_count = CandidatePoolStore().upsert_recommendations(
-            _decision_recommendations(decision),
-            source="premarket",
-        )
-        logger.info(f"盘前推荐已进入生产候选池: {candidate_count} 支")
+        production_gate = debate_result.get("production_gate") or {
+            "allowed": False,
+            "reasons": ["production_gate_missing"],
+        }
+        decision["production_gate"] = production_gate
+        candidate_count = persist_premarket_recommendations(debate_result, decision)
+        if production_gate.get("allowed") is True:
+            logger.info(f"盘前推荐已进入生产候选池: {candidate_count} 支")
+        else:
+            logger.warning(
+                "AI推荐未进入生产候选池: "
+                f"reasons={production_gate.get('reasons') or ['unknown']}"
+            )
         report_md = strategy_report_md(decision)
         extra = "\n\n...\n\n*[完整报告已推送]*"
         summary = report_md[:2800] + (extra if len(report_md) > 2800 else "")

@@ -157,7 +157,7 @@ async def test_run_debate_injects_sentinel_evidence_into_news_context(monkeypatc
     monkeypatch.setattr(tracker_module.DebateTracker, "save", lambda *args, **kwargs: None)
     monkeypatch.setattr(performance_module, "record_debate_predictions", lambda *args, **kwargs: [])
 
-    await run_debate(
+    result = await run_debate(
         {
             "market": {"indices": {}},
             "holdings_str": "无持仓",
@@ -167,6 +167,8 @@ async def test_run_debate_injects_sentinel_evidence_into_news_context(monkeypatc
     )
 
     assert "Sentinel evidence" in captured["news_context"]
+    assert result["production_gate"]["allowed"] is False
+    assert "quality_check_failed" in result["production_gate"]["reasons"]
 
 
 def test_repaired_final_decision_contains_role_votes():
