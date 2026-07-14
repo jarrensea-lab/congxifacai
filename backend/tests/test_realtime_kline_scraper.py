@@ -62,3 +62,27 @@ async def test_fast_realtime_market_data_falls_back_when_scrapling_has_no_bars()
 
     assert result["bars"]
     assert result["source"] == "fallback+fallback_after_scrapling"
+
+
+@pytest.mark.asyncio
+async def test_scrapling_realtime_kline_opens_circuit_after_repeated_vendor_failures(monkeypatch):
+    from scrapling.fetchers import Fetcher
+
+    calls = 0
+
+    def fake_get(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("vendor down")
+
+    monkeypatch.setattr(Fetcher, "get", fake_get)
+
+    source = ScraplingRealtimeKlineSource()
+    for _ in range(3):
+        result = await source.fetch_kline("000725", period="day", count=1)
+        assert result["status"] == "error"
+
+    result = await source.fetch_kline("000725", period="day", count=1)
+
+    assert calls == 3
+    assert result["status"] == "circuit_open"

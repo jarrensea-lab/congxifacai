@@ -1,6 +1,7 @@
 """Fast real-time K-line source backed by Scrapling and Eastmoney push2his."""
 from __future__ import annotations
 
+from time import monotonic
 from typing import Any
 
 from app.data_sources.base import BaseDataSource
@@ -53,8 +54,12 @@ class ScraplingRealtimeKlineSource(BaseDataSource):
     fastest reachable real-time K-line endpoint from this machine.
     """
 
-    def __init__(self):
+    def __init__(self, *, failure_threshold: int = 3, cooldown_seconds: float = 300.0):
         super().__init__("eastmoney_scrapling_kline")
+        self.failure_threshold = max(1, int(failure_threshold))
+        self.cooldown_seconds = max(0.0, float(cooldown_seconds))
+        self._consecutive_errors = 0
+        self._circuit_open_until = 0.0
 
     def is_available(self) -> bool:
         try:
@@ -70,6 +75,16 @@ class ScraplingRealtimeKlineSource(BaseDataSource):
         clean = str(stock_code or "").replace("sh", "").replace("sz", "").replace("bj", "")
         if not clean:
             return {"code": stock_code, "period": period, "bars": [], "source": self.name}
+        now = monotonic()
+        if self._circuit_open_until > now:
+            return {
+                "code": clean,
+                "period": period,
+                "bars": [],
+                "source": self.name,
+                "status": "circuit_open",
+                "reason": "recent_vendor_failures",
+            }
         if not self.is_available():
             return {
                 "code": clean,
@@ -93,6 +108,8 @@ class ScraplingRealtimeKlineSource(BaseDataSource):
             )
             payload = response.json()
             bars = self._parse_bars((payload.get("data") or {}).get("klines") or [])
+            self._consecutive_errors = 0
+            self._circuit_open_until = 0.0
             return {
                 "code": clean,
                 "period": period,
@@ -102,6 +119,9 @@ class ScraplingRealtimeKlineSource(BaseDataSource):
                 "status": "ok" if bars else "empty",
             }
         except Exception as exc:
+            self._consecutive_errors += 1
+            if self._consecutive_errors >= self.failure_threshold:
+                self._circuit_open_until = monotonic() + self.cooldown_seconds
             return {
                 "code": clean,
                 "period": period,

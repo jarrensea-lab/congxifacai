@@ -73,6 +73,23 @@ def test_daily_report_queries_risk_alerts_by_timestamp():
         db.close()
 
 
+def test_scheduler_main_report_runs_next_day_strategy_script_not_closing_placeholder():
+    """The scheduled main report must run the next-day strategy pipeline."""
+    source = Path("backend/app/main.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_run_daily_report_with_status"
+    )
+    function_source = ast.get_source_segment(source, function) or ""
+
+    assert "daily_report.main" in function_source
+    assert "push_closing" not in function_source
+    assert "明日关注标的待生成" not in function_source
+
+
 @pytest.mark.asyncio
 async def test_get_review_logs_orders_by_review_date_without_created_at():
     """ReviewLog has review_date, not created_at."""

@@ -1,7 +1,17 @@
 """AKShare 市场数据源 — 资金流向 + 行业板块 + 龙虎榜 + 沪深港通"""
 import asyncio
+import os
 from datetime import datetime, timedelta
 from typing import List, Optional
+
+AKSHARE_CALL_TIMEOUT_SECONDS = float(os.getenv("CONGXI_AKSHARE_TIMEOUT_SECONDS", "120"))
+
+
+def _normalize_stock_code(value) -> str:
+    code = str(value or "").strip()
+    if code.endswith(".0"):
+        code = code[:-2]
+    return code.zfill(6) if code.isdigit() and len(code) <= 6 else code
 
 
 class AKShareMarketClient:
@@ -22,7 +32,8 @@ class AKShareMarketClient:
     async def _call_async(self, fn, *args, **kwargs):
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(fn, *args, **kwargs), timeout=60.0
+                asyncio.to_thread(fn, *args, **kwargs),
+                timeout=AKSHARE_CALL_TIMEOUT_SECONDS,
             )
         except (asyncio.TimeoutError, Exception):
             return None
@@ -38,7 +49,7 @@ class AKShareMarketClient:
                 return None
             results = []
             for _, row in df.iterrows():
-                code = str(row.get('股票代码', ''))
+                code = _normalize_stock_code(row.get('股票代码', ''))
                 name = str(row.get('股票简称', ''))
                 inflow = str(row.get('流入资金', ''))
                 outflow = str(row.get('流出资金', ''))
