@@ -4,6 +4,7 @@ import sys
 import os
 import json
 import asyncio
+import math
 from datetime import datetime
 from pathlib import Path
 
@@ -31,6 +32,12 @@ from app.services.strategy_profile import (
     calculate_stop_loss_price,
     calculate_target_price,
     get_strategy_profile,
+)
+from app.services.visible_decision_gate import (
+    apply_visible_decision_gate,
+    build_visible_decision_gate,
+    format_visible_decision_reasons,
+    write_visible_decision_gate,
 )
 
 
@@ -254,7 +261,18 @@ def build_role_vote_audit(decision: dict, hidden_codes: set[str] | None = None) 
     return lines
 
 
-def build_sentinel_research_section(package: dict | None) -> list[str]:
+def _sentinel_package_age_days(package: dict | None, report_date: str | None) -> int | None:
+    if not package or not report_date or not package.get("date"):
+        return None
+    try:
+        current = datetime.strptime(str(report_date), "%Y-%m-%d").date()
+        package_date = datetime.strptime(str(package.get("date")), "%Y-%m-%d").date()
+    except ValueError:
+        return None
+    return max(0, (current - package_date).days)
+
+
+def build_sentinel_research_section(package: dict | None, report_date: str | None = None) -> list[str]:
     """Render Sentinel research package summary for the main report."""
     if not package:
         return [
@@ -265,6 +283,17 @@ def build_sentinel_research_section(package: dict | None) -> list[str]:
         f"- Sentinel 状态：{(package.get('source_status') or {}).get('status', 'unknown')}",
         f"- 高频新闻：{package.get('event_count', 0)} 条，关键新闻 {package.get('key_event_count', 0)} 条。",
     ]
+    age_days = _sentinel_package_age_days(
+        package,
+        report_date or package.get("requested_date"),
+    )
+    if age_days is not None and age_days > 2:
+        lines.extend([
+            f"- 研究包日期：{package.get('date')}，已过期 {age_days} 天。",
+            "- Serenity：旧深挖不参与当前候选判断；等待新的研究包生成。",
+            "- 边界：旧报告只保留作历史复盘。",
+        ])
+        return lines
     if package.get("fallback_used"):
         lines.append(
             f"- 研究包日期：{package.get('date')}；请求日期 {package.get('requested_date')} 无包，已使用最新可用包。"
@@ -297,7 +326,7 @@ def build_data_source_audit(
     market_data: dict,
     sentinel_package: dict | None,
     portfolio_loaded: bool = True,
-    sqlite_ok: bool = True,
+    sqlite_ok: bool | None = None,
     deepseek_ok: bool | None = None,
     qwen_ok: bool | None = None,
 ) -> list[str]:
@@ -310,6 +339,12 @@ def build_data_source_audit(
         deepseek_status = "ok" if deepseek_ok else "degraded"
     if qwen_ok is not None:
         qwen_status = "ok" if qwen_ok else "degraded"
+    if sqlite_ok is None:
+        sqlite_ok = not (
+            market_data.get("portfolio_sync_failed") is True
+            or str(market_data.get("portfolio_sync_status") or "").strip().lower()
+            in {"failed", "error", "degraded", "unavailable"}
+        )
     rows = [
         "| 数据源 | 状态 | 覆盖/说明 |",
         "|---|---|---|",
@@ -322,6 +357,41 @@ def build_data_source_audit(
         f"| SQLite | {'ok' if sqlite_ok else 'degraded'} | 辩论快照与持仓同步 |",
     ]
     return rows
+
+
+def sync_portfolio_database_truth(
+    portfolio: dict,
+    portfolio_path: str,
+    *,
+    session_factory=None,
+    sync_fn=None,
+) -> dict[str, object]:
+    """Sync portfolio truth without persisting exception details into report inputs."""
+    if session_factory is None:
+        from app.database import SessionLocal
+
+        session_factory = SessionLocal
+    if sync_fn is None:
+        from app.services.portfolio_store import sync_db_from_user_portfolio
+
+        sync_fn = sync_db_from_user_portfolio
+
+    db = None
+    try:
+        db = session_factory()
+        sync_result = sync_fn(db, portfolio_path)
+        if isinstance(sync_result, dict):
+            portfolio.setdefault("available_cash", sync_result.get("available_cash", 0))
+        portfolio["portfolio_sync_failed"] = False
+        portfolio["portfolio_sync_status"] = "ok"
+        return {"ok": True, "status": "ok"}
+    except Exception:
+        portfolio["portfolio_sync_failed"] = True
+        portfolio["portfolio_sync_status"] = "failed"
+        return {"ok": False, "status": "failed"}
+    finally:
+        if db is not None:
+            db.close()
 
 
 def build_next_day_execution_playbook(
@@ -435,6 +505,7 @@ def _block_reason_label(value: str) -> str:
 def _source_label(value: str) -> str:
     labels = {
         "small_account_discovery": "小账户低价候选",
+        "dynamic_fund_flow_discovery": "动态资金流研究候选",
         "target_scoring": "标的池评分",
         "sentinel_serenity": "研究证据入池",
     }
@@ -515,8 +586,27 @@ def _visible_target_scores(decision: dict, hidden_codes: set[str]) -> list[dict]
     return [item for item in _target_scores(decision) if _target_code(item) not in hidden_codes]
 
 
+def _positive_float(value):
+    try:
+        parsed = float(str(value).replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+    return parsed if math.isfinite(parsed) and parsed > 0 else None
+
+
 def _round_price(value: float) -> float:
     return round(max(0.0, float(value or 0)), 2)
+
+
+def _effective_target_action(item: dict) -> str:
+    production_eligibility = (
+        item.get("production_eligibility")
+        if isinstance(item.get("production_eligibility"), dict)
+        else {}
+    )
+    if production_eligibility.get("eligible") is False:
+        return "research_only"
+    return str(item.get("action") or item.get("status") or "watch")
 
 
 def _split_target_scores(decision: dict) -> dict[str, list[dict]]:
@@ -527,9 +617,16 @@ def _split_target_scores(decision: dict) -> dict[str, list[dict]]:
         "removed": [],
     }
     for item in _target_scores(decision):
-        action = str(item.get("action") or item.get("status") or "").lower()
+        action = _effective_target_action(item).lower()
         block_reason = str(item.get("block_reason") or "")
-        if action in {"buy", "add", "actionable", "executable"}:
+        production_eligibility = (
+            item.get("production_eligibility")
+            if isinstance(item.get("production_eligibility"), dict)
+            else {}
+        )
+        if production_eligibility.get("eligible") is False:
+            buckets["research_reference"].append(item)
+        elif action in {"buy", "add", "actionable", "executable"}:
             buckets["executable"].append(item)
         elif action in {"research_only", "research_reference"} or block_reason == "lot_size_exceeded":
             buckets["research_reference"].append(item)
@@ -574,10 +671,15 @@ def _first_executable_target(decision: dict) -> dict | None:
     return None
 
 
-def _affordable_outside_targets(decision: dict) -> list[dict]:
+def _affordable_outside_targets(decision: dict, *, include_research: bool = False) -> list[dict]:
     return [
         item for item in _outside_pool_scan(decision)
-        if item.get("affordable") is not False and (item.get("suggested_amount") or item.get("lot_value"))
+        if item.get("affordable") is not False
+        and (item.get("suggested_amount") or item.get("lot_value"))
+        and (
+            include_research
+            or (not item.get("research_only") and item.get("entry_allowed") is not False)
+        )
     ]
 
 
@@ -813,7 +915,57 @@ def _watch_for_position(pos: dict, watch_items: dict) -> dict:
     return item if isinstance(item, dict) else {}
 
 
-def _holding_stop_breaches(positions: list[dict], decision: dict) -> list[dict]:
+def _quote_freshness_for_service_date(pos: dict, target_date: str | None) -> str:
+    freshness = str(pos.get("quote_freshness") or pos.get("freshness") or "").strip().lower()
+    if freshness not in {"valid_close", "fresh_close"}:
+        return freshness
+    if not target_date:
+        return "stale"
+    try:
+        from app.utils.trading_calendar import prev_trading_day
+
+        service_day = datetime.strptime(target_date, "%Y-%m-%d").date()
+        expected_close_date = prev_trading_day(service_day).isoformat()
+    except (TypeError, ValueError):
+        return "stale"
+    quote_date = str(pos.get("quote_trading_date") or pos.get("trading_date") or "")
+    return "fresh_close" if quote_date == expected_close_date else "stale"
+
+
+def _holding_quote_alarm(pos: dict, target_date: str | None = None) -> str | None:
+    status = str(pos.get("quote_status") or "").strip().lower()
+    freshness = _quote_freshness_for_service_date(pos, target_date)
+    source = pos.get("quote_source") or pos.get("source")
+    quote_time = pos.get("quote_timestamp")
+    trading_date = pos.get("quote_trading_date") or pos.get("trading_date")
+    status_alarms = {
+        "missing": "行情缺失",
+        "fetch_failed": "行情获取失败",
+        "suspended": "行情停牌",
+        "conflict": "行情来源冲突",
+        "source_conflict": "行情来源冲突",
+        "adjustment_anomaly": "行情异常复权",
+    }
+    if status in status_alarms:
+        return status_alarms[status]
+    if freshness == "stale":
+        return "行情陈旧"
+    if freshness == "conflict":
+        return "行情来源冲突"
+    if freshness in {"unknown", "missing"}:
+        return "行情新鲜度未知"
+    if freshness not in {"fresh", "fresh_close"}:
+        return "行情新鲜度未知"
+    if not source or not (quote_time or trading_date):
+        return "行情来源或时间不可审计"
+    return None
+
+
+def _holding_stop_breaches(
+    positions: list[dict],
+    decision: dict,
+    target_date: str | None = None,
+) -> list[dict]:
     watch_items = _position_watch_items(decision)
     breaches: list[dict] = []
     for pos in positions:
@@ -824,15 +976,86 @@ def _holding_stop_breaches(positions: list[dict], decision: dict) -> list[dict]:
             price = float(pos.get("current_price", 0) or 0)
         except (TypeError, ValueError):
             continue
-        if not price or not stop_price or price > stop_price:
+        if not price or not stop_price or price > stop_price or _holding_quote_alarm(pos, target_date):
             continue
+        freshness = _quote_freshness_for_service_date(pos, target_date)
         breaches.append({
             "label": _target_label(pos),
             "shares": int(pos.get("shares", pos.get("position", 0)) or 0),
             "price": price,
             "stop_loss": stop_price,
+            "price_label": "有效收盘价" if freshness == "fresh_close" else "现价",
         })
     return breaches
+
+
+def _holding_quote_alarms(
+    positions: list[dict],
+    decision: dict,
+    target_date: str | None = None,
+) -> list[dict]:
+    watch_items = _position_watch_items(decision)
+    alarms: list[dict] = []
+    for pos in positions:
+        watch = _watch_for_position(pos, watch_items)
+        stop_loss = watch.get("stop_loss_price") or watch.get("stop_loss")
+        try:
+            stop_price = float(stop_loss or 0)
+            price = float(pos.get("current_price", 0) or 0)
+        except (TypeError, ValueError):
+            stop_price = 0
+            price = 0
+        alarm = _holding_quote_alarm(pos, target_date)
+        has_explicit_quote_state = any(
+            key in pos
+            for key in (
+                "quote_status", "quote_freshness", "freshness", "quote_source",
+                "quote_timestamp", "quote_trading_date", "trading_date",
+            )
+        )
+        if alarm and stop_price and (has_explicit_quote_state or (price and price <= stop_price)):
+            alarms.append({
+                "label": _target_label(pos),
+                "alarm": alarm,
+                "stop_loss": stop_price,
+            })
+    return alarms
+
+
+def _apply_position_quote(position: dict, quote: dict, *, service_date: str) -> bool:
+    """Apply only actionable quotes to account valuation; retain invalid quotes for audit."""
+    has_price = bool(quote and quote.get("price"))
+    status = str(
+        quote.get("quote_status")
+        or quote.get("status")
+        or ("valid" if has_price else "missing")
+    ).strip().lower()
+    position["quote_source"] = quote.get("source")
+    position["quote_timestamp"] = quote.get("quote_timestamp")
+    position["quote_trading_date"] = quote.get("trading_date")
+    position["quote_captured_at"] = quote.get("captured_at")
+    position["quote_freshness"] = quote.get("freshness", "unknown")
+    position["quote_status"] = status
+    if has_price:
+        position["last_quote_price"] = quote.get("price")
+        position["last_quote_timestamp"] = quote.get("quote_timestamp")
+
+    effective_freshness = _quote_freshness_for_service_date(position, service_date)
+    position["quote_freshness"] = effective_freshness
+    valid_status = status in {"valid", "ok", "success"}
+    actionable = has_price and valid_status and effective_freshness in {"fresh", "fresh_close"}
+    if not actionable:
+        return False
+
+    price = float(quote["price"])
+    shares = int(position.get("shares", position.get("position", 0)) or 0)
+    total_cost = float(position.get("total_cost", 0) or 0)
+    position["current_price"] = price
+    position["change_pct"] = quote.get("change_pct", 0)
+    position["current_value"] = shares * price
+    position["pnl"] = position["current_value"] - total_cost
+    position["pnl_pct"] = (position["pnl"] / total_cost) * 100 if total_cost else 0
+    return True
 
 
 def _price_from_item(item: dict):
@@ -896,6 +1119,8 @@ def _project_status_section(
     profile: dict,
     budget_blocked_count: int,
     stop_breach_alerts: list[dict] | None = None,
+    quote_data_alarms: list[dict] | None = None,
+    visible_decision_gate: dict | None = None,
 ) -> list[str]:
     lines = [
         "## 一、系统和项目工作状态",
@@ -909,20 +1134,43 @@ def _project_status_section(
     ]
     if stop_breach_alerts:
         breach_text = "；".join(
-            f"{item['label']} 已跌破止损 {_money(item['stop_loss'])}（现价 {_money(item['price'])}，{item['shares']}股）"
+            f"{item['label']} 已跌破止损 {_money(item['stop_loss'])}"
+            f"（{item['price_label']} {_money(item['price'])}，{item['shares']}股）"
             for item in stop_breach_alerts[:3]
         )
         lines.append(
             f"- 开盘前硬风控：{breach_text}；新开仓暂停，优先处理风险仓；"
-            "次日首个15分钟仍未收回止损线则执行退出，确认前禁止补仓/抢反弹。"
+            "立即执行减仓/退出，禁止补仓/抢反弹。"
         )
+    if visible_decision_gate:
+        gate_state = "允许入场" if visible_decision_gate.get("entry_allowed") else "阻断"
+        gate_reasons = format_visible_decision_reasons(visible_decision_gate) or "无硬否决"
+        lines.append(
+            f"- 统一入场闸门：{gate_state}；原因：{gate_reasons}；"
+            "闸门只限制买入/加仓，卖出、止损和入场取消继续执行。"
+        )
+    if quote_data_alarms:
+        alarm_text = "；".join(
+            f"{item['label']} {item['alarm']}，必须人工核验止损 {_money(item['stop_loss'])}"
+            for item in quote_data_alarms[:3]
+        )
+        lines.append(f"- 行情数据报警：{alarm_text}；核验前禁止补仓/抢反弹。")
     if sentinel_package:
         status = (sentinel_package.get("source_status") or {}).get("status", "unknown")
         themes = sentinel_package.get("top_themes") or []
         theme_text = "、".join(
             f"{item.get('name')}({item.get('count')})" for item in themes[:3] if isinstance(item, dict)
         ) or "无明确主题"
+        age_days = _sentinel_package_age_days(sentinel_package, report_date)
         dives = sentinel_package.get("serenity_deep_dives") or []
+        if age_days is not None and age_days > 2:
+            lines.append(
+                f"- Sentinel：研究包日期 {sentinel_package.get('date')}，已过期 {age_days} 天；"
+                "只保留历史复盘，不作为当前候选证据。"
+            )
+            lines.append("- Serenity：旧深挖不参与当前候选判断；等待20:00研究任务刷新。")
+            lines.append("")
+            return lines
         dive_names = []
         for dive in dives[:3]:
             path = str(dive.get("learning_report_path") or "")
@@ -943,6 +1191,7 @@ def _holding_strategy_section(
     positions: list[dict],
     total_assets: float,
     decision: dict,
+    target_date: str | None = None,
 ) -> list[str]:
     lines = [
         "## 二、明日持仓策略",
@@ -978,12 +1227,23 @@ def _holding_strategy_section(
             target_price = calculate_target_price(risk_reference_price)
         action = "持有观察"
         trigger = f"跌破 {_money(stop_loss)} 卖；接近 {_money(target_price)} 止盈；不加仓。"
+        quote_alarm = _holding_quote_alarm(pos, target_date)
+        quote_freshness = _quote_freshness_for_service_date(pos, target_date)
+        has_explicit_quote_state = any(
+            key in pos
+            for key in ("quote_status", "quote_freshness", "freshness", "quote_source", "quote_timestamp")
+        )
+        possible_stop_breach = False
         try:
-            if price and stop_loss and price <= float(stop_loss):
-                action = "次日确认止损"
+            possible_stop_breach = price and stop_loss and price <= float(stop_loss)
+            if quote_alarm and (has_explicit_quote_state or possible_stop_breach):
+                action = "人工核验止损"
+                trigger = f"{quote_alarm}，必须人工核验止损；禁止补仓/抢反弹。"
+            elif possible_stop_breach:
+                action = "立即退出止损"
                 trigger = (
-                    f"收盘已跌破 {_money(stop_loss)}；次日首个15分钟仍未收回 {_money(stop_loss)}，"
-                    f"卖出{shares}股；确认前不加仓。"
+                    f"新鲜行情已跌破 {_money(stop_loss)}，立即卖出{shares}股/退出；"
+                    "禁止补仓/抢反弹。"
                 )
             elif price and target_price and price >= float(target_price):
                 action = "止盈优先"
@@ -992,8 +1252,11 @@ def _holding_strategy_section(
             pass
         if ratio >= 40:
             trigger += " 仓位偏高，不加仓。"
+        price_display = "待核验" if quote_alarm and (has_explicit_quote_state or possible_stop_breach) else _money(price)
+        if quote_freshness == "fresh_close" and price_display != "待核验":
+            price_display = f"有效收盘价 {_money(price)}"
         lines.append(
-            f"| {_cell(_target_label(pos), 32)} | {_money(price)} / {_money(cost)} | {_money(stop_loss)} | "
+            f"| {_cell(_target_label(pos), 32)} | {price_display} / {_money(cost)} | {_money(stop_loss)} | "
             f"{_money(target_price)} | {action} | {_cell(trigger, 96)} |"
         )
     lines.append("")
@@ -1012,7 +1275,15 @@ def _short_pool_rows(decision: dict, *, excluded_codes: set[str] | None = None) 
             continue
         rows.append(item)
         seen.add(code)
-    for item in _affordable_outside_targets(decision):
+    outside_rows = _affordable_outside_targets(decision, include_research=True)
+    outside_rows.extend(
+        item
+        for item in _outside_pool_scan(decision)
+        if item.get("entry_allowed") is False
+        and str(item.get("action") or item.get("status") or "").lower() == "watching"
+        and item not in outside_rows
+    )
+    for item in outside_rows:
         code = _target_code(item)
         if not code or code in excluded or code in seen:
             continue
@@ -1037,10 +1308,18 @@ def _short_pool_section(decision: dict, *, excluded_codes: set[str] | None = Non
         reason = _humanize_reason(item.get("decision_reason") or item.get("watch_reason") or item.get("reason"))
         focus = "重点关注" if idx < 3 else "一般关注"
         action = str(item.get("action") or item.get("status") or "")
-        state = "可执行" if action in {"buy", "add", "increase"} else "等待触发（未触发不买）"
+        research_only = item.get("research_only") is True
+        if research_only:
+            state = "研究候选（未晋级，不买）"
+            trigger_price = stop_loss = target_price = "待完整评分"
+        else:
+            state = "可执行" if action in {"buy", "add", "increase"} else "等待触发（未触发不买）"
+            trigger_price = _money(_trigger_from_item(item))
+            stop_loss = _money(_stop_from_item(item))
+            target_price = _money(_target_from_item(item))
         lines.append(
-            f"| {_cell(_target_label(item), 28)} | {state} | {_money(_price_from_item(item))} | {_money(_trigger_from_item(item))} | "
-            f"{_money(_stop_from_item(item))} | {_money(_target_from_item(item))} | {_cell(reason or '等待量价资金触发', 60)} | {focus} |"
+            f"| {_cell(_target_label(item), 28)} | {state} | {_money(_price_from_item(item))} | {trigger_price} | "
+            f"{stop_loss} | {target_price} | {_cell(reason or '等待量价资金触发', 60)} | {focus} |"
         )
     lines.append("")
     return lines
@@ -1093,7 +1372,10 @@ def _new_entry_action_lines(decision: dict) -> list[str]:
         outside_scan = _outside_pool_scan(decision)
         actionable_scan = [
             item for item in outside_scan
-            if item.get("affordable") is not False and (item.get("suggested_amount") or item.get("lot_value"))
+            if item.get("affordable") is not False
+            and (item.get("suggested_amount") or item.get("lot_value"))
+            and not item.get("research_only")
+            and item.get("entry_allowed") is not False
         ]
         if actionable_scan:
             top = actionable_scan[0]
@@ -1149,13 +1431,25 @@ def _new_entry_action_lines(decision: dict) -> list[str]:
     ]
 
 
-def _research_archive_lines(sentinel_package: dict | None, roles: dict, decision: dict) -> list[str]:
+def _research_archive_lines(
+    sentinel_package: dict | None,
+    roles: dict,
+    decision: dict,
+    report_date: str | None = None,
+) -> list[str]:
     lines = [
         "- 完整辩论记录：保留在本地辩论/报告归档，主报告只展示可执行结论。",
         "- Sentinel 归一数据包：保留高频新闻、主题热度、风险事件和证据编号。",
         "- Serenity 深挖：保留产业链瓶颈、候选锚点和验证问题；进入策略前必须再过账户与行情评分。",
     ]
     if sentinel_package:
+        age_days = _sentinel_package_age_days(sentinel_package, report_date)
+        if age_days is not None and age_days > 2:
+            lines.append(
+                f"- Serenity 深挖归档：最新研究包已过期 {age_days} 天；"
+                "旧文件只作历史复盘，不参与当前候选判断。"
+            )
+            return lines
         lines.append(
             f"- Sentinel 数据状态：{(sentinel_package.get('source_status') or {}).get('status', 'unknown')}；"
             f"新闻 {sentinel_package.get('event_count', 0)} 条，关键新闻 {sentinel_package.get('key_event_count', 0)} 条。"
@@ -1377,19 +1671,32 @@ def build_next_day_strategy_sections(
     roles: dict,
     sentinel_package: dict | None,
     strategy_profile: dict | None = None,
+    portfolio_truth: dict | None = None,
+    visible_decision_gate: dict | None = None,
 ) -> list[str]:
     """Build the concise Feishu-first next-day strategy sections."""
     profile = strategy_profile or get_strategy_profile()
     total_assets = total_assets or available_cash
     buy_budget, _ = _buy_budget_for_profile(available_cash, total_assets, profile)
     hidden_codes = _hidden_budget_codes(decision, buy_budget)
-    visible_decision = dict(decision)
-    visible_decision["target_scores"] = _visible_target_scores(decision, hidden_codes)
-    visible_decision["outside_pool_scan"] = [
+    budget_visible_decision = dict(decision)
+    budget_visible_decision["target_scores"] = _visible_target_scores(decision, hidden_codes)
+    budget_visible_decision["outside_pool_scan"] = [
         item for item in _outside_pool_scan(decision)
         if _target_code(item) not in hidden_codes
     ]
-    stop_breach_alerts = _holding_stop_breaches(positions, visible_decision)
+    stop_breach_alerts = _holding_stop_breaches(positions, budget_visible_decision, target_date)
+    quote_data_alarms = _holding_quote_alarms(positions, budget_visible_decision, target_date)
+    gate_decision = dict(decision)
+    gate_decision.setdefault("final_view", final_view)
+    gate = visible_decision_gate or build_visible_decision_gate(
+        report_date=report_date,
+        target_date=target_date,
+        decision=gate_decision,
+        portfolio_truth=portfolio_truth,
+        stop_breaches=stop_breach_alerts,
+    )
+    visible_decision = apply_visible_decision_gate(budget_visible_decision, gate)
     lines: list[str] = []
     lines.extend(_project_status_section(
         report_date=report_date,
@@ -1406,11 +1713,14 @@ def build_next_day_strategy_sections(
         profile=profile,
         budget_blocked_count=len(hidden_codes),
         stop_breach_alerts=stop_breach_alerts,
+        quote_data_alarms=quote_data_alarms,
+        visible_decision_gate=gate,
     ))
     lines.extend(_holding_strategy_section(
         positions=positions,
         total_assets=total_assets,
         decision=visible_decision,
+        target_date=target_date,
     ))
     holding_codes = {_target_code(item) for item in positions if _target_code(item)}
     lines.extend(_short_pool_section(visible_decision, excluded_codes=holding_codes))
@@ -1462,7 +1772,7 @@ def build_next_day_strategy_sections(
         for item in target_scores:
             lines.append(
                 f"| {_cell(_target_label(item), 40)} | {item.get('score', 0)} | "
-                f"{_action_label(item.get('action') or item.get('status'))} | "
+                f"{_action_label(_effective_target_action(item))} | "
                 f"{_cell(_missing_data_text(item.get('missing_data') or []), 80)} | "
                 f"{_cell(_block_reason_label(item.get('block_reason')), 80)} |"
             )
@@ -1489,7 +1799,7 @@ def build_next_day_strategy_sections(
         "### 研究归档",
         "",
     ])
-    lines.extend(_research_archive_lines(sentinel_package, roles, decision))
+    lines.extend(_research_archive_lines(sentinel_package, roles, decision, report_date))
     lines.append("")
     return lines
 
@@ -1549,6 +1859,13 @@ def save_report_to_obsidian(
 
 async def push_daily_report_to_feishu(title: str, md_content: str) -> dict:
     """Push the daily report summary to Feishu and return a delivery status dict."""
+    if os.getenv("CONGXI_DISABLE_FEISHU_PUSH", "0") == "1":
+        return {
+            "feishu_api": False,
+            "feishu_webhook": False,
+            "disabled": True,
+            "error": "Feishu push disabled for local reconciliation run",
+        }
     try:
         from app.config import settings
         from app.services.feishu_pusher import send_feishu_card
@@ -1574,13 +1891,14 @@ async def build_target_scores_for_report(
     available_cash: float,
     total_assets: float,
     limit: int | None = None,
+    market_source=None,
 ) -> list[dict]:
     """Score current target-pool items with normalized data snapshots."""
     from app.ai.serenity_financial_evidence import fetch_financial_evidence
     from app.data_sources.akshare_market import AKShareMarketClient
     from app.data_sources.akshare_news import AKShareNewsClient
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
-    from app.services.quant_lifecycle import TargetPoolStore
+    from app.services.quant_lifecycle import TargetPoolStore, target_production_eligibility
     from app.services.target_scoring import score_target
     from app.services.target_snapshot import build_target_snapshot
 
@@ -1612,15 +1930,24 @@ async def build_target_scores_for_report(
     payload = store.load()
     items = [
         item for item in payload.get("items", {}).values()
-        if isinstance(item, dict) and item.get("status") not in {"removed", "expired"}
+        if isinstance(item, dict)
+        and item.get("status") not in {"removed", "expired", "cooldown_after_loss"}
     ]
+    status_priority = {
+        "executable": 0,
+        "watching": 1,
+        "blocked_chasing": 2,
+        "research_reference": 3,
+    }
+    items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
+    items.sort(key=lambda item: status_priority.get(str(item.get("status") or "watching"), 2))
     max_items = limit or int(os.getenv("CONGXI_TARGET_SCORE_LIMIT", "12"))
     items = items[:max_items]
     if not items:
         return []
 
     quote_source = FastRealtimeMarketDataSource()
-    market_source = CachedMarketSource()
+    resolved_market_source = market_source or CachedMarketSource()
     news_source = AKShareNewsClient()
     scores: list[dict] = []
     for item in items:
@@ -1631,12 +1958,22 @@ async def build_target_scores_for_report(
             code,
             name=item.get("name", code),
             quote_source=quote_source,
-            market_source=market_source,
+            market_source=resolved_market_source,
             news_source=news_source,
             financial_fetcher=cached_financial_fetcher,
             sentinel=item.get("sentinel") or {},
             serenity=item.get("serenity") or {},
         )
+        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
+        snapshot["trigger_price"] = next(
+            (
+                value
+                for candidate in (item.get("trigger_price"), evidence.get("trigger_price"))
+                if (value := _positive_float(candidate)) is not None
+            ),
+            None,
+        )
+        snapshot["production_eligibility"] = target_production_eligibility(item)
         score = score_target(snapshot, available_cash=available_cash, total_assets=total_assets)
         score["source_status"] = {
             key: (snapshot.get(key) or {}).get("status")
@@ -1655,10 +1992,20 @@ async def build_target_scores_for_report(
             name=score.get("name") or item.get("name", code),
             status=next_status,
             source="target_scoring",
-            evidence=item.get("evidence") or {},
+            evidence=evidence,
             evidence_ids=item.get("evidence_ids") or [],
             sentinel=item.get("sentinel") or {},
             serenity=item.get("serenity") or {},
+            scoring_decision={
+                "action": action,
+                "score": score.get("score", 0),
+                "block_reason": score.get("block_reason", ""),
+                "decision_reason": score.get("decision_reason", ""),
+                "missing_data": score.get("missing_data") or [],
+                "playbook": score.get("playbook", "watch"),
+                "source_status": score.get("source_status") or {},
+                "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            },
             current_price=quote.get("price"),
             available_cash=available_cash,
             total_assets=total_assets,
@@ -1667,17 +2014,85 @@ async def build_target_scores_for_report(
     return sorted(scores, key=lambda row: float(row.get("score", 0) or 0), reverse=True)
 
 
+def collect_outside_pool_exclusions(
+    target_scores: list[dict] | None,
+    *,
+    store=None,
+) -> set[str]:
+    """Protect every lifecycle item, including removed names, from outside-pool re-entry."""
+    from app.services.quant_lifecycle import TargetPoolStore
+
+    target_pool = store or TargetPoolStore()
+    pool_items = target_pool.load().get("items", {})
+    dynamic_codes = {
+        str(code).strip()
+        for code, item in pool_items.items()
+        if isinstance(item, dict)
+        and str(
+            ((item.get("provenance") or {}).get("original_source") if isinstance(item.get("provenance"), dict) else "")
+            or item.get("source")
+            or ""
+        ) == "dynamic_fund_flow_discovery"
+    }
+    codes = {
+        str(code).strip()
+        for code in pool_items
+        if str(code).strip() and str(code).strip() not in dynamic_codes
+    }
+    codes.update(
+        str(item.get("code") or "").strip()
+        for item in target_scores or []
+        if isinstance(item, dict)
+        and str(item.get("code") or "").strip()
+        and str(item.get("code") or "").strip() not in dynamic_codes
+    )
+    return codes
+
+
+async def discover_small_account_candidates_for_report(
+    *,
+    available_cash: float,
+    total_assets: float,
+    existing_codes: set[str] | None = None,
+    market_source=None,
+) -> list[dict]:
+    """Prefer a rotating live-market universe, with static seeds as a degraded fallback."""
+    from app.data_sources.akshare_market import AKShareMarketClient
+    from app.services.small_account_discovery import (
+        build_dynamic_small_account_candidates,
+        build_small_account_seed_candidates,
+    )
+
+    source = market_source or AKShareMarketClient()
+    market_rows = await source.fetch_fund_flow_individual()
+    dynamic_rows = build_dynamic_small_account_candidates(
+        market_rows=market_rows,
+        available_cash=available_cash,
+        total_assets=total_assets,
+        existing_codes=existing_codes,
+        max_candidates=12,
+    )
+    if dynamic_rows:
+        return dynamic_rows
+    return build_small_account_seed_candidates(
+        available_cash=available_cash,
+        total_assets=total_assets,
+        existing_codes=existing_codes,
+    )
+
+
 async def build_outside_pool_scan_for_report(
     *,
     available_cash: float,
     total_assets: float,
     existing_codes: set[str] | None = None,
+    seed_candidates: list[dict] | None = None,
 ) -> list[dict]:
     """Build a small-account outside-pool scan with live quote context."""
     from app.data_sources.tencent_client import TencentDataSource
     from app.services.small_account_discovery import build_small_account_seed_candidates
 
-    seeds = build_small_account_seed_candidates(
+    seeds = seed_candidates if seed_candidates is not None else build_small_account_seed_candidates(
         available_cash=available_cash,
         total_assets=total_assets,
         existing_codes=existing_codes or set(),
@@ -1686,6 +2101,12 @@ async def build_outside_pool_scan_for_report(
         return []
     profile = get_strategy_profile()
     single_pct = float(profile.get("single_position_limit_pct", 50) or 50)
+    reserve_pct = float(profile.get("cash_reserve_pct", 10) or 10)
+    reserve_cash = total_assets * reserve_pct / 100 if total_assets else 0
+    executable_budget = round(
+        max(0.0, min(available_cash - reserve_cash, total_assets * single_pct / 100 if total_assets else available_cash)),
+        2,
+    )
     quote_source = TencentDataSource()
     quotes = await quote_source.fetch_batch([item["code"] for item in seeds])
     rows: list[dict] = []
@@ -1715,6 +2136,8 @@ async def build_outside_pool_scan_for_report(
             reason = "池外小账户补扫；接近追高区，等回踩确认，不追涨。"
         elif volume_clue:
             reason = "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。"
+        if seed.get("research_only"):
+            reason = str(seed.get("watch_reason") or reason)
         trigger_price = _round_price(price if price > 0 and affordable else seed.get("max_entry_price") or 0)
         stop_loss = calculate_stop_loss_price(trigger_price, profile) if trigger_price > 0 and affordable else None
         target_price = calculate_target_price(trigger_price, profile) if trigger_price > 0 and affordable else None
@@ -1734,7 +2157,7 @@ async def build_outside_pool_scan_for_report(
             "stop_loss": stop_loss,
             "target_price": target_price,
             "suggested_amount": lot_value if affordable else 0,
-            "executable_budget": round(min(available_cash, total_assets * single_pct / 100 if total_assets else available_cash), 2),
+            "executable_budget": executable_budget,
             "watch_reason": reason,
         })
     return sorted(
@@ -1744,6 +2167,27 @@ async def build_outside_pool_scan_for_report(
             not item.get("affordable"),
             -float(item.get("amount_wan") or 0),
         ),
+    )
+
+
+async def build_refreshed_outside_pool_scan_for_report(
+    *,
+    available_cash: float,
+    total_assets: float,
+    existing_codes: set[str] | None = None,
+    market_source=None,
+) -> list[dict]:
+    seeds = await discover_small_account_candidates_for_report(
+        available_cash=available_cash,
+        total_assets=total_assets,
+        existing_codes=existing_codes,
+        market_source=market_source,
+    )
+    return await build_outside_pool_scan_for_report(
+        available_cash=available_cash,
+        total_assets=total_assets,
+        existing_codes=existing_codes,
+        seed_candidates=seeds,
     )
 
 
@@ -1768,8 +2212,8 @@ def persist_outside_pool_scan_to_target_pool(
         ok = target_pool.upsert_target(
             code=code,
             name=row.get("name") or code,
-            status="watching",
-            source="small_account_discovery",
+            status="research_reference" if row.get("research_only") else "watching",
+            source=row.get("source", "small_account_discovery"),
             evidence={
                 "reason": row.get("watch_reason", ""),
                 "trigger_price": row.get("trigger_price"),
@@ -1777,6 +2221,8 @@ def persist_outside_pool_scan_to_target_pool(
                 "target_price": row.get("target_price"),
                 "theme": row.get("theme", ""),
                 "source": row.get("source", "small_account_discovery"),
+                "stage": "hypothesis" if row.get("research_only") else "watching",
+                "market_evidence": row.get("market_evidence") or {},
             },
             current_price=row.get("current_price"),
             available_cash=available_cash,
@@ -1785,6 +2231,35 @@ def persist_outside_pool_scan_to_target_pool(
         if ok:
             upserted += 1
     return upserted
+
+
+def rotate_dynamic_discovery_targets(
+    selected_codes: set[str],
+    *,
+    store=None,
+) -> int:
+    """Expire prior dynamic hypotheses that disappeared from the latest market scan."""
+    from app.services.quant_lifecycle import TargetPoolStore
+
+    target_pool = store or TargetPoolStore()
+    selected = {str(code).strip() for code in selected_codes if str(code).strip()}
+
+    def expire_missing(payload: dict) -> int:
+        expired = 0
+        for code, item in payload.get("items", {}).items():
+            if not isinstance(item, dict) or code in selected:
+                continue
+            provenance = item.get("provenance") if isinstance(item.get("provenance"), dict) else {}
+            origin = str(provenance.get("original_source") or item.get("source") or "")
+            if origin != "dynamic_fund_flow_discovery" or item.get("status") in {"removed", "expired"}:
+                continue
+            item["status"] = "expired"
+            item["watch_reason"] = "missing_from_latest_dynamic_scan"
+            item["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            expired += 1
+        return expired
+
+    return int(target_pool.update(expire_missing) or 0)
 
 
 async def finalize_daily_report(
@@ -1813,10 +2288,10 @@ async def finalize_daily_report(
     print(f"✅ 报告已保存: {filepath}", flush=True)
     print(f"   📄 共 {len(lines)} 行 / {os.path.getsize(filepath)} 字节", flush=True)
 
-    portfolio["updated_at"] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    with open(portfolio_path, 'w', encoding='utf-8') as f:
-        json.dump(portfolio, f, ensure_ascii=False, indent=2)
-    print("✅ 持仓数据已更新", flush=True)
+    from app.services.portfolio_store import merge_report_market_snapshot
+
+    merge_report_market_snapshot(portfolio, portfolio_path)
+    print("✅ 持仓行情已合并到最新账户真值", flush=True)
 
     print("📤 推送飞书...", flush=True)
     push_status = await push_daily_report_to_feishu(
@@ -1855,6 +2330,12 @@ async def main():
     report_date = report_date_override or now.date()
     today = report_date.isoformat()
     time_str = now.strftime('%H:%M')
+    try:
+        from app.services.schedule_policy import main_report_target_date
+
+        target_date = main_report_target_date(report_date, target_date_override).isoformat()
+    except Exception:
+        target_date = today
 
     print(f"📋 每日综合报告 — {today}", flush=True)
 
@@ -1872,16 +2353,13 @@ async def main():
     with open(portfolio_path, 'r', encoding='utf-8') as f:
         portfolio = json.load(f)
     portfolio = recalculate_portfolio(portfolio)
-    try:
-        from app.database import SessionLocal
-        db = SessionLocal()
-        try:
-            sync_result = sync_db_from_user_portfolio(db, portfolio_path)
-            portfolio.setdefault("available_cash", sync_result.get("available_cash", 0))
-        finally:
-            db.close()
-    except Exception as e:
-        print(f"   ⚠️ 持仓同步数据库失败: {e}", flush=True)
+    sync_truth = sync_portfolio_database_truth(
+        portfolio,
+        portfolio_path,
+        sync_fn=sync_db_from_user_portfolio,
+    )
+    if not sync_truth["ok"]:
+        print("   ⚠️ 持仓同步数据库失败，已禁止新开仓", flush=True)
 
     positions = portfolio.get("positions", [])
     closed = portfolio.get("closed_positions", [])
@@ -1899,6 +2377,8 @@ async def main():
         "news": [],
         "available_cash": available_cash,
         "strategy_profile": strategy_profile,
+        "portfolio_sync_failed": portfolio.get("portfolio_sync_failed") is True,
+        "portfolio_sync_status": portfolio.get("portfolio_sync_status", "unknown"),
     }
 
     try:
@@ -1926,12 +2406,11 @@ async def main():
             quotes = await tc.fetch_batch(formatted)
             for p in positions:
                 q = quotes.get(formatted[codes.index(p["code"])], {})
-                p["current_price"] = q.get("price", p.get("current_price", 0))
-                p["change_pct"] = q.get("change_pct", 0)
-                p["current_value"] = p["shares"] * p["current_price"]
-                p["pnl"] = p["current_value"] - p["total_cost"]
-                p["pnl_pct"] = (p["pnl"] / p["total_cost"]) * 100 if p["total_cost"] else 0
+                _apply_position_quote(p, q, service_date=target_date)
         except Exception as e:
+            for p in positions:
+                p["quote_status"] = "fetch_failed"
+                p["quote_freshness"] = "unknown"
             print(f"   ⚠️ 行情获取失败: {e}", flush=True)
 
         market_data["holdings"] = positions
@@ -1978,10 +2457,14 @@ async def main():
         roles = {}
 
     print("🎯 生成标的池评分...", flush=True)
+    from app.data_sources.akshare_market import AKShareMarketClient
+
+    shared_market_source = AKShareMarketClient()
     try:
         target_scores = await build_target_scores_for_report(
             available_cash=available_cash,
             total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+            market_source=shared_market_source,
         )
         if target_scores:
             decision["target_scores"] = target_scores
@@ -1993,15 +2476,12 @@ async def main():
 
     print("🔎 生成池外小账户补扫...", flush=True)
     try:
-        existing_codes = {
-            str(item.get("code") or "").strip()
-            for item in decision.get("target_scores", [])
-            if isinstance(item, dict)
-        }
-        outside_scan = await build_outside_pool_scan_for_report(
+        existing_codes = collect_outside_pool_exclusions(decision.get("target_scores", []))
+        outside_scan = await build_refreshed_outside_pool_scan_for_report(
             available_cash=available_cash,
             total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
             existing_codes=existing_codes,
+            market_source=shared_market_source,
         )
         decision["outside_pool_scan"] = outside_scan
         promoted = persist_outside_pool_scan_to_target_pool(
@@ -2009,7 +2489,16 @@ async def main():
             available_cash=available_cash,
             total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
         )
-        print(f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警", flush=True)
+        dynamic_codes = {
+            str(row.get("code") or "").strip()
+            for row in outside_scan
+            if row.get("source") == "dynamic_fund_flow_discovery"
+        }
+        expired = rotate_dynamic_discovery_targets(dynamic_codes) if dynamic_codes else 0
+        print(
+            f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警, {expired} 个旧动态候选过期",
+            flush=True,
+        )
     except Exception as e:
         print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
 
@@ -2020,14 +2509,19 @@ async def main():
     except Exception as e:
         print(f"   ⚠️ 持仓止损/止盈计划读取失败，报告降级继续: {e}", flush=True)
 
+    stop_breaches = _holding_stop_breaches(positions, decision, target_date)
+    gate_decision = dict(decision)
+    gate_decision.setdefault("final_view", final_view)
+    visible_gate = build_visible_decision_gate(
+        report_date=today,
+        target_date=target_date,
+        decision=gate_decision,
+        portfolio_truth=portfolio,
+        stop_breaches=stop_breaches,
+    )
+
     # ===== 4. 构建综合Markdown报告 =====
     lines = []
-    try:
-        from app.services.schedule_policy import main_report_target_date
-
-        target_date = main_report_target_date(report_date, target_date_override).isoformat()
-    except Exception:
-        target_date = today
     # 标题 + 元信息
     lines.append("# 📊 恭喜发财 — 次日投资策略主报告")
     lines.append("")
@@ -2051,7 +2545,11 @@ async def main():
         roles=roles,
         sentinel_package=sentinel_package,
         strategy_profile=strategy_profile,
+        portfolio_truth=portfolio,
+        visible_decision_gate=visible_gate,
     ))
+    gate_path = write_visible_decision_gate(visible_gate)
+    print(f"✅ 统一入场闸门已保存: {gate_path}", flush=True)
 
     if os.getenv("CONGXI_REPORT_LEGACY_SECTIONS", "0") != "1":
         return await finalize_daily_report(

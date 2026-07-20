@@ -124,9 +124,8 @@ def build_serenity_deep_dives(
     seen: set[str] = set()
     for item in top_themes:
         theme = str(item.get("name") or "").strip()
-        if not theme or theme in seen:
+        if not theme:
             continue
-        seen.add(theme)
         try:
             pipeline = pipeline_runner(
                 theme,
@@ -135,15 +134,20 @@ def build_serenity_deep_dives(
                 total_assets=total_assets,
                 context="Sentinel 一周实验：热点主题进入 Serenity 产业链瓶颈深挖，作为研究输入。",
             )
+            normalized_theme = str(pipeline.get("normalized_theme") or theme).strip()
+            candidates = pipeline.get("top_candidates") or []
+            if not candidates or normalized_theme in seen:
+                continue
+            seen.add(normalized_theme)
             dives.append({
                 "module": "serenity_bottleneck_deep_dive",
                 "theme": theme,
                 "theme_event_count": item.get("count", 0),
-                "normalized_theme": pipeline.get("normalized_theme", theme),
+                "normalized_theme": normalized_theme,
                 "chokepoints": (pipeline.get("chokepoints") or [])[:5],
                 "top_candidates": [
                     _compact_candidate(candidate)
-                    for candidate in (pipeline.get("top_candidates") or [])[:5]
+                    for candidate in candidates[:5]
                 ],
                 "verification_tasks": (pipeline.get("verification_tasks") or [])[:8],
                 "learning_report_markdown": build_serenity_research_report(pipeline),
@@ -157,14 +161,8 @@ def build_serenity_deep_dives(
                     "note": "保留 Serenity 深度研究能力，但不单独产出选股报告或交易指令。",
                 },
             })
-        except Exception as exc:
-            dives.append({
-                "module": "serenity_bottleneck_deep_dive",
-                "theme": theme,
-                "theme_event_count": item.get("count", 0),
-                "boundary": "research_only",
-                "error": str(exc),
-            })
+        except Exception:
+            continue
         if len(dives) >= limit:
             break
     return dives

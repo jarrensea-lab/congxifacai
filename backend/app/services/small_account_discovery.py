@@ -29,6 +29,98 @@ def _to_float(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _money_to_yuan(value: Any) -> float:
+    text = str(value or "").strip().replace(",", "")
+    if not text:
+        return 0.0
+    multiplier = 1.0
+    if text.endswith("亿"):
+        multiplier = 100_000_000.0
+        text = text[:-1]
+    elif text.endswith("万"):
+        multiplier = 10_000.0
+        text = text[:-1]
+    return _to_float(text) * multiplier
+
+
+def build_dynamic_small_account_candidates(
+    *,
+    market_rows: list[dict[str, Any]] | None,
+    available_cash: float,
+    total_assets: float,
+    existing_codes: set[str] | None = None,
+    max_candidates: int = 8,
+) -> list[dict[str, Any]]:
+    """Build rotating research candidates from the current all-market fund-flow table."""
+    existing = {str(code).strip() for code in existing_codes or set()}
+    profile = get_strategy_profile()
+    assets = _to_float(total_assets, _to_float(available_cash))
+    cash = _to_float(available_cash)
+    single_limit_pct = _to_float(profile.get("single_position_limit_pct"), 50)
+    reserve_cash = assets * (_to_float(profile.get("cash_reserve_pct"), 10) / 100) if assets else 0
+    single_budget = max(
+        0.0,
+        min(cash - reserve_cash, assets * (single_limit_pct / 100) if assets else cash),
+    )
+    ranked: list[dict[str, Any]] = []
+    for raw in market_rows or []:
+        if not isinstance(raw, dict):
+            continue
+        code = str(raw.get("code") or "").strip().zfill(6)
+        name = str(raw.get("name") or code).strip()
+        if (
+            code in existing
+            or len(code) != 6
+            or not code.startswith(("000", "001", "002", "003", "300", "600", "601", "603", "605"))
+            or "ST" in name.upper()
+            or "退" in name
+        ):
+            continue
+        price = _to_float(raw.get("latest_price"))
+        change_pct = _to_float(raw.get("change_pct"))
+        turnover = _to_float(raw.get("turnover"))
+        net_flow = _money_to_yuan(raw.get("net"))
+        amount = _money_to_yuan(raw.get("amount"))
+        lot_size = lot_size_for_code(code)
+        max_entry_price = math.floor((single_budget / lot_size) * 100) / 100 if lot_size else 0
+        if (
+            price <= 0
+            or price > max_entry_price
+            or change_pct < -3
+            or change_pct > 8
+            or turnover < 0.5
+            or turnover > 25
+            or net_flow <= 0
+            or amount < 100_000_000
+        ):
+            continue
+        ranked.append({
+            "code": code,
+            "name": name,
+            "theme": "动态资金流/量价候选",
+            "source": "dynamic_fund_flow_discovery",
+            "research_only": True,
+            "lot_size": lot_size,
+            "max_entry_price": max_entry_price,
+            "market_evidence": {
+                "latest_price": price,
+                "change_pct": change_pct,
+                "turnover_pct": turnover,
+                "net_flow_yuan": net_flow,
+                "amount_yuan": amount,
+            },
+            "watch_reason": "动态资金流候选；仅进入研究观察，仍需实时行情、K线、财务与风控评分。",
+        })
+    ranked.sort(
+        key=lambda item: (
+            -float((item.get("market_evidence") or {}).get("net_flow_yuan") or 0),
+            -float((item.get("market_evidence") or {}).get("amount_yuan") or 0),
+            item["code"],
+        )
+    )
+    return ranked[:max_candidates]
+
+
 def build_small_account_seed_candidates(
     *,
     available_cash: float,
@@ -42,7 +134,11 @@ def build_small_account_seed_candidates(
     assets = _to_float(total_assets, _to_float(available_cash))
     cash = _to_float(available_cash)
     single_limit_pct = _to_float(profile.get("single_position_limit_pct"), 50)
-    single_budget = min(cash, assets * (single_limit_pct / 100) if assets else cash)
+    reserve_cash = assets * (_to_float(profile.get("cash_reserve_pct"), 10) / 100) if assets else 0
+    single_budget = max(
+        0.0,
+        min(cash - reserve_cash, assets * (single_limit_pct / 100) if assets else cash),
+    )
     rows: list[dict[str, Any]] = []
     for item in DEFAULT_SMALL_ACCOUNT_SEEDS:
         code = item["code"]

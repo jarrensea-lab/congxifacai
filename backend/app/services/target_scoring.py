@@ -172,6 +172,26 @@ def score_target(
 
     def finish(updates: dict[str, Any]) -> dict[str, Any]:
         payload = {**base, **updates}
+        production_eligibility = (
+            snapshot.get("production_eligibility")
+            if isinstance(snapshot.get("production_eligibility"), dict)
+            else {}
+        )
+        payload["production_eligibility"] = production_eligibility
+        if production_eligibility.get("eligible") is False and payload.get("action") in {"buy", "add"}:
+            original_status = str(production_eligibility.get("original_status") or "research_reference")
+            payload.update({
+                "action": "research_only",
+                "block_reason": "research_only_provenance",
+                "position_amount": 0,
+                "position_shares": 0,
+                "risk_amount": 0,
+                "decision_reason": (
+                    f"{name}({code}) 原始状态为 {original_status}，仅用于研究/观察，"
+                    "未经显式、可审计的生产晋级，不得生成买入动作。"
+                ),
+                "next_signal": "完成显式、可审计的生产晋级后，再按账户、剧本和风险门重新评分。",
+            })
         decision_reason = str(payload.get("decision_reason") or "")
         long_reason = str(payload.get("long_horizon_reason") or "")
         if decision_reason and long_reason:

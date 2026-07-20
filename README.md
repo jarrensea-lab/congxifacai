@@ -226,12 +226,12 @@ AI 推荐进入生产候选池采用 fail-closed：裁判质量校验必须明�
 - 支持 `raw/YYYY-MM-DD/*.jsonl` 原始新闻、`index/latest-status.json` 采集状态和 `digest/` 阶段摘要。
 - `scripts/run_sentinel.py` 可生成 `data/sentinel/news_events/`、`research_packages/` 和 Sentinel Markdown 报告。
 - Sentinel 输出仍是研究证据、主题雷达、候选复核和角色绩效旁路，不直接触发真实交易。
-- 一周实验：Sentinel 会从热点主题中选择最多 3 个主题，生成 Serenity 产业链瓶颈深挖。深挖摘要写入 Sentinel 研究包，完整 Markdown 保留在 `恭喜发财报告/历史数据/Serenity深挖/YYYY-MM-DD/`，供学习复盘使用；不单独推送飞书，也不作为买卖指令。
+- 每日研究任务：交易日和周日 20:00，Sentinel 从热点主题中筛选最多 3 个具有候选映射的主题，生成 Serenity 产业链瓶颈深挖；无候选映射的空主题不会占用深挖名额。深挖摘要写入 Sentinel 研究包，完整 Markdown 保留在 `恭喜发财报告/历史数据/Serenity深挖/YYYY-MM-DD/`，供学习复盘使用；不单独推送飞书，也不作为买卖指令。
 
 Sentinel 与 Serenity 的边界：
 
 - Sentinel 是新闻证据包、主题雷达和角色绩效复盘层。
-- Serenity 是四人辩论中的产业链瓶颈研究员，也是 Sentinel 一周实验中的深度研究子模块。
+- Serenity 是四人辩论中的产业链瓶颈研究员，也是 Sentinel 每日研究任务中的深度研究子模块。
 - Serenity 深挖报告可以作为学习档案保留，但最终交易动作仍由四人辩论、裁判、账户约束和风控共同过滤。
 
 ### 次日投资策略主报告

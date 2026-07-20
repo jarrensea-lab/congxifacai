@@ -1,5 +1,9 @@
 """Sentinel research package tests."""
 import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 from app.ai.sentinel_research import (
     build_serenity_deep_dives,
@@ -114,6 +118,107 @@ def test_serenity_deep_dives_are_research_only_inputs():
     assert "AI半导体" in markdown
     assert "高纯材料良率" in markdown
     assert "不生成交易指令" in markdown
+
+
+def test_serenity_deep_dives_skip_empty_themes_and_continue_to_supported_theme():
+    def fake_pipeline(theme, **kwargs):
+        candidates = []
+        if theme == "AI半导体":
+            candidates = [{
+                "name": "测试芯片",
+                "code": "688001",
+                "score": 70,
+                "chokepoint": "先进制程",
+                "verify_next": "核验订单",
+            }]
+        return {
+            "theme": theme,
+            "normalized_theme": theme,
+            "chokepoints": [],
+            "top_candidates": candidates,
+            "verification_tasks": [],
+            "quote_status": {"status": "skipped"},
+            "financial_status": {"status": "skipped"},
+            "account_constraint": "研究输入，不执行交易",
+        }
+
+    dives = build_serenity_deep_dives(
+        [
+            {"name": "金融", "count": 100},
+            {"name": "AI", "count": 90},
+            {"name": "AI半导体", "count": 80},
+        ],
+        report_date="2026-07-15",
+        limit=1,
+        pipeline_runner=fake_pipeline,
+    )
+
+    assert [item["theme"] for item in dives] == ["AI半导体"]
+    assert dives[0]["top_candidates"][0]["code"] == "688001"
+
+
+@pytest.mark.asyncio
+async def test_sentinel_research_job_runs_news_mode(monkeypatch):
+    from app import main
+
+    captured = {}
+
+    async def fake_to_thread(func, *args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(returncode=0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    await main._run_sentinel_research_with_status()
+
+    command = captured["args"][0]
+    assert command[command.index("--mode") + 1] == "news"
+    assert captured["kwargs"]["timeout"] >= 120
+
+
+def test_sentinel_research_job_is_registered_before_main_report():
+    source = Path("backend/app/main.py").read_text(encoding="utf-8")
+
+    research_job = source.index("id='sentinel_research'")
+    main_report_job = source.index("id='main_report'")
+    assert research_job < main_report_job
+
+
+def test_project_status_rejects_stale_serenity_deep_dives():
+    from scripts.daily_report import _project_status_section, get_strategy_profile
+
+    lines = _project_status_section(
+        report_date="2026-07-15",
+        target_date="2026-07-16",
+        risk_level=3,
+        final_view="观望",
+        confidence=7,
+        positions=[],
+        available_cash=2000,
+        total_assets=6000,
+        market_data={},
+        analysis_report={},
+        sentinel_package={
+            "date": "2026-07-05",
+            "event_count": 100,
+            "key_event_count": 20,
+            "top_themes": [{"name": "AI半导体", "count": 10}],
+            "serenity_deep_dives": [{
+                "theme": "AI半导体",
+                "top_candidates": [{"name": "旧候选", "code": "688001"}],
+                "learning_report_path": "/tmp/2026-07-05_Serenity深挖-AI半导体.md",
+            }],
+            "source_status": {"status": "ok"},
+        },
+        profile=get_strategy_profile(),
+        budget_blocked_count=0,
+    )
+    content = "\n".join(lines)
+
+    assert "已过期 10 天" in content
+    assert "旧深挖不参与当前候选判断" in content
+    assert "2026-07-05_Serenity深挖-AI半导体.md" not in content
 
 
 def test_persist_serenity_deep_dive_reports_keeps_learning_markdown(tmp_path):

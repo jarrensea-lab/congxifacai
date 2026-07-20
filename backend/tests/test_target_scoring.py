@@ -16,11 +16,16 @@ def _base_snapshot(code="002123", price=3.2):
         "kline": {
             "status": "ok",
             "bars": [
-                {"close": 2.8, "high": 2.9, "low": 2.7},
-                {"close": 3.0, "high": 3.05, "low": 2.85},
-                {"close": price, "high": price, "low": 3.0},
+                {
+                    "open": price * 0.95,
+                    "close": price * 0.98,
+                    "high": price,
+                    "low": price * 0.9,
+                }
+                for _ in range(20)
             ],
         },
+        "trigger_price": price,
         "fund_flow": {"status": "ok", "net": "净流入"},
         "financial": {"status": "ok", "revenue_yoy_pct": 12.0, "gross_margin_pct": 35.0},
         "news": {"status": "ok", "items": [{"title": "订单增长"}]},
@@ -63,11 +68,38 @@ def test_score_target_returns_buy_for_low_price_volume_breakout():
     assert result["missing_data"] == []
 
 
+def test_score_target_caps_research_only_provenance_even_when_buy_trigger_fires():
+    snapshot = _base_snapshot(code="002123", price=3.2)
+    snapshot["production_eligibility"] = {
+        "eligible": False,
+        "research_only": True,
+        "original_status": "research_reference",
+        "reason": "research_only_provenance",
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    assert result["score"] >= 70
+    assert result["action"] == "research_only"
+    assert result["block_reason"] == "research_only_provenance"
+    assert result["position_amount"] == 0
+    assert result["position_shares"] == 0
+
+
 def test_score_target_blocks_high_position_breakout():
     snapshot = _base_snapshot(code="002123", price=6.82)
     snapshot["quote"].update({"change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000})
     snapshot["kline"]["bars"] = [
-        {"close": 6.0 + idx * 0.04, "high": 6.05 + idx * 0.04, "low": 5.95 + idx * 0.04}
+        {
+            "open": 6.0 + idx * 0.05,
+            "close": 6.0 + idx * 0.05,
+            "high": 6.05 + idx * 0.05,
+            "low": 5.95 + idx * 0.05,
+        }
         for idx in range(20)
     ]
 
