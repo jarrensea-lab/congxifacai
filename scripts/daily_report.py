@@ -1979,6 +1979,42 @@ async def build_target_scores_for_report(
             key: (snapshot.get(key) or {}).get("status")
             for key in ("quote", "kline", "fund_flow", "northbound", "news", "financial", "sentinel", "serenity")
         }
+        kline = snapshot.get("kline") if isinstance(snapshot.get("kline"), dict) else {}
+        bars = kline.get("bars") if isinstance(kline.get("bars"), list) else []
+        completed_bars = [bar for bar in bars if isinstance(bar, dict) and bar.get("close") is not None]
+        two_bar_observation = {
+            "status": "evaluated" if len(completed_bars) >= 2 else "not_evaluated",
+            "completed_bars": len(completed_bars),
+        }
+        if len(completed_bars) >= 2:
+            two_bar_observation.update({
+                "previous_close": completed_bars[-2].get("close"),
+                "latest_close": completed_bars[-1].get("close"),
+                "holds_above_previous_close": (
+                    _positive_float(completed_bars[-1].get("close")) or 0
+                ) >= (
+                    _positive_float(completed_bars[-2].get("close")) or 0
+                ),
+            })
+        market_regime = (
+            snapshot.get("market_regime")
+            if isinstance(snapshot.get("market_regime"), dict)
+            else {
+                "status": "missing",
+                "reason": "market_regime_not_available",
+            }
+        )
+        decision_snapshot = {
+            "captured_at": snapshot.get("generated_at") or datetime.now().isoformat(timespec="seconds"),
+            "quote": snapshot.get("quote") or {},
+            "kline": kline,
+            "fund_flow": snapshot.get("fund_flow") or {},
+            "market_regime": market_regime,
+            "shadow_observations": {
+                "two_bar_confirmation_v1": two_bar_observation,
+                "market_regime_v1": market_regime,
+            },
+        }
         quote = snapshot.get("quote") if isinstance(snapshot.get("quote"), dict) else {}
         action = str(score.get("action") or "")
         next_status = {
@@ -2006,6 +2042,7 @@ async def build_target_scores_for_report(
                 "source_status": score.get("source_status") or {},
                 "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
+            decision_snapshot=decision_snapshot,
             current_price=quote.get("price"),
             available_cash=available_cash,
             total_assets=total_assets,

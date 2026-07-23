@@ -213,6 +213,23 @@ def _normalize_scoring_decision(value: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _bounded_decision_snapshot(value: dict[str, Any] | None) -> dict[str, Any]:
+    snapshot = value if isinstance(value, dict) else {}
+    allowed = (
+        "captured_at",
+        "quote",
+        "kline",
+        "fund_flow",
+        "market_regime",
+        "shadow_observations",
+    )
+    return {
+        key: snapshot[key]
+        for key in allowed
+        if key in snapshot
+    }
+
+
 class CandidatePoolStore:
     """File-backed production candidate pool.
 
@@ -537,6 +554,7 @@ class TargetPoolStore(CandidatePoolStore):
         serenity: dict[str, Any] | None = None,
         production_approval: dict[str, Any] | None = None,
         scoring_decision: dict[str, Any] | None = None,
+        decision_snapshot: dict[str, Any] | None = None,
         current_price: float | None = None,
         available_cash: float = 0,
         total_assets: float = 0,
@@ -554,6 +572,11 @@ class TargetPoolStore(CandidatePoolStore):
             _normalize_scoring_decision(scoring_decision)
             if scoring_decision is not None or source == "target_scoring"
             else existing.get("scoring_decision") or {}
+        )
+        normalized_snapshot = (
+            _bounded_decision_snapshot(decision_snapshot)
+            if decision_snapshot is not None
+            else _bounded_decision_snapshot(existing.get("decision_snapshot"))
         )
         if (
             source == "target_scoring"
@@ -609,8 +632,12 @@ class TargetPoolStore(CandidatePoolStore):
             "production_eligibility": gate,
             "production_approval": gate["approval"],
             "scoring_decision": normalized_scoring,
+            "decision_snapshot": normalized_snapshot,
             "updated_at": _now(),
         }
+        for snapshot_key in ("kline", "fund_flow", "market_regime"):
+            if snapshot_key in normalized_snapshot:
+                item[snapshot_key] = normalized_snapshot[snapshot_key]
         item.setdefault("created_at", _now())
         item.setdefault("decision_history", [])
         items[clean] = item
