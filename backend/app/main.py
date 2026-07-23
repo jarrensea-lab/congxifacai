@@ -51,6 +51,7 @@ from app.services.schedule_policy import (
 )
 from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
 from app.services.notification_gate import NotificationGate, build_alert_digest
+from app.services.runtime_identity import runtime_identity
 from app.services.visible_decision_gate import (
     build_runtime_blocked_gate,
     filter_alerts_by_visible_decision_gate,
@@ -88,6 +89,7 @@ class FeishuNotifier:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("恭喜发财 V7 应用启动中...")
+    logger.info(f"运行版本真值: {runtime_identity}")
     init_db()
     logger.info("数据库初始化完成")
 
