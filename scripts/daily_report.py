@@ -1979,6 +1979,42 @@ async def build_target_scores_for_report(
             key: (snapshot.get(key) or {}).get("status")
             for key in ("quote", "kline", "fund_flow", "northbound", "news", "financial", "sentinel", "serenity")
         }
+        kline = snapshot.get("kline") if isinstance(snapshot.get("kline"), dict) else {}
+        bars = kline.get("bars") if isinstance(kline.get("bars"), list) else []
+        completed_bars = [bar for bar in bars if isinstance(bar, dict) and bar.get("close") is not None]
+        two_bar_observation = {
+            "status": "evaluated" if len(completed_bars) >= 2 else "not_evaluated",
+            "completed_bars": len(completed_bars),
+        }
+        if len(completed_bars) >= 2:
+            two_bar_observation.update({
+                "previous_close": completed_bars[-2].get("close"),
+                "latest_close": completed_bars[-1].get("close"),
+                "holds_above_previous_close": (
+                    _positive_float(completed_bars[-1].get("close")) or 0
+                ) >= (
+                    _positive_float(completed_bars[-2].get("close")) or 0
+                ),
+            })
+        market_regime = (
+            snapshot.get("market_regime")
+            if isinstance(snapshot.get("market_regime"), dict)
+            else {
+                "status": "missing",
+                "reason": "market_regime_not_available",
+            }
+        )
+        decision_snapshot = {
+            "captured_at": snapshot.get("generated_at") or datetime.now().isoformat(timespec="seconds"),
+            "quote": snapshot.get("quote") or {},
+            "kline": kline,
+            "fund_flow": snapshot.get("fund_flow") or {},
+            "market_regime": market_regime,
+            "shadow_observations": {
+                "two_bar_confirmation_v1": two_bar_observation,
+                "market_regime_v1": market_regime,
+            },
+        }
         quote = snapshot.get("quote") if isinstance(snapshot.get("quote"), dict) else {}
         action = str(score.get("action") or "")
         next_status = {
@@ -2006,6 +2042,7 @@ async def build_target_scores_for_report(
                 "source_status": score.get("source_status") or {},
                 "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
+            decision_snapshot=decision_snapshot,
             current_price=quote.get("price"),
             available_cash=available_cash,
             total_assets=total_assets,
@@ -2323,6 +2360,11 @@ async def main():
     from app.engine.workshop import run_debate
     from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
     from app.services.portfolio_store import recalculate_portfolio, sync_db_from_user_portfolio
+    from app.services.profit_truth import (
+        reconcile_closed_loss_cooldowns,
+        reconcile_position_watch,
+    )
+    from app.services.quant_lifecycle import PositionWatchStore, TargetPoolStore
 
     now = datetime.now()
     report_date_override = _read_iso_date_env("CONGXI_REPORT_DATE")
@@ -2353,6 +2395,24 @@ async def main():
     with open(portfolio_path, 'r', encoding='utf-8') as f:
         portfolio = json.load(f)
     portfolio = recalculate_portfolio(portfolio)
+    watch_truth = reconcile_position_watch(portfolio, PositionWatchStore())
+    loss_truth = reconcile_closed_loss_cooldowns(portfolio, TargetPoolStore())
+    portfolio["position_watch_reconciliation"] = watch_truth
+    if watch_truth["added_codes"]:
+        print(
+            f"   持仓风控计划自动补全: {', '.join(watch_truth['added_codes'])}",
+            flush=True,
+        )
+    if not watch_truth["healthy"]:
+        print(
+            f"   ⚠️ 持仓风控计划未解析: {', '.join(watch_truth['unresolved_codes'])}",
+            flush=True,
+        )
+    if loss_truth["cooled_codes"]:
+        print(
+            f"   亏损平仓已进入冷却: {', '.join(loss_truth['cooled_codes'])}",
+            flush=True,
+        )
     sync_truth = sync_portfolio_database_truth(
         portfolio,
         portfolio_path,

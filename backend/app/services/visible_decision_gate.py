@@ -61,6 +61,7 @@ REASON_LABELS = {
     "visible_decision_gate_missing": "当日统一入场闸门缺失、损坏或已过期",
     "portfolio_sync_failed": "持仓真值同步失败",
     "portfolio_truth_invalid": "持仓真值数据结构无效",
+    "position_watch_unresolved": "真实持仓缺少有效止损或目标计划",
 }
 ALLOWED_REASONS = frozenset(REASON_LABELS)
 PROJECT_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -198,6 +199,14 @@ def build_visible_decision_gate(
         reasons.append("portfolio_sync_failed")
     elif _portfolio_truth_unresolved(decision, portfolio_truth):
         reasons.append("portfolio_truth_unresolved")
+    watch_truth = (
+        portfolio_truth.get("position_watch_reconciliation")
+        if isinstance(portfolio_truth, dict)
+        and isinstance(portfolio_truth.get("position_watch_reconciliation"), dict)
+        else {}
+    )
+    if watch_truth.get("healthy") is False:
+        reasons.append("position_watch_unresolved")
     if _report_entry_not_triggered(decision):
         reasons.append("main_report_entry_not_triggered")
     if stop_breaches:

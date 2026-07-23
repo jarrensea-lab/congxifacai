@@ -10,6 +10,61 @@ from datetime import date, datetime, timedelta
 import pytest
 
 
+def test_runtime_identity_exposes_commit_started_at_and_strategy_version(monkeypatch):
+    monkeypatch.setenv("CONGXI_BUILD_COMMIT", "abc1234")
+    from app.services.runtime_identity import build_runtime_identity
+
+    identity = build_runtime_identity(started_at="2026-07-24T01:00:00+08:00")
+
+    assert identity["commit"] == "abc1234"
+    assert identity["started_at"] == "2026-07-24T01:00:00+08:00"
+    assert identity["strategy_version"] == "v8.2.0-dev"
+
+
+@pytest.mark.asyncio
+async def test_health_check_includes_runtime_identity(monkeypatch):
+    from app.routers import market
+
+    monkeypatch.setattr(
+        market,
+        "runtime_identity",
+        {
+            "commit": "abc1234",
+            "started_at": "2026-07-24T01:00:00+08:00",
+            "strategy_version": "v8.2.0-dev",
+        },
+    )
+
+    payload = await market.health_check()
+
+    assert payload["runtime"]["commit"] == "abc1234"
+    assert payload["runtime"]["started_at"] == "2026-07-24T01:00:00+08:00"
+
+
+def test_scheduler_startup_logs_runtime_identity():
+    source = Path("backend/app/main.py").read_text(encoding="utf-8")
+
+    assert 'logger.info(f"运行版本真值: {runtime_identity}")' in source
+
+
+def test_intraday_scan_reconciles_profit_truth_and_fails_closed_on_missing_watch_plan():
+    source = Path("backend/app/main.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_run_intraday_alert_scan_with_status"
+    )
+    function_source = ast.get_source_segment(source, function) or ""
+
+    assert "reconcile_position_watch" in function_source
+    assert 'build_runtime_blocked_gate("position_watch_unresolved")' in function_source
+    assert function_source.index("reconcile_position_watch") < function_source.index(
+        "evaluate_position_watch"
+    )
+
+
 def test_database_creates_missing_parent_directory(tmp_path):
     """Runtime SQLite startup should create the parent directory before connecting."""
     db_path = tmp_path / "missing" / "nested" / "stock_data.db"

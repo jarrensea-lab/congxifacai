@@ -1523,6 +1523,40 @@ def test_target_pool_cooldown_after_loss_is_durable_and_not_scan_active(tmp_path
     assert item["production_eligibility"]["reason"] == "cooldown_after_loss"
 
 
+def test_target_pool_persists_bounded_decision_snapshot_for_intraday_scan(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+
+    store.upsert_target(
+        code="002131",
+        name="利欧股份",
+        status="watching",
+        source="target_scoring",
+        decision_snapshot={
+            "captured_at": "2026-07-23T20:30:00+08:00",
+            "quote": {"status": "ok", "price": 3.99},
+            "kline": {"status": "ok", "bars": [{"date": "2026-07-23", "close": 3.99}]},
+            "fund_flow": {"status": "ok", "net_inflow": 1200},
+            "market_regime": {"status": "missing", "reason": "market_regime_not_available"},
+            "shadow_observations": {"two_bar_confirmation_v1": {"status": "not_evaluated"}},
+            "financial": {"status": "ok", "secret_payload": "do_not_duplicate"},
+        },
+    )
+
+    item = store.get("002131")
+    assert set(item["decision_snapshot"]) == {
+        "captured_at",
+        "quote",
+        "kline",
+        "fund_flow",
+        "market_regime",
+        "shadow_observations",
+    }
+    assert item["kline"]["status"] == "ok"
+    assert item["fund_flow"]["status"] == "ok"
+    assert item["market_regime"]["reason"] == "market_regime_not_available"
+    assert "financial" not in item["decision_snapshot"]
+
+
 def test_target_pool_routes_unaffordable_serenity_candidate_to_research_reference(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
 

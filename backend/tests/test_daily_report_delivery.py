@@ -1,5 +1,7 @@
 """Daily report delivery and Obsidian archive regression tests."""
+import ast
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -1680,6 +1682,104 @@ async def test_build_target_scores_does_not_reactivate_cooldown_after_loss(monke
 
 
 @pytest.mark.asyncio
+async def test_build_target_scores_persists_decision_snapshot_without_changing_action(monkeypatch):
+    from scripts.daily_report import build_target_scores_for_report
+
+    captured = {}
+
+    class FakeStore:
+        def load(self):
+            return {
+                "items": {
+                    "002131": {
+                        "code": "002131",
+                        "name": "利欧股份",
+                        "status": "watching",
+                        "evidence": {},
+                    }
+                }
+            }
+
+        def upsert_target(self, **kwargs):
+            captured.update(kwargs)
+            return True
+
+    class FakeSource:
+        async def fetch_fund_flow_individual(self):
+            return []
+
+        async def fetch_hsgt_flow(self):
+            return []
+
+    snapshot = {
+        "code": "002131",
+        "name": "利欧股份",
+        "generated_at": "2026-07-23T20:30:00+08:00",
+        "quote": {"status": "ok", "price": 3.99},
+        "kline": {
+            "status": "ok",
+            "bars": [
+                {"date": "2026-07-22", "close": 3.90},
+                {"date": "2026-07-23", "close": 3.99},
+            ],
+        },
+        "fund_flow": {"status": "ok", "net_inflow": 1200},
+        "financial": {"status": "ok"},
+    }
+
+    async def fake_snapshot(*args, **kwargs):
+        return dict(snapshot)
+
+    def fake_score(*args, **kwargs):
+        return {"code": "002131", "name": "利欧股份", "score": 50, "action": "watch"}
+
+    monkeypatch.setattr("app.services.quant_lifecycle.TargetPoolStore", FakeStore)
+    monkeypatch.setattr("app.data_sources.akshare_market.AKShareMarketClient", FakeSource)
+    monkeypatch.setattr("app.data_sources.akshare_news.AKShareNewsClient", FakeSource)
+    monkeypatch.setattr("app.data_sources.realtime_market_data.FastRealtimeMarketDataSource", FakeSource)
+    monkeypatch.setattr("app.services.target_snapshot.build_target_snapshot", fake_snapshot)
+    monkeypatch.setattr("app.services.target_scoring.score_target", fake_score)
+
+    scores = await build_target_scores_for_report(
+        available_cash=1304.25,
+        total_assets=6028.25,
+        market_source=FakeSource(),
+    )
+
+    saved = captured["decision_snapshot"]
+    assert scores[0]["action"] == "watch"
+    assert captured["status"] == "watching"
+    assert saved["captured_at"] == snapshot["generated_at"]
+    assert saved["kline"]["status"] == "ok"
+    assert saved["fund_flow"]["status"] == "ok"
+    assert saved["market_regime"] == {
+        "status": "missing",
+        "reason": "market_regime_not_available",
+    }
+    assert saved["shadow_observations"]["two_bar_confirmation_v1"]["status"] == "evaluated"
+
+
+def test_daily_report_reconciles_profit_truth_before_target_scoring():
+    source = Path("scripts/daily_report.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "main"
+    )
+    function_source = ast.get_source_segment(source, function) or ""
+
+    assert "reconcile_position_watch" in function_source
+    assert "reconcile_closed_loss_cooldowns" in function_source
+    assert function_source.index("reconcile_position_watch") < function_source.index(
+        "build_target_scores_for_report"
+    )
+    assert function_source.index("reconcile_closed_loss_cooldowns") < function_source.index(
+        "build_target_scores_for_report"
+    )
+
+
+@pytest.mark.asyncio
 async def test_build_target_scores_refreshes_newest_research_hypothesis_first(monkeypatch):
     from scripts.daily_report import build_target_scores_for_report
 
@@ -2182,8 +2282,9 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
 
     monkeypatch.setenv("CONGXI_PORTFOLIO_PATH", str(portfolio_path))
     monkeypatch.setenv("CONGXI_VISIBLE_DECISION_GATE_PATH", str(gate_path))
-    monkeypatch.setenv("CONGXI_REPORT_DATE", "2026-07-21")
-    monkeypatch.setenv("CONGXI_TARGET_DATE", "2026-07-22")
+    report_day = date.today()
+    monkeypatch.setenv("CONGXI_REPORT_DATE", report_day.isoformat())
+    monkeypatch.setenv("CONGXI_TARGET_DATE", (report_day + timedelta(days=1)).isoformat())
     monkeypatch.delenv("CONGXI_REPORT_LEGACY_SECTIONS", raising=False)
     monkeypatch.setattr(daily_report, "ARCHIVE_DIR", str(archive_dir))
     monkeypatch.setattr(daily_report, "load_sentinel_research_package", lambda day: None)

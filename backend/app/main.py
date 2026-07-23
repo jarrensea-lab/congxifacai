@@ -32,7 +32,8 @@ from app.data_sources.akshare_market import AKShareMarketClient
 from app.data_sources.data_router import DataSourceRouter
 from app.services.monitor import MonitorService
 from app.services.push_tracker import push_tracker, compute_retry_delay
-from app.services.portfolio_store import sync_db_from_user_portfolio
+from app.services.portfolio_store import load_user_portfolio, sync_db_from_user_portfolio
+from app.services.profit_truth import reconcile_position_watch
 from app.services.quant_lifecycle import (
     CandidatePoolStore,
     PositionWatchStore,
@@ -51,6 +52,7 @@ from app.services.schedule_policy import (
 )
 from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
 from app.services.notification_gate import NotificationGate, build_alert_digest
+from app.services.runtime_identity import runtime_identity
 from app.services.visible_decision_gate import (
     build_runtime_blocked_gate,
     filter_alerts_by_visible_decision_gate,
@@ -88,6 +90,7 @@ class FeishuNotifier:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("恭喜发财 V7 应用启动中...")
+    logger.info(f"运行版本真值: {runtime_identity}")
     init_db()
     logger.info("数据库初始化完成")
 
@@ -462,11 +465,25 @@ async def _run_intraday_alert_scan_with_status():
         db = SessionLocal()
         try:
             candidate_entry_gate = None
+            position_watch = PositionWatchStore()
             try:
                 sync_db_from_user_portfolio(db)
             except Exception as exc:
                 logger.warning(f"盘中事件扫描持仓同步失败，继续使用数据库现状: {exc}")
                 candidate_entry_gate = build_runtime_blocked_gate("portfolio_sync_failed")
+            try:
+                watch_truth = reconcile_position_watch(load_user_portfolio(), position_watch)
+                if not watch_truth["healthy"]:
+                    if candidate_entry_gate is None:
+                        candidate_entry_gate = build_runtime_blocked_gate("position_watch_unresolved")
+                    logger.warning(
+                        "盘中持仓风控计划未解析: "
+                        f"{','.join(watch_truth['unresolved_codes'])}"
+                    )
+            except Exception as exc:
+                if candidate_entry_gate is None:
+                    candidate_entry_gate = build_runtime_blocked_gate("position_watch_unresolved")
+                logger.warning(f"盘中持仓风控对账失败，已禁止新开仓: {exc}")
             positions = db.query(Position).filter(Position.quantity > 0).all()
             codes = [p.stock_code for p in positions if p.stock_code]
             position_quotes = await TencentDataSource().fetch_batch(codes) if codes else {}
@@ -482,7 +499,6 @@ async def _run_intraday_alert_scan_with_status():
                 p.unrealized_pnl = p.market_value - (p.avg_cost * p.quantity)
             db.commit()
 
-            position_watch = PositionWatchStore()
             watch_alerts = evaluate_position_watch(position_watch, position_quotes)
             deliverable_watch_alerts = notification_gate.filter_alerts(watch_alerts, stage="盘中持仓")
             if deliverable_watch_alerts:

@@ -8,6 +8,7 @@ from app.utils.tiered_cache import tiered_cache
 from app.trading_engine.position import PositionManager
 from app.data_sources.tencent_client import TencentDataSource
 from app.data_sources.eastmoney_client import EastmoneyDataSource
+from app.services.runtime_identity import runtime_identity
 
 # 需要从主应用注入的数据源实例
 tencent_client: TencentDataSource = None
@@ -46,6 +47,7 @@ async def health_check():
         "deepseek": "ok" if ds_ok else "unavailable",
         "database": "ok" if db_ok else "error",
         "version": "v8.2.0-dev",
+        "runtime": dict(runtime_identity),
     }
 
 

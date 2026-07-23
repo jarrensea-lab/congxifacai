@@ -213,6 +213,23 @@ def _normalize_scoring_decision(value: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
+def _bounded_decision_snapshot(value: dict[str, Any] | None) -> dict[str, Any]:
+    snapshot = value if isinstance(value, dict) else {}
+    allowed = (
+        "captured_at",
+        "quote",
+        "kline",
+        "fund_flow",
+        "market_regime",
+        "shadow_observations",
+    )
+    return {
+        key: snapshot[key]
+        for key in allowed
+        if key in snapshot
+    }
+
+
 class CandidatePoolStore:
     """File-backed production candidate pool.
 
@@ -477,6 +494,53 @@ class TargetPoolStore(CandidatePoolStore):
         return target_production_eligibility(target, previous=previous)
 
     @_locked_store_mutation
+    def mark_cooldown_after_loss(
+        self,
+        *,
+        code: str,
+        name: str,
+        close_date: str,
+        realized_pnl: float,
+        realized_pnl_pct: float,
+    ) -> bool:
+        """Persist a confirmed losing exit without allowing nightly reactivation."""
+        clean = _clean_code(code)
+        if not clean:
+            return False
+        payload = self.load()
+        items = payload.setdefault("items", {})
+        existing = items.get(clean, {})
+        loss_exit = {
+            "close_date": close_date,
+            "realized_pnl": round(_to_float(realized_pnl), 2),
+            "realized_pnl_pct": round(_to_float(realized_pnl_pct), 2),
+            "source": "user_portfolio.closed_positions",
+            "reconciled_at": _now(),
+        }
+        gate = self.production_eligibility_for(
+            {
+                "status": "cooldown_after_loss",
+                "source": "portfolio_closed_loss_reconciliation",
+            },
+            previous=existing,
+        )
+        items[clean] = {
+            **existing,
+            "code": clean,
+            "name": name or existing.get("name") or clean,
+            "status": "cooldown_after_loss",
+            "source": "portfolio_closed_loss_reconciliation",
+            "loss_exit": loss_exit,
+            "production_eligibility": gate,
+            "production_approval": gate["approval"],
+            "updated_at": _now(),
+        }
+        items[clean].setdefault("created_at", _now())
+        items[clean].setdefault("decision_history", [])
+        self.save(payload)
+        return True
+
+    @_locked_store_mutation
     def upsert_target(
         self,
         *,
@@ -490,6 +554,7 @@ class TargetPoolStore(CandidatePoolStore):
         serenity: dict[str, Any] | None = None,
         production_approval: dict[str, Any] | None = None,
         scoring_decision: dict[str, Any] | None = None,
+        decision_snapshot: dict[str, Any] | None = None,
         current_price: float | None = None,
         available_cash: float = 0,
         total_assets: float = 0,
@@ -507,6 +572,11 @@ class TargetPoolStore(CandidatePoolStore):
             _normalize_scoring_decision(scoring_decision)
             if scoring_decision is not None or source == "target_scoring"
             else existing.get("scoring_decision") or {}
+        )
+        normalized_snapshot = (
+            _bounded_decision_snapshot(decision_snapshot)
+            if decision_snapshot is not None
+            else _bounded_decision_snapshot(existing.get("decision_snapshot"))
         )
         if (
             source == "target_scoring"
@@ -562,8 +632,12 @@ class TargetPoolStore(CandidatePoolStore):
             "production_eligibility": gate,
             "production_approval": gate["approval"],
             "scoring_decision": normalized_scoring,
+            "decision_snapshot": normalized_snapshot,
             "updated_at": _now(),
         }
+        for snapshot_key in ("kline", "fund_flow", "market_regime"):
+            if snapshot_key in normalized_snapshot:
+                item[snapshot_key] = normalized_snapshot[snapshot_key]
         item.setdefault("created_at", _now())
         item.setdefault("decision_history", [])
         items[clean] = item
