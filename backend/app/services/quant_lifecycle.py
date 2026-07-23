@@ -477,6 +477,53 @@ class TargetPoolStore(CandidatePoolStore):
         return target_production_eligibility(target, previous=previous)
 
     @_locked_store_mutation
+    def mark_cooldown_after_loss(
+        self,
+        *,
+        code: str,
+        name: str,
+        close_date: str,
+        realized_pnl: float,
+        realized_pnl_pct: float,
+    ) -> bool:
+        """Persist a confirmed losing exit without allowing nightly reactivation."""
+        clean = _clean_code(code)
+        if not clean:
+            return False
+        payload = self.load()
+        items = payload.setdefault("items", {})
+        existing = items.get(clean, {})
+        loss_exit = {
+            "close_date": close_date,
+            "realized_pnl": round(_to_float(realized_pnl), 2),
+            "realized_pnl_pct": round(_to_float(realized_pnl_pct), 2),
+            "source": "user_portfolio.closed_positions",
+            "reconciled_at": _now(),
+        }
+        gate = self.production_eligibility_for(
+            {
+                "status": "cooldown_after_loss",
+                "source": "portfolio_closed_loss_reconciliation",
+            },
+            previous=existing,
+        )
+        items[clean] = {
+            **existing,
+            "code": clean,
+            "name": name or existing.get("name") or clean,
+            "status": "cooldown_after_loss",
+            "source": "portfolio_closed_loss_reconciliation",
+            "loss_exit": loss_exit,
+            "production_eligibility": gate,
+            "production_approval": gate["approval"],
+            "updated_at": _now(),
+        }
+        items[clean].setdefault("created_at", _now())
+        items[clean].setdefault("decision_history", [])
+        self.save(payload)
+        return True
+
+    @_locked_store_mutation
     def upsert_target(
         self,
         *,
