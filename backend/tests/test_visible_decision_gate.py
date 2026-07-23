@@ -56,6 +56,26 @@ def test_visible_decision_gate_degrades_entry_only_and_preserves_risk_actions():
     assert "今天不主动买入" in entry_lines
 
 
+def test_visible_decision_gate_blocks_entry_when_position_watch_is_unresolved():
+    from app.services.visible_decision_gate import build_visible_decision_gate
+
+    gate = build_visible_decision_gate(
+        report_date="2026-07-23",
+        target_date="2026-07-24",
+        decision={"target_scores": [{"code": "002131", "action": "buy"}]},
+        portfolio_truth={
+            "positions": [{"code": "002131", "shares": 200}],
+            "position_watch_reconciliation": {
+                "healthy": False,
+                "unresolved_codes": ["002131"],
+            },
+        },
+    )
+
+    assert gate["entry_allowed"] is False
+    assert "position_watch_unresolved" in gate["reasons"]
+
+
 def test_visible_decision_gate_persists_atomically_and_has_target_date_validity(tmp_path):
     from app.services.visible_decision_gate import (
         load_effective_visible_decision_gate,

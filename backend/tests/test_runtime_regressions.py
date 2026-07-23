@@ -47,6 +47,24 @@ def test_scheduler_startup_logs_runtime_identity():
     assert 'logger.info(f"运行版本真值: {runtime_identity}")' in source
 
 
+def test_intraday_scan_reconciles_profit_truth_and_fails_closed_on_missing_watch_plan():
+    source = Path("backend/app/main.py").read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_run_intraday_alert_scan_with_status"
+    )
+    function_source = ast.get_source_segment(source, function) or ""
+
+    assert "reconcile_position_watch" in function_source
+    assert 'build_runtime_blocked_gate("position_watch_unresolved")' in function_source
+    assert function_source.index("reconcile_position_watch") < function_source.index(
+        "evaluate_position_watch"
+    )
+
+
 def test_database_creates_missing_parent_directory(tmp_path):
     """Runtime SQLite startup should create the parent directory before connecting."""
     db_path = tmp_path / "missing" / "nested" / "stock_data.db"
