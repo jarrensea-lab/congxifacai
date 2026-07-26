@@ -1,5 +1,7 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 from app.services.long_thesis import LongThesisStore, evaluate_thesis_status
 
@@ -65,6 +67,32 @@ def test_long_thesis_store_upserts_and_appends_review(tmp_path):
     assert loaded["thesis_status"] == "weakened"
     assert loaded["reviews"][0]["summary"] == "毛利率假设边际弱化，继续观察。"
     assert store.load()["items"]["002123"]["valuation_anchor"]["accumulation_zone"] == [3.2, 3.8]
+
+
+def test_long_thesis_concurrent_different_symbols_do_not_lose_updates(
+    monkeypatch,
+    tmp_path,
+):
+    store = LongThesisStore(tmp_path / "long_thesis.json")
+    barrier = Barrier(2)
+    original_load = LongThesisStore.load
+
+    def synchronized_load(self):
+        payload = original_load(self)
+        barrier.wait(timeout=5)
+        return payload
+
+    monkeypatch.setattr(LongThesisStore, "load", synchronized_load)
+    first = {**_sample_thesis(), "symbol": "002123", "name": "并发一"}
+    second = {**_sample_thesis(), "symbol": "688001", "name": "并发二"}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(store.upsert, (first, second)))
+
+    stored = original_load(store)["items"]
+    assert set(stored) == {"002123", "688001"}
+    assert stored["002123"]["name"] == "并发一"
+    assert stored["688001"]["name"] == "并发二"
 
 
 def test_evaluate_thesis_status_marks_red_line_as_broken():

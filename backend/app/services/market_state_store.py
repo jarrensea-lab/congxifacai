@@ -8,6 +8,8 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from app.utils.a_share_codes import ts_code
+
 
 BASE_DATA_ENV = "CONGXI_A_SHARE_BASE_DATA_DIR"
 DEFAULT_BASE_DATA_DIR = "/Volumes/豪鬼/学习/A股交易基础数据"
@@ -44,15 +46,10 @@ def _to_float(value: Any, default: float | None = None) -> float | None:
 
 def normalize_ts_code(code: str) -> str:
     """Return a Tushare-style A-share code such as 000001.SZ."""
-    raw = str(code or "").strip().upper()
-    if not raw:
+    try:
+        return ts_code(code)
+    except ValueError:
         return ""
-    if "." in raw:
-        prefix, suffix = raw.split(".", 1)
-        return f"{prefix.zfill(6)}.{suffix}"
-    raw = raw.replace("SH", "").replace("SZ", "").replace("BJ", "")
-    suffix = "SH" if raw.startswith(("6", "9")) else "BJ" if raw.startswith(("8", "4")) else "SZ"
-    return f"{raw.zfill(6)}.{suffix}"
 
 
 def _read_csv(path: Path) -> list[dict[str, str]]:

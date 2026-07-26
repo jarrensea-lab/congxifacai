@@ -1,3 +1,6 @@
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+
 import pytest
 
 from app.services.quant_lifecycle import TargetPoolStore
@@ -65,6 +68,33 @@ def test_evidence_ledger_generates_stable_deduped_evidence(tmp_path):
     loaded = store.load_all()
     assert len(loaded) == len(evidence)
     assert all(item["evidence_id"].startswith("ev_") for item in loaded)
+
+
+def test_evidence_ledger_concurrent_same_id_writes_once(monkeypatch, tmp_path):
+    store = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    evidence = build_sentinel_evidence(_sample_sentinel_package())[:1]
+    workers = 6
+    barrier = Barrier(workers)
+    original_load_all = EvidenceLedgerStore.load_all
+
+    def synchronized_load_all(self):
+        records = original_load_all(self)
+        barrier.wait(timeout=5)
+        return records
+
+    monkeypatch.setattr(
+        EvidenceLedgerStore,
+        "load_all",
+        synchronized_load_all,
+    )
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        written = list(executor.map(lambda _: store.append_many(evidence), range(workers)))
+
+    records = original_load_all(store)
+    assert sum(written) == 1
+    assert len(records) == 1
+    assert records[0]["evidence_id"] == evidence[0]["evidence_id"]
 
 
 def test_sentinel_serenity_candidates_enter_target_pool_with_evidence(tmp_path):

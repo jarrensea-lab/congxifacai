@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from pathlib import Path
 from typing import Any
 
@@ -11,14 +10,15 @@ from app.services.evidence_ledger import (
     EvidenceLedgerStore,
     build_long_horizon_evidence,
 )
+from app.services.long_horizon_transaction import (
+    LongHorizonBatchTransaction,
+    default_transaction_path,
+)
 from app.services.long_thesis import LongThesisStore, evaluate_thesis_status
 from app.services.quant_lifecycle import TargetPoolStore
+from app.utils.a_share_codes import validate_a_share_code
 
 
-_A_SHARE_CODE = re.compile(
-    r"^(?:000|001|002|003|300|301|302|600|601|603|605|688|689|"
-    r"430|83[0-9]|87[0-9])\d{3}$"
-)
 _CORE_FINANCIAL_METRICS = {
     "revenue",
     "total_revenue",
@@ -84,7 +84,7 @@ def _json_store_diagnostic(
         }
     for key, record in payload["items"].items():
         clean_key = str(key or "").strip()
-        if not _A_SHARE_CODE.fullmatch(clean_key):
+        if not validate_a_share_code(clean_key):
             return {
                 "reason": "store_history_corrupted",
                 "store": store_name,
@@ -97,7 +97,7 @@ def _json_store_diagnostic(
                 "error": f"item {clean_key} must be an object",
             }
         item_code = str(record.get(code_field) or "").strip()
-        if item_code != clean_key or not _A_SHARE_CODE.fullmatch(item_code):
+        if item_code != clean_key or not validate_a_share_code(item_code):
             return {
                 "reason": "store_history_corrupted",
                 "store": store_name,
@@ -294,134 +294,192 @@ def materialize_serenity_long_horizon(
     thesis_store: LongThesisStore | None = None,
     ledger: EvidenceLedgerStore | None = None,
     target_pool: TargetPoolStore | None = None,
+    *,
+    transaction_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Persist Serenity candidates as inert long-horizon research objects."""
     thesis_store = thesis_store or LongThesisStore()
     ledger = ledger or EvidenceLedgerStore()
     target_pool = target_pool or TargetPoolStore()
     result = _summary()
+    transaction = LongHorizonBatchTransaction(
+        transaction_path or default_transaction_path(thesis_store.path),
+        [
+            ("long_thesis", thesis_store.path),
+            ("evidence_ledger", ledger.path),
+            ("target_pool", target_pool.path),
+        ],
+    )
 
-    diagnostics = [
-        diagnostic
-        for diagnostic in (
-            _json_store_diagnostic(thesis_store, "long_thesis", "symbol"),
-            _ledger_diagnostic(ledger),
-            _json_store_diagnostic(target_pool, "target_pool", "code"),
-        )
-        if diagnostic is not None
-    ]
-    if diagnostics:
-        result["status"] = "failed"
-        result["diagnostics"] = diagnostics
-        return result
+    with transaction.locked():
+        try:
+            recovery_summary = transaction.recover_pending()
+        except Exception as exc:
+            result["status"] = "failed"
+            result["recovery_summary"] = {
+                "status": "recovery_failed",
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+            }
+            result["diagnostics"] = [{
+                "reason": "pending_transaction_recovery_failed",
+                "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+            }]
+            return result
+        if recovery_summary is not None:
+            result["recovery_summary"] = recovery_summary
 
-    for dive in package.get("serenity_deep_dives") or []:
-        if not isinstance(dive, dict):
-            result["diagnostics"].append(
-                {"reason": "invalid_deep_dive", "error": "expected object"}
+        diagnostics = [
+            diagnostic
+            for diagnostic in (
+                _json_store_diagnostic(thesis_store, "long_thesis", "symbol"),
+                _ledger_diagnostic(ledger),
+                _json_store_diagnostic(target_pool, "target_pool", "code"),
             )
-            continue
-        for candidate in dive.get("top_candidates") or []:
-            if not isinstance(candidate, dict):
-                result["diagnostics"].append(
-                    {"reason": "invalid_candidate", "error": "expected object"}
-                )
-                continue
-            symbol = str(candidate.get("code") or "").strip()
-            if not _A_SHARE_CODE.fullmatch(symbol):
-                result["diagnostics"].append(
-                    {"symbol": symbol, "reason": "invalid_a_share_code"}
-                )
-                continue
-            try:
-                thesis, verified = _build_thesis(candidate, dive, report_date)
-                evidence = build_long_horizon_evidence(
-                    thesis,
-                    report_date=report_date,
-                    source_report_path=thesis["source_report_path"],
-                    data_cutoff_date=report_date,
-                )
-                written_evidence = ledger.append_many(evidence)
-                result["evidence_count"] += written_evidence
-                result["write_count"] += written_evidence
-                thesis["evidence_ids"] = [item["evidence_id"] for item in evidence]
-                existing_thesis = thesis_store.get(symbol)
-                thesis_unchanged = _semantically_matches(
-                    existing_thesis,
-                    thesis,
-                )
-                if thesis_unchanged:
-                    stored = existing_thesis
-                    result["unchanged_thesis_count"] += 1
-                    result["skipped_count"] += 1
-                else:
-                    stored = thesis_store.upsert(thesis)
-                    result["write_count"] += 1
-                result["thesis_count"] += 1
-                if stored.get("thesis_status") == "forming":
-                    result["forming_count"] += 1
-                if verified:
-                    result["verified_count"] += 1
+            if diagnostic is not None
+        ]
+        if diagnostics:
+            result["status"] = "failed"
+            result["diagnostics"] = diagnostics
+            return result
 
-                existing_target = target_pool.get(symbol)
-                merged_evidence_ids = list(dict.fromkeys([
-                    *((existing_target or {}).get("evidence_ids") or []),
-                    *thesis["evidence_ids"],
-                ]))
-                target_semantics = {
-                    "code": symbol,
-                    "name": stored["name"],
-                    "status": "long_research",
-                    "source": "long_horizon",
-                    "evidence_ids": merged_evidence_ids,
-                    "evidence": {
-                        "stage": "shadow_only",
-                        "boundary": "shadow_only",
-                        "research_only": True,
-                        "verification_status": stored["verification_status"],
-                        "thesis_status": stored["thesis_status"],
-                        "source_report_path": stored["source_report_path"],
-                    },
-                    "serenity": {
-                        "quality_score": stored["quality_score"],
-                        "bottleneck_duration": stored["bottleneck_duration"],
-                        "boundary": "research_only",
-                    },
-                }
-                target_unchanged = _semantically_matches(
-                    existing_target,
-                    target_semantics,
-                )
-                if target_unchanged:
-                    target_written = True
-                    result["unchanged_target_count"] += 1
-                    result["skipped_count"] += 1
-                else:
-                    target_written = target_pool.upsert_target(
-                        code=symbol,
-                        name=stored["name"],
-                        status="long_research",
-                        source="long_horizon",
-                        evidence_ids=thesis["evidence_ids"],
-                        evidence=target_semantics["evidence"],
-                        serenity=target_semantics["serenity"],
+        try:
+            transaction.begin()
+            for dive in package.get("serenity_deep_dives") or []:
+                if not isinstance(dive, dict):
+                    result["diagnostics"].append(
+                        {"reason": "invalid_deep_dive", "error": "expected object"}
                     )
-                    if target_written:
+                    continue
+                for candidate in dive.get("top_candidates") or []:
+                    if not isinstance(candidate, dict):
+                        result["diagnostics"].append(
+                            {"reason": "invalid_candidate", "error": "expected object"}
+                        )
+                        continue
+                    symbol = str(candidate.get("code") or "").strip()
+                    if not validate_a_share_code(symbol):
+                        result["diagnostics"].append(
+                            {"symbol": symbol, "reason": "invalid_a_share_code"}
+                        )
+                        continue
+                    thesis, verified = _build_thesis(candidate, dive, report_date)
+                    evidence = build_long_horizon_evidence(
+                        thesis,
+                        report_date=report_date,
+                        source_report_path=thesis["source_report_path"],
+                        data_cutoff_date=report_date,
+                    )
+                    current_long_evidence_ids = [
+                        item["evidence_id"] for item in evidence
+                    ]
+                    existing_thesis = thesis_store.get(symbol)
+                    thesis["evidence_ids"] = list(dict.fromkeys([
+                        *((existing_thesis or {}).get("evidence_ids") or []),
+                        *current_long_evidence_ids,
+                    ]))
+                    thesis[
+                        "current_long_evidence_ids"
+                    ] = current_long_evidence_ids
+                    written_evidence = ledger.append_many(evidence)
+                    result["evidence_count"] += written_evidence
+                    result["write_count"] += written_evidence
+                    thesis_unchanged = _semantically_matches(
+                        existing_thesis,
+                        thesis,
+                    )
+                    if thesis_unchanged:
+                        stored = existing_thesis
+                        result["unchanged_thesis_count"] += 1
+                        result["skipped_count"] += 1
+                    else:
+                        stored = thesis_store.upsert(thesis)
                         result["write_count"] += 1
-                if not target_written:
-                    raise RuntimeError("target_pool_upsert_rejected")
-                result["target_count"] += 1
-                if thesis_unchanged and target_unchanged:
-                    result["unchanged_count"] += 1
-            except Exception as exc:
-                result["diagnostics"].append(
-                    {
-                        "symbol": symbol,
-                        "reason": "candidate_materialization_failed",
-                        "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-                    }
-                )
+                    result["thesis_count"] += 1
+                    if stored.get("thesis_status") == "forming":
+                        result["forming_count"] += 1
+                    if verified:
+                        result["verified_count"] += 1
 
-    if result["diagnostics"]:
-        result["status"] = "partial"
-    return result
+                    existing_target = target_pool.get(symbol)
+                    merged_evidence_ids = list(dict.fromkeys([
+                        *((existing_target or {}).get("evidence_ids") or []),
+                        *thesis["evidence_ids"],
+                    ]))
+                    target_semantics = {
+                        "code": symbol,
+                        "name": stored["name"],
+                        "status": "long_research",
+                        "source": "long_horizon",
+                        "evidence_ids": merged_evidence_ids,
+                        "current_long_evidence_ids": (
+                            current_long_evidence_ids
+                        ),
+                        "evidence": {
+                            "stage": "shadow_only",
+                            "boundary": "shadow_only",
+                            "research_only": True,
+                            "verification_status": stored["verification_status"],
+                            "thesis_status": stored["thesis_status"],
+                            "source_report_path": stored["source_report_path"],
+                        },
+                        "serenity": {
+                            "quality_score": stored["quality_score"],
+                            "bottleneck_duration": stored["bottleneck_duration"],
+                            "boundary": "research_only",
+                        },
+                    }
+                    target_unchanged = _semantically_matches(
+                        existing_target,
+                        target_semantics,
+                    )
+                    if target_unchanged:
+                        target_written = True
+                        result["unchanged_target_count"] += 1
+                        result["skipped_count"] += 1
+                    else:
+                        target_written = target_pool.upsert_target(
+                            code=symbol,
+                            name=stored["name"],
+                            status="long_research",
+                            source="long_horizon",
+                            evidence_ids=current_long_evidence_ids,
+                            current_long_evidence_ids=(
+                                current_long_evidence_ids
+                            ),
+                            evidence=target_semantics["evidence"],
+                            serenity=target_semantics["serenity"],
+                        )
+                        if target_written:
+                            result["write_count"] += 1
+                    if not target_written:
+                        raise RuntimeError("target_pool_upsert_rejected")
+                    result["target_count"] += 1
+                    if thesis_unchanged and target_unchanged:
+                        result["unchanged_count"] += 1
+            transaction.commit()
+        except Exception as exc:
+            try:
+                rollback_summary = transaction.rollback()
+            except Exception as rollback_exc:
+                rollback_summary = {
+                    "status": "rollback_failed",
+                    "error": (
+                        f"{type(rollback_exc).__name__}: "
+                        f"{str(rollback_exc)[:160]}"
+                    ),
+                }
+            failed_result = _summary()
+            failed_result["status"] = "failed"
+            failed_result["recovery_summary"] = rollback_summary
+            failed_result["diagnostics"] = [
+                *result["diagnostics"],
+                {
+                    "reason": "batch_transaction_failed",
+                    "error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                },
+            ]
+            return failed_result
+
+        if result["diagnostics"]:
+            result["status"] = "partial"
+        return result

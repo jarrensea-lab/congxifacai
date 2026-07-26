@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import base64
 import json
 
 import pytest
@@ -333,6 +334,35 @@ def test_materializer_accepts_all_injected_stores_positionally(tmp_path):
     assert summary["thesis_count"] == 0
 
 
+def test_materializer_accepts_current_bse_920_code(tmp_path):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    package = _package()
+    package["serenity_deep_dives"] = [package["serenity_deep_dives"][0]]
+    package["serenity_deep_dives"][0]["top_candidates"][0]["code"] = "920001"
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+
+    summary = materialize_serenity_long_horizon(
+        package,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+
+    assert summary["status"] == "success"
+    assert thesis_store.get("920001") is not None
+    assert target_pool.get("920001")["status"] == "long_research"
+    assert all(
+        item["enters_target_pool"] is True
+        for item in ledger.load_all()
+    )
+
+
 @pytest.mark.parametrize(
     ("metrics", "verified"),
     [
@@ -471,3 +501,261 @@ def test_repeated_materialization_does_not_refresh_thesis_or_target(
     assert target_pool.path.read_bytes() == target_bytes
     assert thesis_store.get("688001")["updated_at"] == thesis_updated_at
     assert target_pool.get("688001")["updated_at"] == target_updated_at
+
+
+@pytest.mark.parametrize("failed_stage", ["ledger", "thesis", "target"])
+def test_materializer_rolls_back_all_stores_after_each_write_stage_failure(
+    monkeypatch,
+    tmp_path,
+    failed_stage,
+):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    transaction_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store.upsert({
+        "symbol": "000001",
+        "name": "原始 thesis",
+        "core_thesis": "原始内容",
+    })
+    ledger.append_many([{
+        "evidence_id": "ev_original",
+        "type": "test",
+        "summary": "原始 evidence",
+    }])
+    target_pool.upsert_target(
+        code="000001",
+        name="原始 target",
+        status="long_research",
+        source="long_horizon",
+    )
+    paths = (thesis_store.path, ledger.path, target_pool.path)
+    before = {path: path.read_bytes() for path in paths}
+    owner = {
+        "ledger": ledger,
+        "thesis": thesis_store,
+        "target": target_pool,
+    }[failed_stage]
+    method_name = {
+        "ledger": "append_many",
+        "thesis": "upsert",
+        "target": "upsert_target",
+    }[failed_stage]
+    original = getattr(owner, method_name)
+
+    def write_then_fail(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError(f"injected_{failed_stage}_failure")
+
+    monkeypatch.setattr(owner, method_name, write_then_fail)
+
+    summary = materialize_serenity_long_horizon(
+        {
+            **_package(),
+            "serenity_deep_dives": [_package()["serenity_deep_dives"][0]],
+        },
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+        transaction_path=transaction_path,
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["write_count"] == 0
+    assert summary["thesis_count"] == 0
+    assert summary["evidence_count"] == 0
+    assert summary["target_count"] == 0
+    assert summary["diagnostics"][-1]["reason"] == "batch_transaction_failed"
+    assert summary["recovery_summary"]["status"] == "rolled_back"
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not transaction_path.exists()
+
+
+def test_materializer_recovers_pending_journal_before_preflight(tmp_path):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    transaction_path = tmp_path / "long_horizon_transaction.json"
+    stores = [
+        ("long_thesis", thesis_store.path),
+        ("evidence_ledger", ledger.path),
+        ("target_pool", target_pool.path),
+    ]
+    for _, path in stores:
+        path.write_bytes(b"crash residue")
+    transaction_path.write_text(
+        json.dumps({
+            "version": 1,
+            "batch_id": "batch-crashed",
+            "status": "pending",
+            "stores": [
+                {
+                    "name": name,
+                    "path": str(path),
+                    "existed": False,
+                    "content_b64": base64.b64encode(b"").decode("ascii"),
+                }
+                for name, path in stores
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    summary = materialize_serenity_long_horizon(
+        {"serenity_deep_dives": []},
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+        transaction_path=transaction_path,
+    )
+
+    assert summary["status"] == "success"
+    assert summary["recovery_summary"] == {
+        "status": "recovered",
+        "batch_id": "batch-crashed",
+        "restored_stores": [
+            "long_thesis",
+            "evidence_ledger",
+            "target_pool",
+        ],
+    }
+    assert all(not path.exists() for _, path in stores)
+    assert not transaction_path.exists()
+
+
+def test_forming_to_verified_appends_revision_and_updates_current_ids(tmp_path):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    forming_package = _package()
+    forming_package["serenity_deep_dives"] = [
+        forming_package["serenity_deep_dives"][1]
+    ]
+    forming_package["serenity_deep_dives"][0]["top_candidates"] = [
+        forming_package["serenity_deep_dives"][0]["top_candidates"][0]
+    ]
+    materialize_serenity_long_horizon(
+        forming_package,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+    old_records = copy.deepcopy(ledger.load_all())
+    old_ids = {item["evidence_id"] for item in old_records}
+    old_logical_ids = {
+        item["logical_evidence_id"] for item in old_records
+    }
+
+    verified_package = _package()
+    verified_package["serenity_deep_dives"] = [
+        verified_package["serenity_deep_dives"][0]
+    ]
+    verified_package["serenity_deep_dives"][0]["top_candidates"][0][
+        "code"
+    ] = "000001"
+    verified_package["serenity_deep_dives"][0]["top_candidates"][0][
+        "name"
+    ] = "待核验公司"
+    materialize_serenity_long_horizon(
+        verified_package,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+
+    all_records = ledger.load_all()
+    assert all_records[:len(old_records)] == old_records
+    new_records = all_records[len(old_records):]
+    new_ids = {item["evidence_id"] for item in new_records}
+    assert new_ids.isdisjoint(old_ids)
+    assert {item["logical_evidence_id"] for item in new_records} == old_logical_ids
+    assert {
+        item["semantic_revision"] for item in new_records
+    }.isdisjoint({
+        item["semantic_revision"] for item in old_records
+    })
+    thesis = thesis_store.get("000001")
+    target = target_pool.get("000001")
+    assert set(thesis["current_long_evidence_ids"]) == new_ids
+    assert set(target["current_long_evidence_ids"]) == new_ids
+    assert set(thesis["evidence_ids"]) == old_ids | new_ids
+    assert set(target["evidence_ids"]) == old_ids | new_ids
+
+
+@pytest.mark.parametrize("revision_kind", ["verified_to_forming", "financial_revision"])
+def test_verified_downgrade_or_financial_change_appends_revision(
+    tmp_path,
+    revision_kind,
+):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    initial = _package()
+    initial["serenity_deep_dives"] = [initial["serenity_deep_dives"][0]]
+    materialize_serenity_long_horizon(
+        initial,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+    old_records = copy.deepcopy(ledger.load_all())
+    old_ids = {item["evidence_id"] for item in old_records}
+
+    revised = copy.deepcopy(initial)
+    candidate = revised["serenity_deep_dives"][0]["top_candidates"][0]
+    if revision_kind == "verified_to_forming":
+        revised["serenity_deep_dives"][0]["financial_status"] = {
+            "status": "failed"
+        }
+    else:
+        candidate["financial_evidence"]["metrics"]["gross_margin_pct"] = 35.5
+    materialize_serenity_long_horizon(
+        revised,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+
+    all_records = ledger.load_all()
+    assert all_records[:len(old_records)] == old_records
+    new_records = all_records[len(old_records):]
+    new_ids = {item["evidence_id"] for item in new_records}
+    assert new_ids
+    assert new_ids.isdisjoint(old_ids)
+    assert {
+        item["logical_evidence_id"] for item in new_records
+    } == {
+        item["logical_evidence_id"] for item in old_records
+    }
+    thesis = thesis_store.get("688001")
+    assert set(thesis["current_long_evidence_ids"]) == new_ids
+    if revision_kind == "verified_to_forming":
+        assert thesis["verification_status"] == "incomplete"
+        assert thesis["thesis_status"] == "forming"
+    else:
+        assert (
+            thesis["financial_evidence"]["metrics"]["gross_margin_pct"]
+            == 35.5
+        )

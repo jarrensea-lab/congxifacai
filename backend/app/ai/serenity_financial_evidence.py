@@ -6,6 +6,8 @@ import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from app.utils.a_share_codes import ts_code
+
 DEFAULT_FINANCIAL_EVIDENCE_CACHE_PATH = (
     Path(__file__).resolve().parents[3] / "data" / "serenity" / "financial_evidence.json"
 )
@@ -160,12 +162,7 @@ def _extract_latest_snapshot(code: str, rows: Any, source: str) -> Dict[str, Any
 
 
 def _to_ts_code(code: str) -> str:
-    code = code.replace("sh", "").replace("sz", "").replace("bj", "")
-    if code.startswith(("6", "9")):
-        return f"{code}.SH"
-    if code.startswith("8"):
-        return f"{code}.BJ"
-    return f"{code}.SZ"
+    return ts_code(code)
 
 
 async def fetch_tushare_financial_evidence(codes: List[str]) -> Dict[str, Dict[str, Any]]:

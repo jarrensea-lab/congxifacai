@@ -485,6 +485,7 @@ class TargetPoolStore(CandidatePoolStore):
         status: str = "candidate",
         source: str = "manual",
         evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
         evidence: dict[str, Any] | None = None,
         sentinel: dict[str, Any] | None = None,
         serenity: dict[str, Any] | None = None,
@@ -551,6 +552,11 @@ class TargetPoolStore(CandidatePoolStore):
             "source": source,
             "evidence": {**existing_evidence, **incoming_evidence},
             "evidence_ids": merged_evidence_ids,
+            "current_long_evidence_ids": (
+                list(dict.fromkeys(current_long_evidence_ids))
+                if current_long_evidence_ids is not None
+                else existing.get("current_long_evidence_ids") or []
+            ),
             "sentinel": {**(existing.get("sentinel") or {}), **(sentinel or {})},
             "serenity": {**(existing.get("serenity") or {}), **(serenity or {})},
             "execution": {**(existing.get("execution") or {}), **execution},

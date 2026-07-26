@@ -4,12 +4,18 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from datetime import datetime
+from fcntl import LOCK_EX, LOCK_SH, LOCK_UN, flock
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from app.config import PROJECT_ROOT
 from app.services.quant_lifecycle import TargetPoolStore
+from app.utils.a_share_codes import validate_a_share_code
+
+_LEDGER_PROCESS_LOCK = RLock()
 
 
 def default_evidence_ledger_path() -> Path:
@@ -25,19 +31,6 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _is_a_share_code(value: Any) -> bool:
-    text = str(value or "").strip()
-    if len(text) != 6 or not text.isdigit():
-        return False
-    return text.startswith((
-        "000", "001", "002", "003",
-        "300", "301", "302",
-        "600", "601", "603", "605", "688", "689",
-        "430", "830", "831", "832", "833", "834", "835", "836", "837", "838", "839",
-        "870", "871", "872", "873", "874", "875", "876", "877", "878", "879",
-    ))
-
-
 def _stable_id(payload: dict[str, Any]) -> str:
     identity = {
         "type": payload.get("type", ""),
@@ -51,29 +44,61 @@ def _stable_id(payload: dict[str, Any]) -> str:
     return f"ev_{digest[:20]}"
 
 
+def _long_logical_id(payload: dict[str, Any]) -> str:
+    identity = {
+        "type": payload.get("type", ""),
+        "code": payload.get("code", ""),
+        "source_id": payload.get("source_id", ""),
+    }
+    digest = hashlib.sha1(
+        json.dumps(identity, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    return f"ev_long_{digest[:20]}"
+
+
+def _long_semantic_revision(thesis: dict[str, Any]) -> str:
+    semantic_payload = {
+        "core_thesis": thesis.get("core_thesis", ""),
+        "quality_score": thesis.get("quality_score", 0),
+        "confidence": thesis.get("confidence", ""),
+        "thesis_status": thesis.get("thesis_status", ""),
+        "verification_status": thesis.get("verification_status", ""),
+        "missing_verification": thesis.get("missing_verification") or [],
+        "valuation_anchor": thesis.get("valuation_anchor") or {},
+        "assumptions": thesis.get("assumptions") or [],
+        "red_lines": thesis.get("red_lines") or [],
+        "financial_evidence": thesis.get("financial_evidence") or {},
+        "quote_evidence": thesis.get("quote_evidence") or {},
+    }
+    digest = hashlib.sha1(
+        json.dumps(
+            semantic_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return f"rev_{digest[:20]}"
+
+
 class EvidenceLedgerStore:
     """Append-only JSONL ledger with deterministic evidence IDs."""
 
     def __init__(self, path: str | Path | None = None):
         self.path = Path(path) if path is not None else default_evidence_ledger_path()
 
-    def load_all(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            return []
-        records: list[dict[str, Any]] = []
-        for line in self.path.read_text(encoding="utf-8").splitlines():
-            if not line.strip():
-                continue
+    @contextmanager
+    def _store_lock(self, *, exclusive: bool):
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with _LEDGER_PROCESS_LOCK, lock_path.open("a+", encoding="utf-8") as lock_file:
+            flock(lock_file.fileno(), LOCK_EX if exclusive else LOCK_SH)
             try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(payload, dict):
-                records.append(payload)
-        return records
+                yield
+            finally:
+                flock(lock_file.fileno(), LOCK_UN)
 
-    def read_with_diagnostics(self) -> dict[str, Any]:
-        """Read every JSONL row and report malformed history without skipping it."""
+    def _read_with_diagnostics_unlocked(self) -> dict[str, Any]:
         if not self.path.exists():
             return {"ok": True, "records": [], "errors": []}
         try:
@@ -124,21 +149,39 @@ class EvidenceLedgerStore:
             records.append(record)
         return {"ok": not errors, "records": records, "errors": errors}
 
+    def load_all(self) -> list[dict[str, Any]]:
+        with self._store_lock(exclusive=False):
+            return self._read_with_diagnostics_unlocked()["records"]
+
+    def read_with_diagnostics(self) -> dict[str, Any]:
+        """Read every JSONL row and report malformed history without skipping it."""
+        with self._store_lock(exclusive=False):
+            return self._read_with_diagnostics_unlocked()
+
     def append_many(self, evidence: list[dict[str, Any]]) -> int:
-        existing = {item.get("evidence_id") for item in self.load_all()}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        written = 0
-        with self.path.open("a", encoding="utf-8") as fh:
-            for item in evidence:
-                record = dict(item)
-                record.setdefault("created_at", _now())
-                record["evidence_id"] = record.get("evidence_id") or _stable_id(record)
-                if record["evidence_id"] in existing:
-                    continue
-                fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-                existing.add(record["evidence_id"])
-                written += 1
-        return written
+        with self._store_lock(exclusive=True):
+            diagnostics = self._read_with_diagnostics_unlocked()
+            if not diagnostics["ok"]:
+                raise ValueError("evidence ledger contains invalid history")
+            existing = {
+                item.get("evidence_id")
+                for item in diagnostics["records"]
+            }
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            written = 0
+            with self.path.open("a", encoding="utf-8") as fh:
+                for item in evidence:
+                    record = dict(item)
+                    record.setdefault("created_at", _now())
+                    record["evidence_id"] = record.get("evidence_id") or _stable_id(record)
+                    if record["evidence_id"] in existing:
+                        continue
+                    fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
+                    existing.add(record["evidence_id"])
+                    written += 1
+                fh.flush()
+                os.fsync(fh.fileno())
+            return written
 
 
 def build_sentinel_evidence(package: dict[str, Any]) -> list[dict[str, Any]]:
@@ -170,9 +213,9 @@ def build_sentinel_evidence(package: dict[str, Any]) -> list[dict[str, Any]]:
             "summary": f"标的提及 {code}: {item.get('count', 0)} 条",
             "symbol_count": item.get("count", 0),
             "source": "sentinel",
-            "valid_a_share": _is_a_share_code(code),
+            "valid_a_share": validate_a_share_code(code),
             "enters_strategy": False,
-            "enters_target_pool": _is_a_share_code(code),
+            "enters_target_pool": validate_a_share_code(code),
         })
 
     for item in package.get("risk_events") or []:
@@ -205,9 +248,9 @@ def build_sentinel_evidence(package: dict[str, Any]) -> list[dict[str, Any]]:
                 "verify_next": candidate.get("verify_next", ""),
                 "learning_report_path": dive.get("learning_report_path", ""),
                 "source": "sentinel_serenity",
-                "valid_a_share": _is_a_share_code(code),
+                "valid_a_share": validate_a_share_code(code),
                 "enters_strategy": False,
-                "enters_target_pool": _is_a_share_code(code),
+                "enters_target_pool": validate_a_share_code(code),
             })
 
     for record in records:
@@ -236,8 +279,9 @@ def build_long_horizon_evidence(
         "source_report_path": source_report_path or str(thesis.get("source_report_path") or ""),
         "data_cutoff_date": data_cutoff_date or str(thesis.get("data_cutoff_date") or ""),
         "enters_strategy": False,
-        "enters_target_pool": bool(_is_a_share_code(symbol)),
+        "enters_target_pool": validate_a_share_code(symbol),
     }
+    semantic_revision = _long_semantic_revision(thesis)
     records: list[dict[str, Any]] = [
         {
             **common,
@@ -278,7 +322,10 @@ def build_long_horizon_evidence(
         })
 
     for record in records:
-        record["evidence_id"] = _stable_id(record)
+        logical_id = _long_logical_id(record)
+        record["logical_evidence_id"] = logical_id
+        record["semantic_revision"] = semantic_revision
+        record["evidence_id"] = f"{logical_id}_{semantic_revision}"
     return records
 
 
