@@ -5,7 +5,11 @@ from threading import Barrier
 
 import pytest
 
-from app.services.long_thesis import LongThesisStore, evaluate_thesis_status
+from app.services.long_thesis import (
+    LongThesisStore,
+    LongThesisStoreInvalid,
+    evaluate_thesis_status,
+)
 
 
 def _sample_thesis():
@@ -166,3 +170,15 @@ def test_long_thesis_strict_load_rejects_corrupted_store_shapes(
     assert callable(strict_load)
     with pytest.raises(RuntimeError, match="long_thesis_store_invalid"):
         strict_load()
+
+
+def test_long_thesis_strict_load_wraps_invalid_utf8(tmp_path):
+    path = tmp_path / "long_thesis.json"
+    path.write_bytes(b"\xff\xfe\xfa")
+    store = LongThesisStore(path)
+
+    with pytest.raises(
+        LongThesisStoreInvalid,
+        match="long_thesis_store_invalid",
+    ):
+        store.load_strict()

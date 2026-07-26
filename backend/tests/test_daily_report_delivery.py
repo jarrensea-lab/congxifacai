@@ -24,6 +24,32 @@ class _OfflineScoreSource:
         return []
 
 
+def _ordinary_target_write(
+    target_path,
+    lock_path,
+    journal_path,
+    rendezvous,
+    writer_finished,
+):
+    from app.services.quant_lifecycle import TargetPoolStore
+
+    target_store = TargetPoolStore(
+        target_path,
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    try:
+        rendezvous.wait(timeout=5)
+        target_store.upsert_target(
+            code="000001",
+            name="普通写入",
+            status="watching",
+            source="manual",
+        )
+    finally:
+        writer_finished.set()
+
+
 def _complete_score_snapshot(code, name, *, price=3.2):
     return {
         "code": code,
@@ -2171,10 +2197,18 @@ async def test_build_target_scores_default_long_thesis_store_uses_env_path(
     assert received_theses[0]["quality_score"] == 77
 
 
+@pytest.mark.parametrize(
+    "corrupt_bytes",
+    [
+        b"{broken",
+        b"\xff\xfe\xfa",
+    ],
+)
 @pytest.mark.asyncio
 async def test_build_target_scores_fails_closed_when_long_thesis_store_is_corrupted(
     monkeypatch,
     tmp_path,
+    corrupt_bytes,
 ):
     from app.services.long_thesis import LongThesisStore
     from app.services.quant_lifecycle import TargetPoolStore
@@ -2210,7 +2244,7 @@ async def test_build_target_scores_fails_closed_when_long_thesis_store_is_corrup
     )
     before = target_store.path.read_bytes()
     thesis_path = tmp_path / "long_thesis.json"
-    thesis_path.write_text("{broken", encoding="utf-8")
+    thesis_path.write_bytes(corrupt_bytes)
     thesis_store = LongThesisStore(
         thesis_path,
         transaction_lock_path=lock_path,
@@ -2504,6 +2538,104 @@ async def test_exclusive_materializer_waits_for_daily_scoring_guard(
     assert current["current_long_evidence_ids"] == [
         "long-thesis:002123:v2"
     ]
+
+
+@pytest.mark.asyncio
+async def test_ordinary_target_writer_waits_and_is_not_lost_during_scoring(
+    monkeypatch,
+    tmp_path,
+):
+    from multiprocessing import get_context
+
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from app.services.target_scoring import score_target as real_score_target
+    from scripts.daily_report import build_target_scores_for_report
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store = LongThesisStore(
+        tmp_path / "long_thesis.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    thesis_store.upsert({
+        "symbol": "002123",
+        "name": "池锁一致性测试",
+        "quality_score": 88,
+        "thesis_status": "healthy",
+        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "status": "clear"}],
+    })
+    target_store.upsert_target(
+        code="002123",
+        name="池锁一致性测试",
+        status="long_watch",
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    process_context = get_context("spawn")
+    rendezvous = process_context.Barrier(2)
+    writer_finished = process_context.Event()
+    finished_during_score = []
+
+    def synchronized_score(snapshot, **kwargs):
+        rendezvous.wait(timeout=5)
+        finished_during_score.append(writer_finished.wait(timeout=0.5))
+        return real_score_target(snapshot, **kwargs)
+
+    worker = process_context.Process(
+        target=_ordinary_target_write,
+        args=(
+            target_store.path,
+            lock_path,
+            journal_path,
+            rendezvous,
+            writer_finished,
+        ),
+    )
+    worker.start()
+
+    async def fake_snapshot(code, **kwargs):
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+    monkeypatch.setattr(
+        "app.services.target_scoring.score_target",
+        synchronized_score,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+    assert await asyncio.to_thread(writer_finished.wait, 5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert worker.exitcode == 0
+    assert finished_during_score == [False]
+    assert scores[0]["code"] == "002123"
+    assert target_store.get("000001")["name"] == "普通写入"
+    assert target_store.get("002123")["scoring_decision"]["action"] == (
+        scores[0]["action"]
+    )
 
 
 @pytest.mark.asyncio

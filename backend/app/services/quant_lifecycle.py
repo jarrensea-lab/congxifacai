@@ -286,6 +286,16 @@ class CandidatePoolStore:
             payload["items"] = {}
         return payload
 
+    @contextmanager
+    def exclusive_pool_guard(self):
+        """Hold the target-pool write lock across a caller read-modify-write."""
+        with writer_transaction_guard(
+            self.transaction_lock_path,
+            self.transaction_journal_path,
+        ):
+            with _pool_lock(self.path):
+                yield
+
     @_locked_store_mutation
     def save(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = _now()

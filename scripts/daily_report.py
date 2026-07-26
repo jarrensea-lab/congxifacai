@@ -2060,6 +2060,8 @@ async def build_target_scores_for_report(
     long_thesis_store=None,
 ) -> list[dict]:
     """Score current target-pool items with normalized data snapshots."""
+    from contextlib import nullcontext
+
     from app.ai.serenity_financial_evidence import fetch_financial_evidence
     from app.data_sources.akshare_market import AKShareMarketClient
     from app.data_sources.akshare_news import AKShareNewsClient
@@ -2161,9 +2163,13 @@ async def build_target_scores_for_report(
         lock_path, journal_path = configured_guards[0]
         scoring_guard = writer_transaction_guard(lock_path, journal_path)
     else:
-        from contextlib import nullcontext
-
         scoring_guard = nullcontext()
+    exclusive_pool_guard = getattr(store, "exclusive_pool_guard", None)
+    pool_guard = (
+        exclusive_pool_guard()
+        if callable(exclusive_pool_guard)
+        else nullcontext()
+    )
 
     def source_status_for(snapshot: dict) -> dict:
         return {
@@ -2221,7 +2227,7 @@ async def build_target_scores_for_report(
 
     scores: list[dict] = []
     target_writes: list[dict] = []
-    with scoring_guard:
+    with scoring_guard, pool_guard:
         current_payload = store.load()
         current_items = current_payload.get("items", {})
         try:

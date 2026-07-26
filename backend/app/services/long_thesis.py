@@ -177,7 +177,7 @@ class LongThesisStore:
             return {"version": 1, "updated_at": "", "items": {}}
         try:
             payload = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise LongThesisStoreInvalid(
                 f"{type(exc).__name__}: {exc}"
             ) from exc
