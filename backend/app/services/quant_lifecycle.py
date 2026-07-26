@@ -23,6 +23,7 @@ from app.services.strategy_profile import (
     get_strategy_profile,
 )
 from app.services.long_horizon_transaction import (
+    transaction_journal_path_for_store,
     transaction_lock_path_for_store,
     writer_transaction_guard,
 )
@@ -207,7 +208,15 @@ def _locked_store_mutation(method):
             "transaction_lock_path",
             transaction_lock_path_for_store(self.path),
         )
-        with writer_transaction_guard(transaction_lock_path):
+        transaction_journal_path = getattr(
+            self,
+            "transaction_journal_path",
+            transaction_journal_path_for_store(self.path),
+        )
+        with writer_transaction_guard(
+            transaction_lock_path,
+            transaction_journal_path,
+        ):
             with _pool_lock(self.path):
                 return method(self, *args, **kwargs)
 
@@ -248,11 +257,16 @@ class CandidatePoolStore:
         *,
         execution_ledger_path: str | Path | None = None,
         transaction_lock_path: str | Path | None = None,
+        transaction_journal_path: str | Path | None = None,
     ):
         self.path = Path(path) if path is not None else default_candidate_pool_path()
         self.transaction_lock_path = transaction_lock_path_for_store(
             self.path,
             transaction_lock_path,
+        )
+        self.transaction_journal_path = transaction_journal_path_for_store(
+            self.path,
+            transaction_journal_path,
         )
         if execution_ledger_path is not None:
             self.execution_ledger_path = Path(execution_ledger_path)
@@ -613,11 +627,16 @@ class PositionWatchStore:
         path: str | Path | None = None,
         *,
         transaction_lock_path: str | Path | None = None,
+        transaction_journal_path: str | Path | None = None,
     ):
         self.path = Path(path) if path is not None else default_position_watch_path()
         self.transaction_lock_path = transaction_lock_path_for_store(
             self.path,
             transaction_lock_path,
+        )
+        self.transaction_journal_path = transaction_journal_path_for_store(
+            self.path,
+            transaction_journal_path,
         )
 
     def load(self) -> dict[str, Any]:

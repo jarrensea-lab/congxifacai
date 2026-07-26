@@ -315,6 +315,7 @@ def materialize_serenity_long_horizon(
     )
     for store in (thesis_store, ledger, target_pool):
         store.transaction_lock_path = transaction.lock_path
+        store.transaction_journal_path = transaction.journal_path
 
     with transaction.locked():
         try:

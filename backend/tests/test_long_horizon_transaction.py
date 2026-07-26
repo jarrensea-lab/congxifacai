@@ -98,6 +98,56 @@ def _transaction(
     return transaction, thesis_path, ledger_path, target_path
 
 
+def _transaction_state_path(transaction: LongHorizonBatchTransaction) -> Path:
+    return Path(f"{transaction.lock_path}.state")
+
+
+def _store_bytes(paths):
+    return {
+        path: path.read_bytes() if path.exists() else None
+        for path in paths
+    }
+
+
+def _ordinary_store_writes(
+    thesis_path: Path,
+    ledger_path: Path,
+    target_path: Path,
+    suffix: str,
+):
+    ledger = EvidenceLedgerStore(ledger_path)
+    thesis = LongThesisStore(thesis_path)
+    target = TargetPoolStore(target_path)
+    return [
+        lambda: ledger.append_many([{
+            "evidence_id": f"ev_external_{suffix}",
+            "type": "test",
+            "summary": "ordinary write after crash window",
+        }]),
+        lambda: thesis.upsert({
+            "symbol": "688001",
+            "name": f"外部 thesis {suffix}",
+            "core_thesis": "ordinary write after crash window",
+        }),
+        lambda: target.upsert_target(
+            code="920001",
+            name=f"外部 target {suffix}",
+            status="long_research",
+            source="long_horizon",
+        ),
+    ]
+
+
+def _assert_writes_recovery_required(writes, paths, before):
+    for write in writes:
+        with pytest.raises(
+            RuntimeError,
+            match="long_horizon_recovery_required",
+        ):
+            write()
+        assert _store_bytes(paths) == before
+
+
 def test_transaction_requires_explicit_lock_for_stores_in_different_directories(
     tmp_path,
 ):
@@ -430,3 +480,130 @@ def test_corrupted_pending_journal_keeps_ordinary_writers_fail_closed(
             "name": "仍需恢复",
             "core_thesis": "must remain blocked",
         })
+
+
+def test_legacy_empty_lock_with_valid_journal_blocks_all_writers(tmp_path):
+    transaction, thesis_path, ledger_path, target_path = _transaction(tmp_path)
+    with transaction.locked():
+        transaction.begin()
+        EvidenceLedgerStore(ledger_path).append_many([{
+            "evidence_id": "ev_legacy_partial",
+            "type": "test",
+            "summary": "must be restored",
+        }])
+    transaction.lock_path.write_text("", encoding="utf-8")
+    _transaction_state_path(transaction).unlink(missing_ok=True)
+    paths = (thesis_path, ledger_path, target_path)
+    before = _store_bytes(paths)
+    writes = _ordinary_store_writes(
+        thesis_path,
+        ledger_path,
+        target_path,
+        "legacy",
+    )
+
+    _assert_writes_recovery_required(writes, paths, before)
+
+    with transaction.locked():
+        assert transaction.recover_pending()["status"] == "recovered"
+    for write in writes:
+        write()
+    after_retry = _store_bytes(paths)
+    with transaction.locked():
+        assert transaction.recover_pending() is None
+    assert _store_bytes(paths) == after_retry
+
+
+@pytest.mark.parametrize("window", ["state_temp", "journal_before_replace"])
+def test_pre_journal_crash_windows_block_all_writers_until_cleanup(
+    tmp_path,
+    window,
+):
+    transaction, thesis_path, ledger_path, target_path = _transaction(tmp_path)
+    state_path = _transaction_state_path(transaction)
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    if window == "state_temp":
+        state_temp = state_path.with_name(
+            f".{state_path.name}.fault.tmp"
+        )
+        state_temp.write_text('{"status":"preparing"', encoding="utf-8")
+    else:
+        state_path.write_text(
+            json.dumps({
+                "version": 1,
+                "batch_id": "batch-before-journal-replace",
+                "status": "preparing",
+                "journal_path": str(transaction.journal_path.resolve()),
+            }),
+            encoding="utf-8",
+        )
+        journal_temp = transaction.journal_path.with_name(
+            f".{transaction.journal_path.name}.fault.tmp"
+        )
+        journal_temp.write_text("partial journal", encoding="utf-8")
+    paths = (thesis_path, ledger_path, target_path)
+    before = _store_bytes(paths)
+    writes = _ordinary_store_writes(
+        thesis_path,
+        ledger_path,
+        target_path,
+        window,
+    )
+
+    _assert_writes_recovery_required(writes, paths, before)
+
+    with transaction.locked():
+        cleaned = transaction.recover_pending()
+    assert cleaned["status"] == "recovery_state_cleared"
+    for write in writes:
+        write()
+
+
+def test_journal_unlinked_before_state_clean_blocks_writers_until_cleanup(
+    tmp_path,
+):
+    transaction, thesis_path, ledger_path, target_path = _transaction(tmp_path)
+    with transaction.locked():
+        transaction.begin()
+        EvidenceLedgerStore(ledger_path).append_many([{
+            "evidence_id": "ev_committed_before_cleanup",
+            "type": "test",
+            "summary": "must remain after cleanup",
+        }])
+    transaction.journal_path.unlink()
+    transaction.lock_path.write_text("", encoding="utf-8")
+    state_path = _transaction_state_path(transaction)
+    state_path.write_text(
+        json.dumps({
+            "version": 1,
+            "batch_id": "batch-unlinked-before-clean",
+            "status": "committing",
+            "journal_path": str(transaction.journal_path.resolve()),
+        }),
+        encoding="utf-8",
+    )
+    paths = (thesis_path, ledger_path, target_path)
+    before = _store_bytes(paths)
+    writes = _ordinary_store_writes(
+        thesis_path,
+        ledger_path,
+        target_path,
+        "unlink_clear",
+    )
+
+    _assert_writes_recovery_required(writes, paths, before)
+
+    with transaction.locked():
+        cleaned = transaction.recover_pending()
+    assert cleaned["status"] == "recovery_state_cleared"
+    for write in writes:
+        write()
+    evidence_ids = {
+        item["evidence_id"] for item in EvidenceLedgerStore(
+            ledger_path
+        ).load_all()
+    }
+    assert evidence_ids == {
+        "ev_committed_before_cleanup",
+        "ev_external_unlink_clear",
+    }

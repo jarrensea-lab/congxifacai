@@ -62,6 +62,22 @@ def transaction_lock_path_for_store(
     return Path(store_path).parent / ".long_horizon_transaction.lock"
 
 
+def transaction_journal_path_for_store(
+    store_path: str | Path,
+    explicit_path: str | Path | None = None,
+) -> Path:
+    configured = explicit_path or os.environ.get(
+        "CONGXI_LONG_HORIZON_TRANSACTION_PATH"
+    )
+    if configured:
+        return Path(configured)
+    return Path(store_path).parent / "long_horizon_transaction.json"
+
+
+def transaction_state_path(lock_path: str | Path) -> Path:
+    return Path(f"{Path(lock_path)}.state")
+
+
 @contextmanager
 def transaction_guard(
     lock_path: str | Path,
@@ -92,7 +108,6 @@ def transaction_guard(
         held[key] = {
             "mode": "exclusive" if exclusive else "shared",
             "depth": 1,
-            "file": lock_file,
         }
         try:
             yield
@@ -106,62 +121,26 @@ def _current_transaction_context(lock_path: str | Path) -> dict | None:
     return held.get(str(Path(lock_path).resolve()))
 
 
-def _read_lock_marker(lock_path: str | Path) -> dict | None:
-    current = _current_transaction_context(lock_path)
-    if current is None:
-        raise RuntimeError("transaction guard required for marker read")
-    lock_file = current["file"]
-    lock_file.seek(0)
-    raw = lock_file.read().strip()
-    if not raw:
-        return None
-    try:
-        marker = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError("transaction lock marker unreadable") from exc
-    if not isinstance(marker, dict) or not str(marker.get("status") or ""):
-        raise RuntimeError("transaction lock marker invalid")
-    return marker
-
-
-def _write_lock_marker(
-    lock_path: str | Path,
-    payload: dict,
-) -> None:
-    current = _current_transaction_context(lock_path)
-    if current is None or current["mode"] != "exclusive":
-        raise RuntimeError("exclusive transaction guard required for marker write")
-    lock_file = current["file"]
-    lock_file.seek(0)
-    lock_file.truncate(0)
-    lock_file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
-    lock_file.flush()
-    os.fsync(lock_file.fileno())
-    _fsync_directory(Path(lock_path).resolve().parent)
-
-
-def _clear_lock_marker(lock_path: str | Path) -> None:
-    current = _current_transaction_context(lock_path)
-    if current is None or current["mode"] != "exclusive":
-        raise RuntimeError("exclusive transaction guard required for marker clear")
-    lock_file = current["file"]
-    lock_file.seek(0)
-    lock_file.truncate(0)
-    lock_file.flush()
-    os.fsync(lock_file.fileno())
-
-
 @contextmanager
-def writer_transaction_guard(lock_path: str | Path) -> Iterator[None]:
+def writer_transaction_guard(
+    lock_path: str | Path,
+    journal_path: str | Path,
+) -> Iterator[None]:
     """Hold a shared guard and reject writes while durable recovery is pending."""
     with transaction_guard(lock_path, exclusive=False):
         current = _current_transaction_context(lock_path)
         if current is not None and current["mode"] != "exclusive":
+            state_path = transaction_state_path(lock_path)
             try:
-                marker = _read_lock_marker(lock_path)
+                state = _read_transaction_state(state_path, journal_path)
             except RuntimeError as exc:
                 raise LongHorizonRecoveryRequired() from exc
-            if marker is not None:
+            if (
+                Path(journal_path).exists()
+                or _transaction_temp_paths(state_path)
+                or _transaction_temp_paths(Path(journal_path))
+                or (state is not None and state["status"] != "clean")
+            ):
                 raise LongHorizonRecoveryRequired()
         yield
 
@@ -198,6 +177,83 @@ def _atomic_write(path: Path, content: bytes) -> None:
         _fsync_directory(path.parent)
     finally:
         temp_path.unlink(missing_ok=True)
+
+
+def _transaction_temp_paths(path: Path) -> list[Path]:
+    return sorted(path.parent.glob(f".{path.name}.*.tmp"))
+
+
+def _cleanup_transaction_temps(*paths: Path) -> None:
+    parents: set[Path] = set()
+    for path in paths:
+        for temp_path in _transaction_temp_paths(path):
+            try:
+                temp_path.unlink()
+            except FileNotFoundError:
+                continue
+            parents.add(temp_path.parent)
+    for parent in parents:
+        _fsync_directory(parent)
+
+
+def _read_transaction_state(
+    state_path: Path,
+    journal_path: str | Path,
+) -> dict | None:
+    if not state_path.exists():
+        return None
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            f"transaction state unreadable: {type(exc).__name__}: {exc}"
+        ) from exc
+    valid_statuses = {
+        "clean",
+        "preparing",
+        "pending",
+        "committing",
+        "recovered",
+        "recovery_required",
+    }
+    if (
+        not isinstance(state, dict)
+        or state.get("version") != 1
+        or state.get("status") not in valid_statuses
+    ):
+        raise RuntimeError("transaction state schema invalid")
+    raw_journal_path = Path(str(state.get("journal_path") or ""))
+    if (
+        not raw_journal_path.is_absolute()
+        or raw_journal_path.resolve() != Path(journal_path).resolve()
+    ):
+        raise RuntimeError("transaction state journal path mismatch")
+    return state
+
+
+def _write_transaction_state(
+    state_path: Path,
+    journal_path: Path,
+    *,
+    status: str,
+    batch_id: str = "",
+) -> None:
+    _atomic_write(
+        state_path,
+        (
+            json.dumps(
+                {
+                    "version": 1,
+                    "batch_id": batch_id,
+                    "status": status,
+                    "journal_path": str(journal_path.resolve()),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8"),
+    )
 
 
 def _durable_unlink(path: Path) -> None:
@@ -242,6 +298,7 @@ class LongHorizonBatchTransaction:
             default_lock_source,
             configured_lock_path,
         )
+        self.state_path = transaction_state_path(self.lock_path)
         self.max_snapshot_bytes = _max_snapshot_bytes(max_snapshot_bytes)
 
     @contextmanager
@@ -252,7 +309,19 @@ class LongHorizonBatchTransaction:
     def begin(self) -> str:
         if self.journal_path.exists():
             raise RuntimeError("pending transaction journal must be recovered first")
-        if _read_lock_marker(self.lock_path) is not None:
+        if (
+            _transaction_temp_paths(self.state_path)
+            or _transaction_temp_paths(self.journal_path)
+        ):
+            raise LongHorizonRecoveryRequired()
+        try:
+            state = _read_transaction_state(
+                self.state_path,
+                self.journal_path,
+            )
+        except RuntimeError as exc:
+            raise LongHorizonRecoveryRequired() from exc
+        if state is not None and state["status"] != "clean":
             raise LongHorizonRecoveryRequired()
         batch_id = f"lh_{uuid.uuid4().hex}"
         snapshots = []
@@ -289,52 +358,59 @@ class LongHorizonBatchTransaction:
             "created_at": datetime.now().astimezone().isoformat(),
             "stores": snapshots,
         }
-        marker = {
-            "version": 1,
-            "batch_id": batch_id,
-            "status": "preparing",
-            "journal_path": str(self.journal_path.resolve()),
-        }
-        _write_lock_marker(self.lock_path, marker)
-        try:
-            _atomic_write(
-                self.journal_path,
-                (
-                    json.dumps(journal, ensure_ascii=False, indent=2)
-                    + "\n"
-                ).encode("utf-8"),
-            )
-        except Exception:
-            if not self.journal_path.exists():
-                _clear_lock_marker(self.lock_path)
-            raise
-        _write_lock_marker(
-            self.lock_path,
-            {**marker, "status": "pending"},
+        _write_transaction_state(
+            self.state_path,
+            self.journal_path,
+            status="preparing",
+            batch_id=batch_id,
+        )
+        _atomic_write(
+            self.journal_path,
+            (
+                json.dumps(journal, ensure_ascii=False, indent=2)
+                + "\n"
+            ).encode("utf-8"),
+        )
+        _write_transaction_state(
+            self.state_path,
+            self.journal_path,
+            status="pending",
+            batch_id=batch_id,
         )
         return batch_id
 
     def recover_pending(self) -> dict[str, object] | None:
-        marker = _read_lock_marker(self.lock_path)
-        if marker is not None:
-            marker_journal = Path(
-                str(marker.get("journal_path") or "")
+        state = _read_transaction_state(
+            self.state_path,
+            self.journal_path,
+        )
+        state_status = str((state or {}).get("status") or "")
+        state_batch_id = str((state or {}).get("batch_id") or "")
+        if not self.journal_path.exists():
+            has_temps = bool(
+                _transaction_temp_paths(self.state_path)
+                or _transaction_temp_paths(self.journal_path)
             )
             if (
-                not marker_journal.is_absolute()
-                or marker_journal.resolve() != self.journal_path.resolve()
+                state_status in {"preparing", "committing", "recovered"}
+                or (state_status in {"", "clean"} and has_temps)
             ):
-                raise RuntimeError("transaction lock marker path mismatch")
-        if not self.journal_path.exists():
-            marker_status = str((marker or {}).get("status") or "")
-            if marker_status in {"preparing", "committing", "recovered"}:
-                _clear_lock_marker(self.lock_path)
+                _cleanup_transaction_temps(
+                    self.state_path,
+                    self.journal_path,
+                )
+                _write_transaction_state(
+                    self.state_path,
+                    self.journal_path,
+                    status="clean",
+                    batch_id=state_batch_id,
+                )
                 return {
-                    "status": "recovery_marker_cleared",
-                    "batch_id": str((marker or {}).get("batch_id") or ""),
+                    "status": "recovery_state_cleared",
+                    "batch_id": state_batch_id,
                     "restored_stores": [],
                 }
-            if marker is not None:
+            if state_status not in {"", "clean"}:
                 raise RuntimeError(
                     "transaction journal missing while recovery required"
                 )
@@ -416,20 +492,27 @@ class LongHorizonBatchTransaction:
                 _durable_unlink(store_path)
             restored_names.append(name)
 
-        _write_lock_marker(
-            self.lock_path,
-            {
-                "version": 1,
-                "batch_id": str(journal.get("batch_id") or ""),
-                "status": "recovered",
-                "journal_path": str(self.journal_path.resolve()),
-            },
+        batch_id = str(journal.get("batch_id") or "")
+        _write_transaction_state(
+            self.state_path,
+            self.journal_path,
+            status="recovered",
+            batch_id=batch_id,
         )
         _durable_unlink(self.journal_path)
-        _clear_lock_marker(self.lock_path)
+        _cleanup_transaction_temps(
+            self.state_path,
+            self.journal_path,
+        )
+        _write_transaction_state(
+            self.state_path,
+            self.journal_path,
+            status="clean",
+            batch_id=batch_id,
+        )
         return {
             "status": "recovered",
-            "batch_id": str(journal.get("batch_id") or ""),
+            "batch_id": batch_id,
             "restored_stores": restored_names,
         }
 
@@ -444,16 +527,25 @@ class LongHorizonBatchTransaction:
         return {**recovered, "status": "rolled_back"}
 
     def commit(self) -> None:
-        marker = _read_lock_marker(self.lock_path)
-        batch_id = str((marker or {}).get("batch_id") or "")
-        _write_lock_marker(
-            self.lock_path,
-            {
-                "version": 1,
-                "batch_id": batch_id,
-                "status": "committing",
-                "journal_path": str(self.journal_path.resolve()),
-            },
+        state = _read_transaction_state(
+            self.state_path,
+            self.journal_path,
+        )
+        batch_id = str((state or {}).get("batch_id") or "")
+        _write_transaction_state(
+            self.state_path,
+            self.journal_path,
+            status="committing",
+            batch_id=batch_id,
         )
         _durable_unlink(self.journal_path)
-        _clear_lock_marker(self.lock_path)
+        _cleanup_transaction_temps(
+            self.state_path,
+            self.journal_path,
+        )
+        _write_transaction_state(
+            self.state_path,
+            self.journal_path,
+            status="clean",
+            batch_id=batch_id,
+        )

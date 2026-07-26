@@ -14,6 +14,7 @@ from typing import Any
 from app.config import PROJECT_ROOT
 from app.services.quant_lifecycle import TargetPoolStore
 from app.services.long_horizon_transaction import (
+    transaction_journal_path_for_store,
     transaction_lock_path_for_store,
     writer_transaction_guard,
 )
@@ -93,11 +94,16 @@ class EvidenceLedgerStore:
         path: str | Path | None = None,
         *,
         transaction_lock_path: str | Path | None = None,
+        transaction_journal_path: str | Path | None = None,
     ):
         self.path = Path(path) if path is not None else default_evidence_ledger_path()
         self.transaction_lock_path = transaction_lock_path_for_store(
             self.path,
             transaction_lock_path,
+        )
+        self.transaction_journal_path = transaction_journal_path_for_store(
+            self.path,
+            transaction_journal_path,
         )
 
     @contextmanager
@@ -172,7 +178,10 @@ class EvidenceLedgerStore:
             return self._read_with_diagnostics_unlocked()
 
     def append_many(self, evidence: list[dict[str, Any]]) -> int:
-        with writer_transaction_guard(self.transaction_lock_path):
+        with writer_transaction_guard(
+            self.transaction_lock_path,
+            self.transaction_journal_path,
+        ):
             with self._store_lock(exclusive=True):
                 diagnostics = self._read_with_diagnostics_unlocked()
                 if not diagnostics["ok"]:
