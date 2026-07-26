@@ -69,17 +69,21 @@ final class AXClient {
 
     func snapshotForPage(labels: [String]) throws -> AXSnapshotNode {
         let root = try applicationElement()
-        if let navigation = findElement(
+        guard let navigation = findNavigationElement(
             in: root,
-            matchingAny: labels,
-            maxDepth: 8,
+            labels: labels,
+            maxDepth: 10,
             maxNodes: 1_500
-        ) {
-            let summary = summary(of: navigation)
-            try safetyPolicy.assertReadable(path: [summary])
-            try press(navigation)
-            Thread.sleep(forTimeInterval: 0.35)
+        ) else {
+            throw BridgeFailure(
+                "page_navigation_unavailable",
+                "No exact labeled safe page navigation target is available"
+            )
         }
+        let summary = summary(of: navigation)
+        try safetyPolicy.assertReadable(path: [summary])
+        try press(navigation)
+        Thread.sleep(forTimeInterval: 0.35)
         return try snapshot(
             root,
             path: [],
@@ -95,6 +99,122 @@ final class AXClient {
             depth: 0,
             nodeBudget: NodeBudget(remaining: 2_500)
         )
+    }
+
+    private func navigateToWatchlist() throws -> (
+        root: AXUIElement,
+        navigation: AXNodeSummary
+    ) {
+        let root = try applicationElement()
+        guard let navigation = findNavigationElement(
+            in: root,
+            labels: ["自选股", "自选"],
+            maxDepth: 10,
+            maxNodes: 1_500
+        ) else {
+            throw BridgeFailure(
+                "watchlist_page_unavailable",
+                "The self-selected list navigation target is unavailable"
+            )
+        }
+        let navigationSummary = summary(of: navigation)
+        try safetyPolicy.assertReadable(path: [navigationSummary])
+        try press(navigation)
+        Thread.sleep(forTimeInterval: 0.35)
+        return (root: root, navigation: navigationSummary)
+    }
+
+    private func findSearchField(in root: AXUIElement) -> AXUIElement? {
+        findElement(
+            in: root,
+            maxDepth: 10,
+            maxNodes: 2_000
+        ) { node in
+            let roles = ["AXSearchField", "AXTextField", "AXComboBox"]
+            let labels = ["搜索", "股票", "证券", "代码"]
+            return roles.contains(node.role)
+                && labels.contains(where: node.text.contains)
+        }
+    }
+
+    private func setValue(_ value: String, on element: AXUIElement) throws {
+        var settable = DarwinBoolean(false)
+        guard AXUIElementIsAttributeSettable(
+            element,
+            kAXValueAttribute as CFString,
+            &settable
+        ) == .success, settable.boolValue else {
+            throw BridgeFailure(
+                "ui_action_unavailable",
+                "The safe watchlist search field is not editable"
+            )
+        }
+        guard AXUIElementSetAttributeValue(
+            element,
+            kAXValueAttribute as CFString,
+            value as CFTypeRef
+        ) == .success else {
+            throw BridgeFailure(
+                "ui_action_failed",
+                "The exact stock code could not be entered safely"
+            )
+        }
+    }
+
+    private func actionLabels(for command: BridgeCommand) -> [String] {
+        command == .addWatchlist
+            ? ["添加自选", "加自选"]
+            : ["删除自选", "移除自选", "取消自选"]
+    }
+
+    private func findSafeWatchlistAction(
+        in root: AXUIElement,
+        navigation: AXNodeSummary,
+        command: BridgeCommand,
+        code: String,
+        environment: [String: String]
+    ) throws -> AXUIElement {
+        let labels = actionLabels(for: command)
+        let actions = findElements(
+            in: root,
+            maxDepth: 12,
+            maxNodes: 2_500
+        ) { node in
+            labels.contains(where: node.text.contains)
+                && hasPressableRole(node)
+        }
+        var safeActions: [AXUIElement] = []
+        for action in actions {
+            var context = action
+            for _ in 0 ..< 4 {
+                let contextSnapshot = try snapshot(
+                    context,
+                    path: [],
+                    depth: 0,
+                    nodeBudget: NodeBudget(remaining: 350)
+                )
+                let summaries = [navigation]
+                    + contextSnapshot.flattened.map(\.summary)
+                if YitaojinReader.parseWatchlist(
+                    from: contextSnapshot
+                ).codes.contains(code) {
+                    try safetyPolicy.assertWriteAllowed(
+                        command: command,
+                        code: code,
+                        targetPath: summaries,
+                        environment: environment
+                    )
+                    safeActions.append(action)
+                    break
+                }
+                guard let parent = parent(of: context) else {
+                    break
+                }
+                context = parent
+            }
+        }
+        try safetyPolicy.assertUniqueWriteTarget(count: safeActions.count)
+        return safeActions[0]
     }
 
     private func applicationElement() throws -> AXUIElement {
@@ -140,35 +260,78 @@ final class AXClient {
             .joined()
     }
 
-    private func findElement(
+    private func findNavigationElement(
         in root: AXUIElement,
-        matchingAny labels: [String],
+        labels: [String],
         maxDepth: Int,
         maxNodes: Int
     ) -> AXUIElement? {
-        var remaining = maxNodes
+        findElement(
+            in: root,
+            maxDepth: maxDepth,
+            maxNodes: maxNodes
+        ) { node in
+            let exactTexts = [node.title, node.label]
+                .compactMap { $0 }
+            return exactTexts.contains(where: labels.contains)
+                && hasPressableRole(node)
+        }
+    }
 
-        func visit(_ element: AXUIElement, depth: Int) -> AXUIElement? {
+    private func hasPressableRole(_ node: AXNodeSummary) -> Bool {
+        let pressableRoles = [
+            "AXButton",
+            "AXCheckBox",
+            "AXRadioButton",
+            "AXTab",
+            "AXMenuItem",
+            "AXLink",
+        ]
+        return pressableRoles.contains(node.role)
+    }
+
+    private func findElement(
+        in root: AXUIElement,
+        maxDepth: Int,
+        maxNodes: Int,
+        matching predicate: (AXNodeSummary) -> Bool
+    ) -> AXUIElement? {
+        findElements(
+            in: root,
+            maxDepth: maxDepth,
+            maxNodes: maxNodes,
+            matching: predicate
+        ).first
+    }
+
+    private func findElements(
+        in root: AXUIElement,
+        maxDepth: Int,
+        maxNodes: Int,
+        matching predicate: (AXNodeSummary) -> Bool
+    ) -> [AXUIElement] {
+        var remaining = maxNodes
+        var matches: [AXUIElement] = []
+
+        func visit(_ element: AXUIElement, depth: Int) {
             guard depth <= maxDepth, remaining > 0 else {
-                return nil
+                return
             }
             remaining -= 1
             let node = summary(of: element)
             guard !safetyPolicy.isForbidden(node) else {
-                return nil
+                return
             }
-            if labels.contains(where: node.text.contains) {
-                return element
+            if predicate(node) {
+                matches.append(element)
             }
             for child in children(of: element) {
-                if let match = visit(child, depth: depth + 1) {
-                    return match
-                }
+                visit(child, depth: depth + 1)
             }
-            return nil
         }
 
-        return visit(root, depth: 0)
+        visit(root, depth: 0)
+        return matches
     }
 
     private func press(_ element: AXUIElement) throws {
@@ -248,6 +411,21 @@ final class AXClient {
         return children
     }
 
+    private func parent(of element: AXUIElement) -> AXUIElement? {
+        var rawValue: CFTypeRef?
+        guard
+            AXUIElementCopyAttributeValue(
+                element,
+                kAXParentAttribute as CFString,
+                &rawValue
+            ) == .success,
+            let parent = rawValue
+        else {
+            return nil
+        }
+        return (parent as! AXUIElement)
+    }
+
     private func stringAttribute(
         _ element: AXUIElement,
         _ attribute: String
@@ -270,6 +448,45 @@ final class AXClient {
             return number.stringValue
         }
         return nil
+    }
+}
+
+extension AXClient: WatchlistUiClient {
+    func readWatchlistCodes() throws -> Set<String> {
+        let snapshot = try snapshotForPage(labels: ["自选股", "自选"])
+        return Set(YitaojinReader.parseWatchlist(from: snapshot).codes)
+    }
+
+    func performWatchlistMutation(
+        command: BridgeCommand,
+        code: String,
+        environment: [String: String]
+    ) throws {
+        try safetyPolicy.assertWriteEnabled(
+            command: command,
+            code: code,
+            environment: environment
+        )
+        let page = try navigateToWatchlist()
+        if command == .addWatchlist {
+            guard let searchField = findSearchField(in: page.root) else {
+                throw BridgeFailure(
+                    "watchlist_search_unavailable",
+                    "A labeled Accessibility search field is required"
+                )
+            }
+            try setValue(code, on: searchField)
+            Thread.sleep(forTimeInterval: 0.35)
+        }
+        let action = try findSafeWatchlistAction(
+            in: page.root,
+            navigation: page.navigation,
+            command: command,
+            code: code,
+            environment: environment
+        )
+        try press(action)
+        Thread.sleep(forTimeInterval: 0.35)
     }
 }
 

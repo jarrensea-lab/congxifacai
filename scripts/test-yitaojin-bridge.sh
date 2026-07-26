@@ -15,6 +15,7 @@ swiftc \
   "${source_dir}/SafetyPolicy.swift" \
   "${source_dir}/AXClient.swift" \
   "${source_dir}/YitaojinReader.swift" \
+  "${source_dir}/YitaojinWriter.swift" \
   "${self_test}" \
   -framework AppKit \
   -framework ApplicationServices \

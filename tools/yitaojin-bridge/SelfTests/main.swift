@@ -42,7 +42,49 @@ private extension AXSnapshotNode {
     }
 }
 
+private final class FakeWatchlistUiClient: WatchlistUiClient {
+    var codes: Set<String>
+    var actionCalls: [(BridgeCommand, String)] = []
+    var confirmMutations = true
+
+    init(codes: Set<String>) {
+        self.codes = codes
+    }
+
+    func readWatchlistCodes() throws -> Set<String> {
+        codes
+    }
+
+    func performWatchlistMutation(
+        command: BridgeCommand,
+        code: String,
+        environment: [String: String]
+    ) throws {
+        actionCalls.append((command, code))
+        guard confirmMutations else {
+            return
+        }
+        if command == .addWatchlist {
+            codes.insert(code)
+        } else if command == .removeWatchlist {
+            codes.remove(code)
+        }
+    }
+}
+
 do {
+    expect(
+        Set(BridgeCommand.allCases.map(\.rawValue)) == [
+            "probe",
+            "read_account",
+            "read_watchlist",
+            "read_quotes",
+            "add_watchlist",
+            "remove_watchlist",
+        ],
+        "bridge command allowlist changed"
+    )
+
     let request = try BridgeRequest.decode(
         Data(
             """
@@ -69,6 +111,71 @@ do {
                 """.utf8
             )
         )
+    }
+
+    let addRequest = try BridgeRequest.decode(
+        Data(
+            """
+            {
+              "schemaVersion": 1,
+              "command": "add_watchlist",
+              "payload": {"code": "600000"}
+            }
+            """.utf8
+        )
+    )
+    expect(addRequest.command == .addWatchlist, "add_watchlist did not decode")
+    let addCode = try addRequest.validatedSingleCode()
+    expect(
+        addCode == "600000",
+        "add_watchlist code was not validated"
+    )
+
+    let removeRequest = try BridgeRequest.decode(
+        Data(
+            """
+            {
+              "schemaVersion": 1,
+              "command": "remove_watchlist",
+              "payload": {"code": "000001"}
+            }
+            """.utf8
+        )
+    )
+    expect(
+        removeRequest.command == .removeWatchlist,
+        "remove_watchlist did not decode"
+    )
+    let removeCode = try removeRequest.validatedSingleCode()
+    expect(
+        removeCode == "000001",
+        "remove_watchlist code was not validated"
+    )
+
+    let missingWriteCode = try BridgeRequest.decode(
+        Data(
+            """
+            {"schemaVersion":1,"command":"add_watchlist","payload":{}}
+            """.utf8
+        )
+    )
+    expectBridgeFailure("watchlist write accepted a missing code") {
+        _ = try missingWriteCode.validatedSingleCode()
+    }
+
+    let invalidWriteCode = try BridgeRequest.decode(
+        Data(
+            """
+            {
+              "schemaVersion":1,
+              "command":"remove_watchlist",
+              "payload":{"code":"60000A"}
+            }
+            """.utf8
+        )
+    )
+    expectBridgeFailure("watchlist write accepted an invalid code") {
+        _ = try invalidWriteCode.validatedSingleCode()
     }
 
     let codes = (0 ..< 33).map { String(format: "%06d", $0) }
@@ -160,6 +267,147 @@ do {
     )
     passes += 1
 
+    let safeWatchlistPath = [
+        AXNodeSummary(
+            role: "AXGroup",
+            title: "自选股",
+            label: nil,
+            value: nil
+        ),
+        AXNodeSummary(
+            role: "AXButton",
+            title: "添加自选",
+            label: nil,
+            value: "600000"
+        ),
+    ]
+    try SafetyPolicy().assertWriteAllowed(
+        command: .addWatchlist,
+        code: "600000",
+        targetPath: safeWatchlistPath,
+        environment: ["CONGXI_YITAOJIN_WRITE_ENABLED": "true"]
+    )
+    passes += 1
+
+    expectBridgeFailure("watchlist write bypassed the write-enable gate") {
+        try SafetyPolicy().assertWriteAllowed(
+            command: .addWatchlist,
+            code: "600000",
+            targetPath: safeWatchlistPath,
+            environment: [:]
+        )
+    }
+
+    expectBridgeFailure("watchlist write crossed into a trading target") {
+        try SafetyPolicy().assertWriteAllowed(
+            command: .removeWatchlist,
+            code: "600000",
+            targetPath: [
+                AXNodeSummary(
+                    role: "AXGroup",
+                    title: "自选股",
+                    label: nil,
+                    value: nil
+                ),
+                AXNodeSummary(
+                    role: "AXButton",
+                    title: "卖出 600000",
+                    label: nil,
+                    value: nil
+                ),
+            ],
+            environment: ["CONGXI_YITAOJIN_WRITE_ENABLED": "true"]
+        )
+    }
+
+    expectBridgeFailure("not-logged-in App passed the login gate") {
+        try SafetyPolicy().assertLoggedIn(
+            ProbeData(
+                appRunning: true,
+                applicationPathValid: true,
+                accessibilityTrusted: true,
+                loginState: "not_logged_in",
+                interfaceSignature: nil
+            )
+        )
+    }
+    try SafetyPolicy().assertLoggedIn(
+        ProbeData(
+            appRunning: true,
+            applicationPathValid: true,
+            accessibilityTrusted: true,
+            loginState: "logged_in",
+            interfaceSignature: nil
+        )
+    )
+    passes += 1
+
+    try SafetyPolicy().assertUniqueWriteTarget(count: 1)
+    passes += 1
+    expectBridgeFailure("zero matching write targets were accepted") {
+        try SafetyPolicy().assertUniqueWriteTarget(count: 0)
+    }
+    expectBridgeFailure("ambiguous write targets were accepted") {
+        try SafetyPolicy().assertUniqueWriteTarget(count: 2)
+    }
+
+    let alreadyPresentClient = FakeWatchlistUiClient(codes: ["600000"])
+    let alreadyPresent = try YitaojinWriter(
+        client: alreadyPresentClient,
+        environment: ["CONGXI_YITAOJIN_WRITE_ENABLED": "true"]
+    ).mutate(command: .addWatchlist, code: "600000")
+    expect(alreadyPresent.confirmed, "already-present add was not confirmed")
+    expect(
+        alreadyPresent.state == "already_present",
+        "already-present add returned the wrong state"
+    )
+    expect(
+        alreadyPresentClient.actionCalls.isEmpty,
+        "already-present add unnecessarily mutated the UI"
+    )
+    expectBridgeFailure("already-present add bypassed the write-enable gate") {
+        _ = try YitaojinWriter(
+            client: alreadyPresentClient,
+            environment: [:]
+        ).mutate(command: .addWatchlist, code: "600000")
+    }
+
+    let addClient = FakeWatchlistUiClient(codes: [])
+    let added = try YitaojinWriter(
+        client: addClient,
+        environment: ["CONGXI_YITAOJIN_WRITE_ENABLED": "true"]
+    ).mutate(command: .addWatchlist, code: "600000")
+    expect(added.confirmed, "add was not reread and confirmed")
+    expect(added.state == "added", "confirmed add returned the wrong state")
+    expect(
+        addClient.actionCalls.map(\.1) == ["600000"],
+        "add did not remain scoped to one exact code"
+    )
+
+    let alreadyAbsentClient = FakeWatchlistUiClient(codes: [])
+    let alreadyAbsent = try YitaojinWriter(
+        client: alreadyAbsentClient,
+        environment: ["CONGXI_YITAOJIN_WRITE_ENABLED": "true"]
+    ).mutate(command: .removeWatchlist, code: "000001")
+    expect(alreadyAbsent.confirmed, "already-absent remove was not confirmed")
+    expect(
+        alreadyAbsent.state == "already_absent",
+        "already-absent remove returned the wrong state"
+    )
+    expect(
+        alreadyAbsentClient.actionCalls.isEmpty,
+        "already-absent remove unnecessarily mutated the UI"
+    )
+
+    let unconfirmedClient = FakeWatchlistUiClient(codes: [])
+    unconfirmedClient.confirmMutations = false
+    expectBridgeFailure("unconfirmed add was reported as successful") {
+        _ = try YitaojinWriter(
+            client: unconfirmedClient,
+            environment: ["CONGXI_YITAOJIN_WRITE_ENABLED": "true"]
+        ).mutate(command: .addWatchlist, code: "000001")
+    }
+
     let root = AXSnapshotNode(
         summary: AXNodeSummary(
             role: "AXGroup",
@@ -207,6 +455,35 @@ do {
     expect(
         !account.accountFingerprint.contains("masked-stable-id"),
         "raw account identity leaked into fingerprint"
+    )
+
+    let watchlistRoot = AXSnapshotNode(
+        summary: AXNodeSummary(
+            role: "AXGroup",
+            title: "自选股",
+            label: nil,
+            value: nil
+        ),
+        children: [
+            .labeled("证券代码", value: "300207"),
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXStaticText",
+                    title: "300456",
+                    label: nil,
+                    value: nil
+                ),
+                children: []
+            ),
+            .labeled("指标值", value: "0.471886"),
+            .labeled("成交额", value: "123456.78"),
+            .labeled("混合文本", value: "股票 600000"),
+        ]
+    )
+    let watchlist = YitaojinReader.parseWatchlist(from: watchlistRoot)
+    expect(
+        watchlist.codes == ["300207", "300456"],
+        "watchlist parser extracted a six-digit numeric substring"
     )
 } catch {
     failures.append("unexpected self-test error: \(error)")

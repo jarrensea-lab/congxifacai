@@ -1,10 +1,12 @@
 import Foundation
 
-enum BridgeCommand: String, Codable, Sendable {
+enum BridgeCommand: String, Codable, CaseIterable, Sendable {
     case probe
     case readAccount = "read_account"
     case readWatchlist = "read_watchlist"
     case readQuotes = "read_quotes"
+    case addWatchlist = "add_watchlist"
+    case removeWatchlist = "remove_watchlist"
 }
 
 struct BridgeFailure: Error, Codable, Equatable, Sendable {
@@ -19,10 +21,16 @@ struct BridgeFailure: Error, Codable, Equatable, Sendable {
 
 struct BridgePayload: Codable, Sendable {
     let codes: [String]?
+    let code: String?
     let fingerprintSalt: String?
 
-    init(codes: [String]? = nil, fingerprintSalt: String? = nil) {
+    init(
+        codes: [String]? = nil,
+        code: String? = nil,
+        fingerprintSalt: String? = nil
+    ) {
         self.codes = codes
+        self.code = code
         self.fingerprintSalt = fingerprintSalt
     }
 }
@@ -70,6 +78,24 @@ struct BridgeRequest: Codable, Sendable {
             )
         }
         return result.sorted()
+    }
+
+    func validatedSingleCode() throws -> String {
+        guard let value = payload?.code else {
+            throw BridgeFailure(
+                "invalid_stock_code",
+                "Watchlist writes require one canonical 6-digit code"
+            )
+        }
+        let pattern = try! NSRegularExpression(pattern: #"^\d{6}$"#)
+        let range = NSRange(value.startIndex ..< value.endIndex, in: value)
+        guard pattern.firstMatch(in: value, range: range) != nil else {
+            throw BridgeFailure(
+                "invalid_stock_code",
+                "Watchlist writes require one canonical 6-digit code"
+            )
+        }
+        return value
     }
 
     func fingerprintSalt() throws -> Data {
@@ -134,6 +160,12 @@ struct AccountData: Codable, Sendable {
 
 struct WatchlistData: Codable, Sendable {
     let codes: [String]
+}
+
+struct WatchlistMutationData: Codable, Sendable {
+    let code: String
+    let state: String
+    let confirmed: Bool
 }
 
 struct QuoteData: Codable, Sendable {

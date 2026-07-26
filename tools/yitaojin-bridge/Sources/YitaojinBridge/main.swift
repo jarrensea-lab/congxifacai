@@ -31,6 +31,10 @@ do {
     commandText = request.command.rawValue
     let client = AXClient()
     let reader = YitaojinReader(client: client)
+    let writer = YitaojinWriter(client: client)
+    if request.command != .probe {
+        try SafetyPolicy().assertLoggedIn(client.probe())
+    }
 
     switch request.command {
     case .probe:
@@ -42,13 +46,6 @@ do {
             )
         )
     case .readAccount:
-        let probe = client.probe()
-        guard probe.loginState == "logged_in" else {
-            throw BridgeFailure(
-                probe.loginState == "not_logged_in" ? "not_logged_in" : "login_state_unknown",
-                "The broker login state is not safely confirmed"
-            )
-        }
         try writeEnvelope(
             BridgeEnvelope(
                 command: .readAccount,
@@ -75,6 +72,17 @@ do {
                 data: try reader.readQuotes(
                     codes: request.validatedCodes(),
                     capturedAt: capturedAt
+                )
+            )
+        )
+    case .addWatchlist, .removeWatchlist:
+        try writeEnvelope(
+            BridgeEnvelope(
+                command: request.command,
+                capturedAt: capturedAt,
+                data: try writer.mutate(
+                    command: request.command,
+                    code: request.validatedSingleCode()
                 )
             )
         )

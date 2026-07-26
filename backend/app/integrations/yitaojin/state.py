@@ -186,6 +186,12 @@ class YitaojinStateStore:
         self.path = Path(path)
         self.audit_path = Path(audit_path) if audit_path is not None else None
 
+    @contextmanager
+    def sync_lock(self) -> Iterator[None]:
+        """Serialize one complete watchlist read-plan-write cycle."""
+        with _exclusive_lock(Path(f"{self.path}.sync.lock")):
+            yield
+
     def load(self) -> WatchlistState:
         if not self.path.exists():
             return WatchlistState()

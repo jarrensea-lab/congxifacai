@@ -22,12 +22,7 @@ final class YitaojinReader {
 
     func readWatchlist() throws -> WatchlistData {
         let root = try client.snapshotForPage(labels: ["自选股", "自选"])
-        let codes = Set(
-            root.flattened.flatMap { node in
-                Self.stockCodes(in: node.summary.text)
-            }
-        )
-        return WatchlistData(codes: codes.sorted())
+        return Self.parseWatchlist(from: root)
     }
 
     func readQuotes(
@@ -159,6 +154,28 @@ final class YitaojinReader {
             emptyPositionsConfirmed: emptyConfirmed,
             positions: positions.sorted { $0.code < $1.code }
         )
+    }
+
+    static func parseWatchlist(from root: AXSnapshotNode) -> WatchlistData {
+        let codes = Set(
+            root.flattened.compactMap { node in
+                exactStockCode(in: node.summary)
+            }
+        )
+        return WatchlistData(codes: codes.sorted())
+    }
+
+    static func exactStockCode(in summary: AXNodeSummary) -> String? {
+        let pattern = try! NSRegularExpression(pattern: #"^\d{6}$"#)
+        return [summary.title, summary.label, summary.value]
+            .compactMap { $0 }
+            .first { value in
+                let range = NSRange(
+                    value.startIndex ..< value.endIndex,
+                    in: value
+                )
+                return pattern.firstMatch(in: value, range: range) != nil
+            }
     }
 
     static func firstValue(
