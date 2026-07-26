@@ -208,6 +208,114 @@ def test_materializer_fails_closed_when_store_history_is_corrupted(tmp_path):
     assert not target_pool.path.exists()
 
 
+@pytest.mark.parametrize(
+    ("corrupt_store", "payload", "expected_store"),
+    [
+        (
+            "long",
+            {"version": 1, "items": {"688001": "not-an-object"}},
+            "long_thesis",
+        ),
+        (
+            "long",
+            {"version": 1, "items": {"bad-key": {"symbol": "bad-key"}}},
+            "long_thesis",
+        ),
+        (
+            "long",
+            {"version": 1, "items": {"688001": {"symbol": "000001"}}},
+            "long_thesis",
+        ),
+        (
+            "target",
+            {"version": 1, "items": {"688001": "not-an-object"}},
+            "target_pool",
+        ),
+        (
+            "target",
+            {"version": 1, "items": {"bad-key": {"code": "bad-key"}}},
+            "target_pool",
+        ),
+        (
+            "target",
+            {"version": 1, "items": {"688001": {"code": "000001"}}},
+            "target_pool",
+        ),
+        (
+            "ledger",
+            '{"evidence_id":"ev_valid"}\n{broken\n',
+            "evidence_ledger",
+        ),
+        (
+            "ledger",
+            "[]\n",
+            "evidence_ledger",
+        ),
+    ],
+    ids=[
+        "long-value",
+        "long-key",
+        "long-code-mismatch",
+        "target-value",
+        "target-key",
+        "target-code-mismatch",
+        "ledger-json",
+        "ledger-record",
+    ],
+)
+def test_store_history_corruption_fails_before_any_write(
+    tmp_path,
+    corrupt_store,
+    payload,
+    expected_store,
+):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    corrupt_path = {
+        "long": thesis_store.path,
+        "ledger": ledger.path,
+        "target": target_pool.path,
+    }[corrupt_store]
+    if isinstance(payload, str):
+        corrupt_path.write_text(payload, encoding="utf-8")
+    else:
+        corrupt_path.write_text(
+            json.dumps(payload, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+    paths = (thesis_store.path, ledger.path, target_pool.path)
+    before = {
+        path: path.read_bytes() if path.exists() else None
+        for path in paths
+    }
+
+    summary = materialize_serenity_long_horizon(
+        _package(),
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["write_count"] == 0
+    assert summary["thesis_count"] == 0
+    assert summary["evidence_count"] == 0
+    assert summary["target_count"] == 0
+    assert summary["diagnostics"][0]["reason"] == "store_history_corrupted"
+    assert summary["diagnostics"][0]["store"] == expected_store
+    after = {
+        path: path.read_bytes() if path.exists() else None
+        for path in paths
+    }
+    assert after == before
+
+
 def test_materializer_accepts_all_injected_stores_positionally(tmp_path):
     from app.services.long_horizon_pipeline import (
         materialize_serenity_long_horizon,

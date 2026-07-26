@@ -52,11 +52,16 @@ def _summary() -> dict[str, Any]:
         "unchanged_thesis_count": 0,
         "unchanged_target_count": 0,
         "skipped_count": 0,
+        "write_count": 0,
         "diagnostics": [],
     }
 
 
-def _json_store_diagnostic(store: Any, store_name: str) -> dict[str, str] | None:
+def _json_store_diagnostic(
+    store: Any,
+    store_name: str,
+    code_field: str,
+) -> dict[str, str] | None:
     path_value = getattr(store, "path", None)
     if path_value is None:
         return None
@@ -71,48 +76,50 @@ def _json_store_diagnostic(store: Any, store_name: str) -> dict[str, str] | None
             "store": store_name,
             "error": f"{type(exc).__name__}: {str(exc)[:160]}",
         }
-    if not isinstance(payload, dict) or not isinstance(payload.get("items", {}), dict):
+    if not isinstance(payload, dict) or not isinstance(payload.get("items"), dict):
         return {
             "reason": "store_history_corrupted",
             "store": store_name,
             "error": "expected JSON object with an items object",
         }
-    return None
-
-
-def _ledger_diagnostic(ledger: Any) -> dict[str, str] | None:
-    path_value = getattr(ledger, "path", None)
-    if path_value is None:
-        return None
-    path = Path(path_value)
-    if not path.exists():
-        return None
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as exc:
-        return {
-            "reason": "store_history_corrupted",
-            "store": "evidence_ledger",
-            "error": f"{type(exc).__name__}: {str(exc)[:160]}",
-        }
-    for line_number, line in enumerate(lines, start=1):
-        if not line.strip():
-            continue
-        try:
-            record = json.loads(line)
-        except json.JSONDecodeError as exc:
+    for key, record in payload["items"].items():
+        clean_key = str(key or "").strip()
+        if not _A_SHARE_CODE.fullmatch(clean_key):
             return {
                 "reason": "store_history_corrupted",
-                "store": "evidence_ledger",
-                "error": f"line {line_number}: {type(exc).__name__}: {str(exc)[:120]}",
+                "store": store_name,
+                "error": f"invalid item key: {clean_key[:20]}",
             }
         if not isinstance(record, dict):
             return {
                 "reason": "store_history_corrupted",
-                "store": "evidence_ledger",
-                "error": f"line {line_number}: expected JSON object",
+                "store": store_name,
+                "error": f"item {clean_key} must be an object",
+            }
+        item_code = str(record.get(code_field) or "").strip()
+        if item_code != clean_key or not _A_SHARE_CODE.fullmatch(item_code):
+            return {
+                "reason": "store_history_corrupted",
+                "store": store_name,
+                "error": f"item {clean_key} has invalid {code_field}",
             }
     return None
+
+
+def _ledger_diagnostic(ledger: Any) -> dict[str, str] | None:
+    diagnostics = ledger.read_with_diagnostics()
+    if diagnostics.get("ok") is True:
+        return None
+    errors = diagnostics.get("errors") or []
+    first = errors[0] if errors else {}
+    return {
+        "reason": "store_history_corrupted",
+        "store": "evidence_ledger",
+        "error": (
+            f"line {first.get('line_number', 0)}: "
+            f"{str(first.get('reason') or 'history_invalid')[:160]}"
+        ),
+    }
 
 
 def _status_ok(value: Any) -> bool:
@@ -297,9 +304,9 @@ def materialize_serenity_long_horizon(
     diagnostics = [
         diagnostic
         for diagnostic in (
-            _json_store_diagnostic(thesis_store, "long_thesis"),
+            _json_store_diagnostic(thesis_store, "long_thesis", "symbol"),
             _ledger_diagnostic(ledger),
-            _json_store_diagnostic(target_pool, "target_pool"),
+            _json_store_diagnostic(target_pool, "target_pool", "code"),
         )
         if diagnostic is not None
     ]
@@ -334,7 +341,9 @@ def materialize_serenity_long_horizon(
                     source_report_path=thesis["source_report_path"],
                     data_cutoff_date=report_date,
                 )
-                result["evidence_count"] += ledger.append_many(evidence)
+                written_evidence = ledger.append_many(evidence)
+                result["evidence_count"] += written_evidence
+                result["write_count"] += written_evidence
                 thesis["evidence_ids"] = [item["evidence_id"] for item in evidence]
                 existing_thesis = thesis_store.get(symbol)
                 thesis_unchanged = _semantically_matches(
@@ -347,6 +356,7 @@ def materialize_serenity_long_horizon(
                     result["skipped_count"] += 1
                 else:
                     stored = thesis_store.upsert(thesis)
+                    result["write_count"] += 1
                 result["thesis_count"] += 1
                 if stored.get("thesis_status") == "forming":
                     result["forming_count"] += 1
@@ -396,6 +406,8 @@ def materialize_serenity_long_horizon(
                         evidence=target_semantics["evidence"],
                         serenity=target_semantics["serenity"],
                     )
+                    if target_written:
+                        result["write_count"] += 1
                 if not target_written:
                     raise RuntimeError("target_pool_upsert_rejected")
                 result["target_count"] += 1

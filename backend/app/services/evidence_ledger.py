@@ -72,6 +72,58 @@ class EvidenceLedgerStore:
                 records.append(payload)
         return records
 
+    def read_with_diagnostics(self) -> dict[str, Any]:
+        """Read every JSONL row and report malformed history without skipping it."""
+        if not self.path.exists():
+            return {"ok": True, "records": [], "errors": []}
+        try:
+            lines = self.path.read_text(encoding="utf-8").splitlines()
+        except OSError as exc:
+            return {
+                "ok": False,
+                "records": [],
+                "errors": [{
+                    "line_number": 0,
+                    "reason": f"{type(exc).__name__}: {str(exc)[:160]}",
+                }],
+            }
+        records: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for line_number, line in enumerate(lines, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as exc:
+                errors.append({
+                    "line_number": line_number,
+                    "reason": f"invalid_json:{exc.msg}",
+                })
+                continue
+            if not isinstance(record, dict):
+                errors.append({
+                    "line_number": line_number,
+                    "reason": "record_must_be_object",
+                })
+                continue
+            evidence_id = record.get("evidence_id")
+            if not isinstance(evidence_id, str) or not evidence_id.strip():
+                errors.append({
+                    "line_number": line_number,
+                    "reason": "evidence_id_invalid",
+                })
+                continue
+            if evidence_id in seen_ids:
+                errors.append({
+                    "line_number": line_number,
+                    "reason": "duplicate_evidence_id",
+                })
+                continue
+            seen_ids.add(evidence_id)
+            records.append(record)
+        return {"ok": not errors, "records": records, "errors": errors}
+
     def append_many(self, evidence: list[dict[str, Any]]) -> int:
         existing = {item.get("evidence_id") for item in self.load_all()}
         self.path.parent.mkdir(parents=True, exist_ok=True)
