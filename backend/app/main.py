@@ -925,7 +925,7 @@ async def _run_review_with_status():
         try:
             db_review = SessionLocal()
             try:
-                DebateTracker.fill_pending(db_review)
+                await DebateTracker.fill_pending(db_review)
             finally:
                 db_review.close()
         except Exception as e:
