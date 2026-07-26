@@ -1,5 +1,28 @@
 # 恭喜发财 更新日志
 
+## Unreleased (2026-07-26) — 调度与架构事实收口
+
+### 报告、调度与研究边界
+
+- ✅ **次日主报告动作模板完成迁移**：动作优先模板位于 `backend/app/report_engine/templates/next_day.py`，`scripts/daily_report.py` 负责数据准备、编排和归档，不再维护重复的大段报告模板。
+- ✅ **调度服务独立**：新增 `backend/app/services/scheduler_service.py`，集中登记 15 个 APScheduler 作业；`backend/app/main.py` 只注入处理函数并启动一次统一服务，启动后继续清理遗留 `daily_report` 作业。
+- ✅ **关键晚间顺序固定**：Sentinel research 为周一至周五和周日 20:00，主报告为周一至周五和周日 20:30，易淘金晚间同步为周一至周五 20:45，Sentinel review 为每日 21:00；Bot 保持每 30 秒轮询。
+- ✅ **中线/长线有明确状态**：长期 thesis 使用 `unknown`、`stale`、`healthy` 表示未知、过期和健康，不再把整段空白统称为“没有数据”。
+- ✅ **Serenity 研究物化但不授权交易**：Sentinel 研究任务在持久化研究包前，将 Serenity 结果物化到 Long Thesis、Evidence Ledger 和 Target Pool 的研究来源字段；输出保持 `research_only`，不会直接发出买卖指令。
+
+### 数据、模型与券商边界
+
+- ✅ **离线分钟档案只用于 shadow**：支持年度汇总档和日档月归档、沪深北代码、Tushare 前复权；按需流式读取，不复制或解压整套数据。
+- ✅ **fallback 与数据损坏分流**：合法数据覆盖不足时可回退到配置 provider；ZIP、路径、时间戳、数值、重叠数据和复权因子完整性错误 fail-closed，不能被在线 fallback 掩盖。
+- ✅ **DeepSeek/Qwen 运行事实显式化**：文档中的模型名改为配置路由目标；Qwen 缺失时显式记录到 DeepSeek 的 fallback，没有可用 provider、响应失败或结果降级时不写入生产候选池。
+- ✅ **易淘金无交易授权**：桥接仅覆盖持仓、普通自选和重点标的行情；普通自选 UI 同步需独立开关，不自动下单、撤单、转账，也不读取交易凭证。
+- ✅ **收益边界澄清**：高收益试验是可验证的风险预算和复盘框架，不是盈利、胜率或回报保证。
+
+### 验证
+
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests/test_scheduler_service.py backend/tests/test_yitaojin_scheduler.py backend/tests/test_sentinel_research.py backend/tests/test_runtime_regressions.py backend/tests/test_prediction_lab_due.py -q`：`123 passed`。
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests -q`：`1099 passed`。
+
 ## v8.2.0-dev (2026-07-10) — Prediction Ledger + Scrapling Realtime Kline：预测账本与实时 K 线闭环
 
 ### 顶层方向

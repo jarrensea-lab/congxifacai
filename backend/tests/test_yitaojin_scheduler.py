@@ -410,7 +410,11 @@ async def test_main_wrapper_contains_runtime_failure_instead_of_aborting(monkeyp
 
 
 def test_scheduler_registers_bounded_jobs_without_second_intraday_cron():
-    import app.main as main_module
+    from app.services.scheduler_service import (
+        CRON_JOBS,
+        SchedulerJobHandlers,
+        register_scheduler_jobs,
+    )
 
     class FakeScheduler:
         def __init__(self):
@@ -419,11 +423,30 @@ def test_scheduler_registers_bounded_jobs_without_second_intraday_cron():
         def add_job(self, function, trigger, **kwargs):
             self.jobs.append((function, trigger, kwargs))
 
+    def noop():
+        return None
+
+    handlers = SchedulerJobHandlers(
+        premarket=noop,
+        midday=noop,
+        afternoon=noop,
+        intraday_alert_scan=noop,
+        review=noop,
+        prediction_lab=noop,
+        sentinel_research=noop,
+        main_report=noop,
+        sentinel_review=noop,
+        bot_poll=noop,
+        yitaojin_morning=noop,
+        yitaojin_quotes=noop,
+        yitaojin_evening=noop,
+    )
     scheduler = FakeScheduler()
-    main_module.register_yitaojin_jobs(scheduler)
+    register_scheduler_jobs(scheduler, handlers)
     by_id = {
         kwargs["id"]: (function, trigger, kwargs)
         for function, trigger, kwargs in scheduler.jobs
+        if kwargs["id"].startswith("yitaojin_")
     }
 
     assert "hour='8', minute='55'" in str(by_id["yitaojin_morning"][1])
@@ -432,7 +455,10 @@ def test_scheduler_registers_bounded_jobs_without_second_intraday_cron():
     assert "hour='20', minute='45'" in str(by_id["yitaojin_evening"][1])
     assert all(item[2]["max_instances"] == 1 for item in by_id.values())
     assert all(item[2]["coalesce"] is True for item in by_id.values())
-    assert not any("*/5" in str(trigger) for _, trigger, _ in scheduler.jobs)
+    assert not any(
+        spec.handler == "yitaojin_quotes" and spec.minute == "*/5"
+        for spec in CRON_JOBS
+    )
 
 
 def test_intraday_quote_validation_reuses_existing_five_minute_scan():

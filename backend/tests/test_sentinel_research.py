@@ -243,10 +243,11 @@ async def test_sentinel_research_job_runs_news_mode(monkeypatch):
 
 
 def test_sentinel_research_job_is_registered_before_main_report():
-    source = Path("backend/app/main.py").read_text(encoding="utf-8")
+    from app.services.scheduler_service import CRON_JOBS
 
-    research_job = source.index("id='sentinel_research'")
-    main_report_job = source.index("id='main_report'")
+    job_ids = [job.job_id for job in CRON_JOBS]
+    research_job = job_ids.index("sentinel_research")
+    main_report_job = job_ids.index("main_report")
     assert research_job < main_report_job
 
 

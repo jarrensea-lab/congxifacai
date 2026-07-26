@@ -1,4 +1,4 @@
-"""FastAPI 主应用 — V7: DeepSeek云端AI + 飞书全通道 + 定时调度"""
+"""FastAPI 主应用 — 多源研究、风控、报告与受控券商桥接。"""
 import asyncio
 import json
 import os
@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.database import init_db, SessionLocal
@@ -49,6 +48,10 @@ from app.services.schedule_policy import (
     schedule_reason,
     should_run_main_report,
     should_run_premarket_calibration,
+)
+from app.services.scheduler_service import (
+    SchedulerJobHandlers,
+    start_scheduler_service,
 )
 from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
 from app.services.market_data_health import (
@@ -92,7 +95,7 @@ class FeishuNotifier:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("恭喜发财 V7 应用启动中...")
+    logger.info("恭喜发财 v8.2.0-dev 应用启动中...")
     init_db()
     logger.info("数据库初始化完成")
 
@@ -105,84 +108,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("飞书 Webhook 已配置")
 
-    # ============================================================
-    # V7.5-dev 定时任务注册（盈利策略管线 feature 分支）
-    # ============================================================
-    scheduler.add_job(
-        _run_premarket_with_status,
-        CronTrigger(hour=8, minute=50, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='premarket', name='盘前短策略校准', replace_existing=True,
-        misfire_grace_time=3600,  # 错过1小时内自动补跑
+    start_scheduler_service(
+        scheduler,
+        SchedulerJobHandlers(
+            premarket=_run_premarket_with_status,
+            midday=_run_midday_with_status,
+            afternoon=_run_afternoon_with_status,
+            intraday_alert_scan=_run_intraday_alert_scan_with_status,
+            review=_run_review_with_status,
+            prediction_lab=_run_prediction_lab_with_status,
+            sentinel_research=_run_sentinel_research_with_status,
+            main_report=_run_daily_report_with_status,
+            sentinel_review=_run_sentinel_review_with_status,
+            bot_poll=_poll_bot_messages,
+            yitaojin_morning=_run_yitaojin_morning_with_status,
+            yitaojin_quotes=_run_yitaojin_quotes_with_status,
+            yitaojin_evening=_run_yitaojin_evening_with_status,
+        ),
+        logger=logger,
     )
-    scheduler.add_job(
-        _run_midday_with_status,
-        CronTrigger(hour=11, minute=35, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='midday', name='午盘快速分析', replace_existing=True,
-        misfire_grace_time=2700,  # 错过45分钟内自动补跑
-    )
-    scheduler.add_job(
-        _run_afternoon_with_status,
-        CronTrigger(hour=14, minute=0, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='afternoon', name='午后风险检查', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_intraday_alert_scan_with_status,
-        CronTrigger(hour='9-11,13-14', minute='*/5', day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='intraday_alert_scan', name='盘中事件触发扫描', replace_existing=True,
-        misfire_grace_time=120,
-    )
-    scheduler.add_job(
-        _run_review_with_status,
-        CronTrigger(hour=15, minute=5, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='review', name='收盘复盘', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_prediction_lab_with_status,
-        CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='prediction_lab', name='预测账本采集与到期评估', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_sentinel_research_with_status,
-        CronTrigger(hour=20, minute=0, day_of_week='mon-fri,sun', timezone='Asia/Shanghai'),
-        id='sentinel_research', name='Sentinel研究包与Serenity深挖', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_daily_report_with_status,
-        CronTrigger(hour=20, minute=30, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='main_report', name='次日投资策略主报告', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_daily_report_with_status,
-        CronTrigger(hour=20, minute=30, day_of_week='sun', timezone='Asia/Shanghai'),
-        id='sunday_main_report', name='周日晚次日投资策略主报告', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_sentinel_review_with_status,
-        CronTrigger(hour=21, minute=0, timezone='Asia/Shanghai'),
-        id='sentinel_review', name='Sentinel绩效回看与归档', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _poll_bot_messages,
-        'interval', seconds=30,
-        id='bot_poll', name='飞书Bot消息轮询', replace_existing=True,
-    )
-    register_yitaojin_jobs(scheduler)
-
-    scheduler.start()
-    for stale_job_id in ("daily_report",):
-        try:
-            scheduler.remove_job(stale_job_id)
-            logger.info(f"已清理旧调度任务: {stale_job_id}")
-        except Exception:
-            pass
-    logger.info("旺财V7.5-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中5分钟事件扫描 + 预测账本 + 盘中/收盘 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -197,7 +141,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
-    description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
+    description="A 股研究、风控、报告与受控券商桥接系统",
     version="8.2.0-dev",
     lifespan=lifespan,
 )
@@ -1128,67 +1072,6 @@ async def _run_yitaojin_evening_with_status():
 
 async def _run_yitaojin_quotes_with_status(task: str = "priority_quotes"):
     return await _run_yitaojin_task_with_status(task)
-
-
-def register_yitaojin_jobs(target_scheduler) -> None:
-    """Register bounded jobs; intraday quote refresh reuses the existing scan."""
-    job_options = {
-        "replace_existing": True,
-        "max_instances": 1,
-        "coalesce": True,
-    }
-    target_scheduler.add_job(
-        _run_yitaojin_morning_with_status,
-        CronTrigger(
-            hour=8,
-            minute=55,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_morning",
-        name="易淘金盘前账户、自选与重点行情",
-        misfire_grace_time=300,
-        **job_options,
-    )
-    target_scheduler.add_job(
-        _run_yitaojin_quotes_with_status,
-        CronTrigger(
-            hour=11,
-            minute=35,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_midday_quotes",
-        name="易淘金午间重点行情校验",
-        misfire_grace_time=120,
-        **job_options,
-    )
-    target_scheduler.add_job(
-        _run_yitaojin_quotes_with_status,
-        CronTrigger(
-            hour=14,
-            minute=55,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_close_quotes",
-        name="易淘金收盘前重点行情校验",
-        misfire_grace_time=120,
-        **job_options,
-    )
-    target_scheduler.add_job(
-        _run_yitaojin_evening_with_status,
-        CronTrigger(
-            hour=20,
-            minute=45,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_evening",
-        name="易淘金晚间账户与自选同步",
-        misfire_grace_time=900,
-        **job_options,
-    )
 
 
 async def _run_sentinel_research_with_status():
