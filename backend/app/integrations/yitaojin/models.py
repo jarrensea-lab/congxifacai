@@ -195,6 +195,21 @@ class BrokerPosition:
             "unrealized_pnl": _decimal_text(self.unrealized_pnl),
         }
 
+    @classmethod
+    def from_persisted_dict(cls, payload: Mapping[str, Any]) -> BrokerPosition:
+        return cls.from_bridge_payload(
+            {
+                "code": payload.get("code"),
+                "name": payload.get("name"),
+                "shares": payload.get("shares"),
+                "availableShares": payload.get("available_shares"),
+                "averageCost": payload.get("average_cost"),
+                "currentPrice": payload.get("current_price"),
+                "marketValue": payload.get("market_value"),
+                "unrealizedPnl": payload.get("unrealized_pnl"),
+            }
+        )
+
 
 @dataclass(frozen=True)
 class AccountSnapshot:
@@ -254,6 +269,42 @@ class AccountSnapshot:
             "empty_positions_confirmed": self.empty_positions_confirmed,
             "source": self.source,
         }
+
+    @classmethod
+    def from_persisted_dict(cls, payload: Mapping[str, Any]) -> AccountSnapshot:
+        if not isinstance(payload, Mapping):
+            raise SnapshotValidationError("persisted account snapshot must be an object")
+        raw_positions = payload.get("positions")
+        if not isinstance(raw_positions, list) or any(
+            not isinstance(position, Mapping) for position in raw_positions
+        ):
+            raise SnapshotValidationError("persisted positions must be a list")
+        return cls.from_bridge_payload(
+            {
+                "capturedAt": payload.get("captured_at"),
+                "accountFingerprint": payload.get("account_fingerprint"),
+                "totalAssets": payload.get("total_assets"),
+                "availableCash": payload.get("available_cash"),
+                "frozenCash": payload.get("frozen_cash"),
+                "positions": [
+                    {
+                        "code": position.get("code"),
+                        "name": position.get("name"),
+                        "shares": position.get("shares"),
+                        "availableShares": position.get("available_shares"),
+                        "averageCost": position.get("average_cost"),
+                        "currentPrice": position.get("current_price"),
+                        "marketValue": position.get("market_value"),
+                        "unrealizedPnl": position.get("unrealized_pnl"),
+                    }
+                    for position in raw_positions
+                ],
+                "emptyPositionsConfirmed": payload.get(
+                    "empty_positions_confirmed",
+                    False,
+                ),
+            }
+        )
 
 
 @dataclass(frozen=True)

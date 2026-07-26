@@ -262,6 +262,29 @@ def test_recalculate_portfolio_updates_cash_and_total_assets():
     assert portfolio["total_assets"] == 5358.51
 
 
+def test_recalculate_portfolio_includes_frozen_cash_in_total_assets():
+    """Catches frozen broker cash disappearing from account equity."""
+    from app.services.portfolio_store import recalculate_portfolio
+
+    portfolio = recalculate_portfolio(
+        {
+            "available_cash": 1000.0,
+            "frozen_cash": 100.0,
+            "positions": [
+                {
+                    "code": "000001",
+                    "shares": 100,
+                    "avg_cost": 9.0,
+                    "current_price": 10.0,
+                }
+            ],
+        }
+    )
+
+    assert portfolio["total_value"] == 1000.0
+    assert portfolio["total_assets"] == 2100.0
+
+
 def test_sync_db_from_empty_user_portfolio_clears_positions_and_reports_assets(tmp_path):
     from app.database import SessionLocal
     from app.models import Position
