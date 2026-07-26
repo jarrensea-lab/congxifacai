@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
+from threading import local
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -20,6 +21,10 @@ from app.services.strategy_profile import (
     calculate_stop_loss_price,
     calculate_target_price,
     get_strategy_profile,
+)
+from app.services.long_horizon_transaction import (
+    transaction_guard,
+    transaction_lock_path_for_store,
 )
 
 
@@ -169,25 +174,42 @@ ENTRY_SIGNAL_TTL_MINUTES = 30
 REQUIRED_SCORING_SOURCES = {"quote", "kline", "fund_flow", "financial"}
 MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _PROCESS_POOL_LOCK = RLock()
+_POOL_LOCK_CONTEXT = local()
 
 
 @contextmanager
 def _pool_lock(path: Path):
     lock_path = path.with_name(f".{path.name}.lock")
+    key = str(lock_path.resolve())
+    held = getattr(_POOL_LOCK_CONTEXT, "held", None)
+    if held is None:
+        held = set()
+        _POOL_LOCK_CONTEXT.held = held
+    if key in held:
+        yield
+        return
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _PROCESS_POOL_LOCK, lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        held.add(key)
         try:
             yield
         finally:
+            held.discard(key)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _locked_store_mutation(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with _pool_lock(self.path):
-            return method(self, *args, **kwargs)
+        transaction_lock_path = getattr(
+            self,
+            "transaction_lock_path",
+            transaction_lock_path_for_store(self.path),
+        )
+        with transaction_guard(transaction_lock_path, exclusive=False):
+            with _pool_lock(self.path):
+                return method(self, *args, **kwargs)
 
     return wrapped
 
@@ -225,8 +247,13 @@ class CandidatePoolStore:
         path: str | Path | None = None,
         *,
         execution_ledger_path: str | Path | None = None,
+        transaction_lock_path: str | Path | None = None,
     ):
         self.path = Path(path) if path is not None else default_candidate_pool_path()
+        self.transaction_lock_path = transaction_lock_path_for_store(
+            self.path,
+            transaction_lock_path,
+        )
         if execution_ledger_path is not None:
             self.execution_ledger_path = Path(execution_ledger_path)
         elif path is not None:
@@ -245,6 +272,7 @@ class CandidatePoolStore:
             payload["items"] = {}
         return payload
 
+    @_locked_store_mutation
     def save(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = _now()
         _write_json(self.path, payload)
@@ -580,8 +608,17 @@ class TargetPoolStore(CandidatePoolStore):
 class PositionWatchStore:
     """File-backed stop-loss/take-profit plan store for real positions."""
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        transaction_lock_path: str | Path | None = None,
+    ):
         self.path = Path(path) if path is not None else default_position_watch_path()
+        self.transaction_lock_path = transaction_lock_path_for_store(
+            self.path,
+            transaction_lock_path,
+        )
 
     def load(self) -> dict[str, Any]:
         payload = _read_json(self.path, {"version": 1, "updated_at": "", "items": {}})
@@ -590,6 +627,7 @@ class PositionWatchStore:
         payload.setdefault("items", {})
         return payload
 
+    @_locked_store_mutation
     def save(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = _now()
         _write_json(self.path, payload)

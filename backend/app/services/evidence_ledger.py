@@ -13,6 +13,10 @@ from typing import Any
 
 from app.config import PROJECT_ROOT
 from app.services.quant_lifecycle import TargetPoolStore
+from app.services.long_horizon_transaction import (
+    transaction_guard,
+    transaction_lock_path_for_store,
+)
 from app.utils.a_share_codes import validate_a_share_code
 
 _LEDGER_PROCESS_LOCK = RLock()
@@ -84,8 +88,17 @@ def _long_semantic_revision(thesis: dict[str, Any]) -> str:
 class EvidenceLedgerStore:
     """Append-only JSONL ledger with deterministic evidence IDs."""
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        transaction_lock_path: str | Path | None = None,
+    ):
         self.path = Path(path) if path is not None else default_evidence_ledger_path()
+        self.transaction_lock_path = transaction_lock_path_for_store(
+            self.path,
+            transaction_lock_path,
+        )
 
     @contextmanager
     def _store_lock(self, *, exclusive: bool):
@@ -159,29 +172,42 @@ class EvidenceLedgerStore:
             return self._read_with_diagnostics_unlocked()
 
     def append_many(self, evidence: list[dict[str, Any]]) -> int:
-        with self._store_lock(exclusive=True):
-            diagnostics = self._read_with_diagnostics_unlocked()
-            if not diagnostics["ok"]:
-                raise ValueError("evidence ledger contains invalid history")
-            existing = {
-                item.get("evidence_id")
-                for item in diagnostics["records"]
-            }
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            written = 0
-            with self.path.open("a", encoding="utf-8") as fh:
-                for item in evidence:
-                    record = dict(item)
-                    record.setdefault("created_at", _now())
-                    record["evidence_id"] = record.get("evidence_id") or _stable_id(record)
-                    if record["evidence_id"] in existing:
-                        continue
-                    fh.write(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n")
-                    existing.add(record["evidence_id"])
-                    written += 1
-                fh.flush()
-                os.fsync(fh.fileno())
-            return written
+        with transaction_guard(
+            self.transaction_lock_path,
+            exclusive=False,
+        ):
+            with self._store_lock(exclusive=True):
+                diagnostics = self._read_with_diagnostics_unlocked()
+                if not diagnostics["ok"]:
+                    raise ValueError("evidence ledger contains invalid history")
+                existing = {
+                    item.get("evidence_id")
+                    for item in diagnostics["records"]
+                }
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                written = 0
+                with self.path.open("a", encoding="utf-8") as fh:
+                    for item in evidence:
+                        record = dict(item)
+                        record.setdefault("created_at", _now())
+                        record["evidence_id"] = (
+                            record.get("evidence_id") or _stable_id(record)
+                        )
+                        if record["evidence_id"] in existing:
+                            continue
+                        fh.write(
+                            json.dumps(
+                                record,
+                                ensure_ascii=False,
+                                sort_keys=True,
+                            )
+                            + "\n"
+                        )
+                        existing.add(record["evidence_id"])
+                        written += 1
+                    fh.flush()
+                    os.fsync(fh.fileno())
+                return written
 
 
 def build_sentinel_evidence(package: dict[str, Any]) -> list[dict[str, Any]]:

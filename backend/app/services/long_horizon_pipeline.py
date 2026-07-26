@@ -12,6 +12,7 @@ from app.services.evidence_ledger import (
 )
 from app.services.long_horizon_transaction import (
     LongHorizonBatchTransaction,
+    TransactionSnapshotTooLarge,
     default_transaction_path,
 )
 from app.services.long_thesis import LongThesisStore, evaluate_thesis_status
@@ -296,6 +297,7 @@ def materialize_serenity_long_horizon(
     target_pool: TargetPoolStore | None = None,
     *,
     transaction_path: str | Path | None = None,
+    transaction_lock_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Persist Serenity candidates as inert long-horizon research objects."""
     thesis_store = thesis_store or LongThesisStore()
@@ -309,7 +311,10 @@ def materialize_serenity_long_horizon(
             ("evidence_ledger", ledger.path),
             ("target_pool", target_pool.path),
         ],
+        lock_path=transaction_lock_path,
     )
+    for store in (thesis_store, ledger, target_pool):
+        store.transaction_lock_path = transaction.lock_path
 
     with transaction.locked():
         try:
@@ -474,7 +479,11 @@ def materialize_serenity_long_horizon(
             failed_result["diagnostics"] = [
                 *result["diagnostics"],
                 {
-                    "reason": "batch_transaction_failed",
+                    "reason": (
+                        "transaction_snapshot_too_large"
+                        if isinstance(exc, TransactionSnapshotTooLarge)
+                        else "batch_transaction_failed"
+                    ),
                     "error": f"{type(exc).__name__}: {str(exc)[:160]}",
                 },
             ]

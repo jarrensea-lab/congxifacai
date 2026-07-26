@@ -12,6 +12,10 @@ from threading import RLock
 from typing import Any
 
 from app.config import PROJECT_ROOT
+from app.services.long_horizon_transaction import (
+    transaction_guard,
+    transaction_lock_path_for_store,
+)
 
 _LONG_THESIS_PROCESS_LOCK = RLock()
 
@@ -122,8 +126,17 @@ class LongThesisStore:
     target lifecycle state still lives in TargetPoolStore.
     """
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        transaction_lock_path: str | Path | None = None,
+    ):
         self.path = Path(path) if path is not None else default_long_thesis_path()
+        self.transaction_lock_path = transaction_lock_path_for_store(
+            self.path,
+            transaction_lock_path,
+        )
 
     @contextmanager
     def _store_lock(self, *, exclusive: bool):
@@ -154,8 +167,12 @@ class LongThesisStore:
             return self._load_unlocked()
 
     def save(self, payload: dict[str, Any]) -> None:
-        with self._store_lock(exclusive=True):
-            self._save_unlocked(payload)
+        with transaction_guard(
+            self.transaction_lock_path,
+            exclusive=False,
+        ):
+            with self._store_lock(exclusive=True):
+                self._save_unlocked(payload)
 
     def get(self, symbol: str) -> dict[str, Any] | None:
         return self.load().get("items", {}).get(_clean_symbol(symbol))
@@ -164,39 +181,54 @@ class LongThesisStore:
         symbol = _clean_symbol(thesis.get("symbol") or thesis.get("code"))
         if not symbol:
             raise ValueError("long thesis requires symbol")
-        with self._store_lock(exclusive=True):
-            payload = self._load_unlocked()
-            items = payload.setdefault("items", {})
-            existing = items.get(symbol, {})
-            merged = {
-                **existing,
-                **thesis,
-                "symbol": symbol,
-                "name": thesis.get("name") or existing.get("name") or symbol,
-                "updated_at": _now(),
-            }
-            merged.setdefault("created_at", existing.get("created_at") or _now())
-            merged.setdefault("reviews", existing.get("reviews") or [])
-            status = evaluate_thesis_status(merged)
-            merged["thesis_status"] = thesis.get("thesis_status") or status["status"]
-            items[symbol] = merged
-            self._save_unlocked(payload)
-            return merged
+        with transaction_guard(
+            self.transaction_lock_path,
+            exclusive=False,
+        ):
+            with self._store_lock(exclusive=True):
+                payload = self._load_unlocked()
+                items = payload.setdefault("items", {})
+                existing = items.get(symbol, {})
+                merged = {
+                    **existing,
+                    **thesis,
+                    "symbol": symbol,
+                    "name": thesis.get("name") or existing.get("name") or symbol,
+                    "updated_at": _now(),
+                }
+                merged.setdefault(
+                    "created_at",
+                    existing.get("created_at") or _now(),
+                )
+                merged.setdefault("reviews", existing.get("reviews") or [])
+                status = evaluate_thesis_status(merged)
+                merged["thesis_status"] = (
+                    thesis.get("thesis_status") or status["status"]
+                )
+                items[symbol] = merged
+                self._save_unlocked(payload)
+                return merged
 
     def append_review(self, symbol: str, review: dict[str, Any]) -> dict[str, Any] | None:
         clean = _clean_symbol(symbol)
-        with self._store_lock(exclusive=True):
-            payload = self._load_unlocked()
-            item = payload.setdefault("items", {}).get(clean)
-            if not isinstance(item, dict):
-                return None
-            entry = {"created_at": _now(), **review}
-            item.setdefault("reviews", []).append(entry)
-            item["reviews"] = item["reviews"][-50:]
-            if review.get("status"):
-                item["thesis_status"] = str(review["status"])
-            else:
-                item["thesis_status"] = evaluate_thesis_status(item)["status"]
-            item["updated_at"] = _now()
-            self._save_unlocked(payload)
-            return item
+        with transaction_guard(
+            self.transaction_lock_path,
+            exclusive=False,
+        ):
+            with self._store_lock(exclusive=True):
+                payload = self._load_unlocked()
+                item = payload.setdefault("items", {}).get(clean)
+                if not isinstance(item, dict):
+                    return None
+                entry = {"created_at": _now(), **review}
+                item.setdefault("reviews", []).append(entry)
+                item["reviews"] = item["reviews"][-50:]
+                if review.get("status"):
+                    item["thesis_status"] = str(review["status"])
+                else:
+                    item["thesis_status"] = evaluate_thesis_status(item)[
+                        "status"
+                    ]
+                item["updated_at"] = _now()
+                self._save_unlocked(payload)
+                return item

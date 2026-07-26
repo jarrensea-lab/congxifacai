@@ -2,19 +2,95 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import tempfile
 import uuid
 from contextlib import contextmanager
 from datetime import datetime
-from fcntl import LOCK_EX, LOCK_UN, flock
+from fcntl import LOCK_EX, LOCK_SH, LOCK_UN, flock
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Iterator
 
 
 _PROCESS_TRANSACTION_LOCK = RLock()
+_TRANSACTION_CONTEXT = local()
+DEFAULT_MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024
+
+
+class TransactionSnapshotTooLarge(RuntimeError):
+    """Raised before journaling when store snapshots exceed the safe limit."""
+
+    def __init__(self, total_bytes: int, max_bytes: int):
+        self.total_bytes = total_bytes
+        self.max_bytes = max_bytes
+        super().__init__(
+            f"transaction snapshot {total_bytes} exceeds limit {max_bytes}"
+        )
+
+
+def _max_snapshot_bytes(explicit_value: int | None) -> int:
+    if explicit_value is not None:
+        return max(1, int(explicit_value))
+    configured = os.environ.get("CONGXI_LONG_HORIZON_MAX_SNAPSHOT_BYTES")
+    if configured:
+        try:
+            return max(1, int(configured))
+        except ValueError:
+            pass
+    return DEFAULT_MAX_SNAPSHOT_BYTES
+
+
+def transaction_lock_path_for_store(
+    store_path: str | Path,
+    explicit_path: str | Path | None = None,
+) -> Path:
+    configured = explicit_path or os.environ.get(
+        "CONGXI_LONG_HORIZON_TRANSACTION_LOCK_PATH"
+    )
+    if configured:
+        return Path(configured)
+    return Path(store_path).parent / ".long_horizon_transaction.lock"
+
+
+@contextmanager
+def transaction_guard(
+    lock_path: str | Path,
+    *,
+    exclusive: bool,
+) -> Iterator[None]:
+    """Acquire the process/thread reentrant transaction RW guard."""
+    path = Path(lock_path).resolve()
+    key = str(path)
+    held = getattr(_TRANSACTION_CONTEXT, "held", None)
+    if held is None:
+        held = {}
+        _TRANSACTION_CONTEXT.held = held
+    current = held.get(key)
+    if current is not None:
+        if exclusive and current["mode"] != "exclusive":
+            raise RuntimeError("cannot upgrade shared transaction guard")
+        current["depth"] += 1
+        try:
+            yield
+        finally:
+            current["depth"] -= 1
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _PROCESS_TRANSACTION_LOCK, path.open("a+", encoding="utf-8") as lock_file:
+        flock(lock_file.fileno(), LOCK_EX if exclusive else LOCK_SH)
+        held[key] = {
+            "mode": "exclusive" if exclusive else "shared",
+            "depth": 1,
+        }
+        try:
+            yield
+        finally:
+            held.pop(key, None)
+            flock(lock_file.fileno(), LOCK_UN)
 
 
 def default_transaction_path(thesis_path: Path) -> Path:
@@ -66,39 +142,70 @@ class LongHorizonBatchTransaction:
         self,
         journal_path: str | Path,
         stores: list[tuple[str, str | Path]],
+        *,
+        lock_path: str | Path | None = None,
+        max_snapshot_bytes: int | None = None,
     ):
         self.journal_path = Path(journal_path)
         self.stores = [(name, Path(path)) for name, path in stores]
+        configured_lock_path = lock_path or os.environ.get(
+            "CONGXI_LONG_HORIZON_TRANSACTION_LOCK_PATH"
+        )
+        store_parents = {
+            path.parent.resolve()
+            for _, path in self.stores
+        }
+        if configured_lock_path is None and len(store_parents) > 1:
+            raise ValueError(
+                "explicit transaction lock path required for stores "
+                "in different directories"
+            )
+        default_lock_source = (
+            self.stores[0][1]
+            if self.stores
+            else self.journal_path
+        )
+        self.lock_path = transaction_lock_path_for_store(
+            default_lock_source,
+            configured_lock_path,
+        )
+        self.max_snapshot_bytes = _max_snapshot_bytes(max_snapshot_bytes)
 
     @contextmanager
     def locked(self) -> Iterator[None]:
-        lock_path = self.journal_path.with_name(
-            f".{self.journal_path.name}.lock"
-        )
-        lock_path.parent.mkdir(parents=True, exist_ok=True)
-        with (
-            _PROCESS_TRANSACTION_LOCK,
-            lock_path.open("a+", encoding="utf-8") as lock_file,
-        ):
-            flock(lock_file.fileno(), LOCK_EX)
-            try:
-                yield
-            finally:
-                flock(lock_file.fileno(), LOCK_UN)
+        with transaction_guard(self.lock_path, exclusive=True):
+            yield
 
     def begin(self) -> str:
         if self.journal_path.exists():
             raise RuntimeError("pending transaction journal must be recovered first")
         batch_id = f"lh_{uuid.uuid4().hex}"
         snapshots = []
+        total_bytes = 0
         for name, path in self.stores:
             existed = path.exists()
-            content = path.read_bytes() if existed else b""
+            if existed:
+                estimated_total = total_bytes + path.stat().st_size
+                if estimated_total > self.max_snapshot_bytes:
+                    raise TransactionSnapshotTooLarge(
+                        estimated_total,
+                        self.max_snapshot_bytes,
+                    )
+                content = path.read_bytes()
+            else:
+                content = b""
+            total_bytes += len(content)
+            if total_bytes > self.max_snapshot_bytes:
+                raise TransactionSnapshotTooLarge(
+                    total_bytes,
+                    self.max_snapshot_bytes,
+                )
             snapshots.append({
                 "name": name,
                 "path": str(path.resolve()),
                 "existed": existed,
                 "content_b64": base64.b64encode(content).decode("ascii"),
+                "content_sha256": hashlib.sha256(content).hexdigest(),
             })
         journal = {
             "version": 1,
@@ -139,7 +246,7 @@ class LongHorizonBatchTransaction:
         if len(entries) != len(expected):
             raise RuntimeError("transaction journal store count mismatch")
 
-        restored_names: list[str] = []
+        validated_entries: list[tuple[str, Path, bool, bytes]] = []
         seen_names: set[str] = set()
         for entry in entries:
             if not isinstance(entry, dict):
@@ -148,7 +255,12 @@ class LongHorizonBatchTransaction:
             if name in seen_names or name not in expected:
                 raise RuntimeError("transaction journal store name invalid")
             seen_names.add(name)
-            journal_store_path = Path(str(entry.get("path") or "")).resolve()
+            raw_store_path = Path(str(entry.get("path") or ""))
+            if not raw_store_path.is_absolute():
+                raise RuntimeError(
+                    f"transaction journal path must be absolute for {name}"
+                )
+            journal_store_path = raw_store_path.resolve()
             if journal_store_path != expected[name]:
                 raise RuntimeError(
                     f"transaction journal path mismatch for {name}"
@@ -167,10 +279,27 @@ class LongHorizonBatchTransaction:
                 raise RuntimeError(
                     f"transaction journal backup invalid for {name}"
                 ) from exc
+            content_sha256 = entry.get("content_sha256")
+            if content_sha256 is not None and (
+                not isinstance(content_sha256, str)
+                or hashlib.sha256(original).hexdigest() != content_sha256
+            ):
+                raise RuntimeError(
+                    f"transaction journal backup hash mismatch for {name}"
+                )
+            validated_entries.append(
+                (name, expected[name], existed, original)
+            )
+
+        if seen_names != set(expected):
+            raise RuntimeError("transaction journal store names mismatch")
+
+        restored_names: list[str] = []
+        for name, store_path, existed, original in validated_entries:
             if existed:
-                _atomic_write(expected[name], original)
+                _atomic_write(store_path, original)
             else:
-                _durable_unlink(expected[name])
+                _durable_unlink(store_path)
             restored_names.append(name)
 
         _durable_unlink(self.journal_path)

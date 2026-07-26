@@ -633,6 +633,59 @@ def test_materializer_recovers_pending_journal_before_preflight(tmp_path):
     assert not transaction_path.exists()
 
 
+def test_materializer_fails_before_writes_when_snapshot_exceeds_limit(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    transaction_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store.upsert({
+        "symbol": "000001",
+        "name": "原始 thesis",
+        "core_thesis": "原始内容",
+    })
+    ledger.append_many([{
+        "evidence_id": "ev_original_capacity",
+        "type": "test",
+        "summary": "原始 evidence",
+    }])
+    target_pool.upsert_target(
+        code="000001",
+        name="原始 target",
+        status="long_research",
+        source="long_horizon",
+    )
+    paths = (thesis_store.path, ledger.path, target_pool.path)
+    before = {path: path.read_bytes() for path in paths}
+    monkeypatch.setenv("CONGXI_LONG_HORIZON_MAX_SNAPSHOT_BYTES", "1")
+
+    summary = materialize_serenity_long_horizon(
+        {
+            **_package(),
+            "serenity_deep_dives": [_package()["serenity_deep_dives"][0]],
+        },
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+        transaction_path=transaction_path,
+    )
+
+    assert summary["status"] == "failed"
+    assert summary["write_count"] == 0
+    assert summary["diagnostics"][-1]["reason"] == (
+        "transaction_snapshot_too_large"
+    )
+    assert {path: path.read_bytes() for path in paths} == before
+    assert not transaction_path.exists()
+
+
 def test_forming_to_verified_appends_revision_and_updates_current_ids(tmp_path):
     from app.services.long_horizon_pipeline import (
         materialize_serenity_long_horizon,

@@ -4,7 +4,7 @@ import re
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from app.data_sources.base import BaseDataSource
-from app.utils.a_share_codes import tencent_symbol
+from app.utils.market_instruments import resolve_tencent_market_instrument
 from app.utils.trading_calendar import is_trading_day, prev_trading_day
 
 
@@ -20,7 +20,7 @@ class TencentDataSource(BaseDataSource):
 
     def _resolve_code(self, code: str) -> str:
         """股票代码转腾讯格式: sh600000 / sz000001 / bj920001。"""
-        return tencent_symbol(code)
+        return resolve_tencent_market_instrument(code)
 
     def _parse_one(
         self,

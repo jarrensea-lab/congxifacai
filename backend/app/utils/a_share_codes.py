@@ -17,9 +17,7 @@ def _derived_exchange(code: str) -> str | None:
         return "SH"
     if code.startswith(_SZ_PREFIXES):
         return "SZ"
-    if code.startswith("920"):
-        return "BJ"
-    if code.startswith(("4", "8")) and not code.startswith("899"):
+    if code.startswith(("430", "83", "87", "920")):
         return "BJ"
     return None
 
