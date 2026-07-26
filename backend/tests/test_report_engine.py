@@ -220,6 +220,76 @@ class TestBitableWriter:
         assert writer._available() is False
 
 
+def test_next_day_template_is_pure_and_renders_account_actions_before_audit(monkeypatch):
+    """次日模板只消费显式输入，且把账户动作置于系统审计之前。"""
+    import builtins
+    import importlib
+    import os
+    import socket
+    import sys
+
+    monkeypatch.setattr(
+        builtins,
+        "open",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("renderer_must_not_open_files")
+        ),
+    )
+    monkeypatch.setattr(
+        os,
+        "getenv",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("renderer_must_not_read_environment")
+        ),
+    )
+    monkeypatch.setattr(
+        socket,
+        "socket",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("renderer_must_not_open_network")
+        ),
+    )
+    module_name = "app.report_engine.templates.next_day"
+    sys.modules.pop(module_name, None)
+    render_next_day_sections = importlib.import_module(
+        module_name
+    ).render_next_day_sections
+
+    rendered = "\n".join(
+        render_next_day_sections(
+            {
+                "target_date": "2026-07-27",
+                "holdings": [
+                    {
+                        "label": "测试持仓(000001)",
+                        "shares": 100,
+                        "price_text": "¥10.00",
+                        "cost_text": "¥9.00",
+                        "stop_text": "¥8.10",
+                        "target_text": "¥10.80",
+                        "action": "持有观察",
+                        "sell_quantity": 0,
+                        "next_signal": "跌破止损则卖出100股。",
+                    }
+                ],
+                "candidates": [],
+                "long_horizon": [],
+                "research_reference": [],
+                "budget_blocked_count": 0,
+                "audit_lines": ["- 系统状态：可用。"],
+                "review_lines": [],
+            }
+        )
+    )
+
+    assert rendered.startswith("## 一、当前账户动作")
+    assert "当前100股" in rendered
+    assert "精确卖出0股" in rendered
+    assert rendered.index("## 一、当前账户动作") < rendered.index(
+        "## 四、系统、数据与模型审计"
+    )
+
+
 class TestFeishuDoc:
     def test_upload_function_exists(self):
         """测试飞书上传函数可导入"""
