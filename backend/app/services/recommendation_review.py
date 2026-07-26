@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,7 @@ def _empty_review(system_gap: str, *, diagnostics: list[str] | None = None) -> d
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "executed": {
             "count": 0,
+            "execution_evidence_count": 0,
             "attributed_count": 0,
             "unattributed_count": 0,
             "metric_scope": "portfolio_behavior_not_strategy_attribution",
@@ -352,6 +354,41 @@ def _sync_portfolio_execution_events(
     return diagnostics
 
 
+def _sanitize_sync_diagnostics(diagnostics: list[str]) -> dict[str, int]:
+    allowed = {"fill_sync_failed", "outcome_sync_failed"}
+    counts = Counter(
+        category
+        for item in diagnostics
+        for category in [str(item).partition(":")[0]]
+        if category in allowed
+    )
+    return dict(sorted(counts.items()))
+
+
+def _execution_evidence_ids(
+    portfolio: dict[str, Any],
+    attribution: dict[str, Any],
+) -> set[str]:
+    fill_ids: set[str] = set()
+    for event in portfolio.get("trade_events", []):
+        fill_id = event.get("fill_id") if isinstance(event, dict) else None
+        if isinstance(fill_id, str) and fill_id.strip():
+            fill_ids.add(fill_id.strip())
+    for collection in ("positions", "closed_positions"):
+        for position in portfolio.get(collection, []):
+            if not isinstance(position, dict):
+                continue
+            for item in position.get("trade_history", []):
+                fill_id = item.get("fill_id") if isinstance(item, dict) else None
+                if isinstance(fill_id, str) and fill_id.strip():
+                    fill_ids.add(fill_id.strip())
+    for chain in attribution.get("chains", []):
+        fill_id = chain.get("fill_id") if isinstance(chain, dict) else None
+        if isinstance(fill_id, str) and fill_id.strip():
+            fill_ids.add(fill_id.strip())
+    return fill_ids
+
+
 async def build_recommendation_review(
     *,
     portfolio_path: str | None = None,
@@ -462,9 +499,12 @@ async def build_recommendation_review(
         item.get("status") in {"attributed", "pending"}
         for item in attribution.get("chains", [])
     )
+    execution_evidence_count = len(
+        _execution_evidence_ids(portfolio, attribution)
+    )
     if attribution_history_invalid:
         system_gap = "execution_ledger_history_invalid"
-    elif executed_count == 0:
+    elif execution_evidence_count == 0:
         system_gap = "no_executed_samples"
     elif complete_chain_count == 0:
         system_gap = "execution_chain_missing"
@@ -474,6 +514,7 @@ async def build_recommendation_review(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "executed": {
             "count": executed_count,
+            "execution_evidence_count": execution_evidence_count,
             "attributed_count": attributed_count,
             "unattributed_count": executed_count - attributed_count,
             "metric_scope": "portfolio_behavior_not_strategy_attribution",
@@ -495,6 +536,9 @@ async def build_recommendation_review(
     }
     if attribution_history_invalid:
         review["diagnostics"] = ["execution_ledger_history_invalid"]
+    sanitized_sync_diagnostics = _sanitize_sync_diagnostics(sync_diagnostics)
+    if sanitized_sync_diagnostics:
+        review["sync_diagnostics"] = sanitized_sync_diagnostics
     return review
 
 
@@ -520,6 +564,7 @@ def render_recommendation_review_markdown(review: dict[str, Any]) -> str:
         "## 总分",
         "",
         f"- 执行样本数：{executed.get('count', 0)}",
+        f"- 成交证据数：{executed.get('execution_evidence_count', 0)}",
         f"- 完整归因：{executed.get('attributed_count', 0)}",
         f"- 未归因：{executed.get('unattributed_count', 0)}",
         f"- 平均收益率：{executed.get('avg_return_pct', 0):+.2f}%",

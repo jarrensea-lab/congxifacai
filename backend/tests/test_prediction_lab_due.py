@@ -232,6 +232,66 @@ async def test_backfill_uses_registered_offline_history_without_replacing_benchm
 
 
 @pytest.mark.asyncio
+async def test_backfill_falls_back_when_valid_offline_history_misses_due_horizon(
+    tmp_path,
+):
+    ledger = PredictionLedger(tmp_path)
+    ledger.append_predictions(
+        _records(code="000001", prediction_date="2026-06-01", horizons=(1,))
+    )
+    provider_stock_calls = []
+
+    class PrimaryQuoteSource:
+        async def fetch_kline(self, code, period, count):
+            if code == "000001":
+                provider_stock_calls.append((code, period, count))
+            return {
+                "status": "ok",
+                "bars": [
+                    {"date": "2026-06-01", "close": 10},
+                    {"date": "2026-06-02", "close": 11},
+                ],
+            }
+
+    class OfflineHistorySource:
+        async def fetch_kline(self, *_args, **_kwargs):
+            return {
+                "status": "ok",
+                "bars": [
+                    {
+                        "date": "2026-06-01",
+                        "open": 10,
+                        "close": 10,
+                        "high": 10.1,
+                        "low": 9.9,
+                        "volume": 1000,
+                        "amount": 10000,
+                    }
+                ],
+                "data_cutoff": "2026-06-01 15:00:00",
+            }
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+        ),
+        quote_source=PrimaryQuoteSource(),
+        offline_source=OfflineHistorySource(),
+    )
+
+    assert provider_stock_calls == [("000001", "day", 55)]
+    assert result["verified_count"] == 1
+    assert result["offline_history_code_count"] == 0
+    assert result["offline_history_insufficient_coverage_count"] == 1
+    assert result["offline_coverage_fallback_reasons"] == {
+        "horizon_not_due": 1
+    }
+
+
+@pytest.mark.asyncio
 async def test_backfill_does_not_fallback_for_malformed_offline_success(tmp_path):
     ledger = PredictionLedger(tmp_path)
     ledger.append_predictions(

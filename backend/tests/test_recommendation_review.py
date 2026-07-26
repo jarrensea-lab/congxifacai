@@ -66,7 +66,13 @@ async def test_recommendation_review_names_missing_chain_when_execution_exists(t
                         "shares": 100,
                         "avg_cost": 4.0,
                         "current_price": 4.1,
-                        "trade_history": [{"date": "2026-07-20", "type": "buy"}],
+                        "trade_history": [
+                            {
+                                "date": "2026-07-20",
+                                "type": "buy",
+                                "fill_id": "fill-unlinked",
+                            }
+                        ],
                     }
                 ],
                 "closed_positions": [],
@@ -87,6 +93,117 @@ async def test_recommendation_review_names_missing_chain_when_execution_exists(t
     assert review["system_gap"] == "execution_chain_missing"
     assert review["executed"]["metric_scope"] == (
         "portfolio_behavior_not_strategy_attribution"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recommendation_review_detects_fill_without_position_as_execution(
+    tmp_path,
+):
+    portfolio_path = tmp_path / "portfolio.json"
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "positions": [],
+                "closed_positions": [],
+                "trade_events": [
+                    {
+                        "fill_id": "fill-without-position",
+                        "code": "002131",
+                        "side": "buy",
+                    }
+                ],
+                "available_cash": 1000.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review = await build_recommendation_review(
+        portfolio_path=str(portfolio_path),
+        quote_source=_NoMarketData(),
+    )
+
+    assert review["executed"]["count"] == 0
+    assert review["executed"]["execution_evidence_count"] == 1
+    assert review["system_gap"] == "execution_chain_missing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failed_event_type", "expected_diagnostics"),
+    [
+        ("fill", {"fill_sync_failed": 1}),
+        ("outcome", {"outcome_sync_failed": 1}),
+    ],
+)
+async def test_recommendation_review_sanitizes_sync_failure_diagnostics(
+    tmp_path,
+    monkeypatch,
+    failed_event_type,
+    expected_diagnostics,
+):
+    from app.services.execution_ledger import ExecutionLedger
+
+    portfolio_path = tmp_path / "portfolio.json"
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "positions": [
+                    {
+                        "code": "002131",
+                        "shares": 100,
+                        "avg_cost": 4.0,
+                        "current_price": 4.1,
+                        "trade_history": [
+                            {
+                                "date": "2026-07-20",
+                                "type": "buy",
+                                "fill_id": "private-fill-id",
+                                "signal_id": "signal-1",
+                                "recommendation_id": "rec-1",
+                            }
+                        ],
+                    }
+                ],
+                "closed_positions": [],
+                "trade_events": [
+                    {
+                        "fill_id": "private-fill-id",
+                        "code": "002131",
+                        "side": "buy",
+                        "signal_id": "signal-1",
+                        "recommendation_id": "rec-1",
+                    }
+                ],
+                "available_cash": 1000.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    original_append = ExecutionLedger.append_event
+
+    def append_with_failure(self, event):
+        if event.get("event_type") == failed_event_type:
+            return {"ok": False, "written": False, "error": "private-detail"}
+        return original_append(self, event)
+
+    monkeypatch.setattr(ExecutionLedger, "append_event", append_with_failure)
+
+    review = await build_recommendation_review(
+        portfolio_path=str(portfolio_path),
+        execution_ledger_path=str(tmp_path / "execution.jsonl"),
+        quote_source=_NoMarketData(),
+    )
+
+    assert review["sync_diagnostics"] == expected_diagnostics
+    assert "private-fill-id" not in json.dumps(
+        review["sync_diagnostics"],
+        ensure_ascii=False,
+    )
+    assert "private-detail" not in json.dumps(
+        review["sync_diagnostics"],
+        ensure_ascii=False,
     )
 
 

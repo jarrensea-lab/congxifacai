@@ -14,6 +14,7 @@ import math
 import os
 import stat
 import zipfile
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, time
 from pathlib import Path
@@ -34,6 +35,7 @@ MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
 MAX_ZIP_MEMBER_BYTES = 256 * 1024 * 1024
 MAX_ZIP_COMPRESSION_RATIO = 250.0
 MAX_CSV_ROWS = 1_000_000
+RETAINED_TAIL_SAFETY = 5
 NUMERIC_FIELDS = {
     "open": "开盘价",
     "close": "收盘价",
@@ -59,6 +61,22 @@ class OfflineArchiveDataError(ValueError):
     def __init__(self, reason: str):
         super().__init__(reason)
         self.reason = reason
+
+
+@dataclass(frozen=True)
+class _ArchiveCandidate:
+    path: Path
+    member: str
+    kind: str
+    priority: int
+    year: int
+
+
+@dataclass(frozen=True)
+class _ReadResult:
+    rows: list[dict[str, Any]]
+    data_cutoff: str | None
+    retained_peak: int
 
 
 @dataclass(frozen=True)
@@ -234,38 +252,68 @@ class OfflineMinuteDataSource(BaseDataSource):
     ) -> dict[str, Any]:
         code, exchange, prefix = _normalize_stock_code(stock_code)
         archive_period = "1" if period == "day" else period
-        archives = self._archives(prefix, archive_period, as_of)
-        if not archives:
+        candidates = self._archive_candidates(
+            prefix,
+            code,
+            archive_period,
+            as_of,
+            count=count,
+            output_period=period,
+        )
+        if not candidates:
             return self._error(code, period, "archive_not_found")
 
-        rows: list[dict[str, Any]] = []
+        retention_limit = count + RETAINED_TAIL_SAFETY
+        merged: dict[str, tuple[dict[str, Any], int]] = {}
         used_archives: list[Path] = []
-        for archive in archives:
-            year = archive.name.split("_", 1)[0]
-            member = f"{prefix}{code}_{year}.csv"
-            archive_rows = _read_member_rows(
-                archive,
-                member,
+        data_cutoffs: list[str] = []
+        retained_peak = 0
+        cutoff_year = _parse_as_of(as_of).year
+        for candidate in candidates:
+            if (
+                candidate.kind == "annual"
+                and candidate.year < cutoff_year
+                and len(merged) >= retention_limit
+            ):
+                continue
+            read_result = _read_member_rows(
+                candidate.path,
+                candidate.member,
                 as_of,
                 expected_code=code,
                 expected_exchange=exchange,
+                aggregate_daily=period == "day",
+                retention_limit=retention_limit,
             )
-            if not archive_rows:
+            retained_peak = max(
+                retained_peak,
+                read_result.retained_peak,
+            )
+            if not read_result.rows:
                 continue
-            rows.extend(archive_rows)
-            used_archives.append(archive)
-            if period == "day":
-                if len({row["date"][:10] for row in rows}) >= count:
-                    break
-            elif len(rows) >= count:
-                break
+            for row in read_result.rows:
+                timestamp = row["date"]
+                existing = merged.get(timestamp)
+                if existing is not None:
+                    existing_row, existing_priority = existing
+                    if not _market_rows_equal(existing_row, row):
+                        raise OfflineArchiveDataError(
+                            "conflicting_overlap_timestamp"
+                        )
+                    if candidate.priority > existing_priority:
+                        merged[timestamp] = (row, candidate.priority)
+                    continue
+                merged[timestamp] = (row, candidate.priority)
+                if len(merged) > retention_limit:
+                    del merged[min(merged)]
+                retained_peak = max(retained_peak, len(merged))
+            used_archives.append(candidate.path)
+            if read_result.data_cutoff:
+                data_cutoffs.append(read_result.data_cutoff)
 
-        if not rows:
+        if not merged:
             return self._error(code, period, "stock_data_not_found")
-        rows.sort(key=lambda item: item["date"])
-        timestamps = [row["date"] for row in rows]
-        if len(timestamps) != len(set(timestamps)):
-            raise OfflineArchiveDataError("duplicate_timestamp")
+        rows = [merged[key][0] for key in sorted(merged)]
 
         if adjustment == "qfq":
             adjusted = self._apply_qfq(rows, code, exchange, as_of)
@@ -278,7 +326,11 @@ class OfflineMinuteDataSource(BaseDataSource):
                 return result
             rows = adjusted
 
-        bars = _aggregate_daily(rows) if period == "day" else _minute_bars(rows)
+        bars = (
+            _daily_bars_from_aggregates(rows)
+            if period == "day"
+            else _minute_bars(rows)
+        )
         bars = bars[-count:]
         newest_archive_mtime = max(path.stat().st_mtime for path in used_archives)
         return {
@@ -296,39 +348,103 @@ class OfflineMinuteDataSource(BaseDataSource):
                 tz=MARKET_TIMEZONE,
             ).isoformat(),
             "captured_at": datetime.now(MARKET_TIMEZONE).isoformat(),
-            "data_cutoff": rows[-1]["date"],
+            "data_cutoff": max(data_cutoffs),
             "archive_count": len(used_archives),
+            "retained_row_peak": retained_peak,
             "missing_fields": [],
         }
 
-    def _archives(
+    def _archive_candidates(
         self,
         prefix: str,
+        code: str,
         period: str,
         as_of: str | None,
-    ) -> list[Path]:
+        *,
+        count: int,
+        output_period: str,
+    ) -> list[_ArchiveCandidate]:
         market_dir = (
             "A股_分时数据_京市"
             if prefix == "bj"
             else "A股_分时数据_沪深"
         )
-        archive_dir = (
-            self.registry.minute_root
-            / market_dir
-            / f"{period}分钟_按年汇总"
-        )
-        if not archive_dir.is_dir():
-            return []
-        max_year = _parse_as_of(as_of).year if as_of else None
-        archives = []
-        for path in archive_dir.glob(f"*_{period}min.zip"):
-            try:
-                year = int(path.name.split("_", 1)[0])
-            except ValueError:
-                continue
-            if max_year is None or year <= max_year:
-                archives.append(path)
-        return sorted(archives, key=lambda path: path.name, reverse=True)
+        market_root = self.registry.minute_root / market_dir
+        cutoff = _parse_as_of(as_of)
+        if output_period == "day":
+            daily_limit = count + RETAINED_TAIL_SAFETY
+        else:
+            bars_per_day = max(1, 240 // int(period))
+            daily_limit = (
+                math.ceil((count + RETAINED_TAIL_SAFETY) / bars_per_day) + 2
+            )
+
+        daily_paths: list[tuple[datetime, Path]] = []
+        monthly_root = market_root / f"{period}分钟_按月归档"
+        if monthly_root.is_dir():
+            for month_dir in sorted(monthly_root.iterdir(), reverse=True):
+                if not month_dir.is_dir():
+                    continue
+                try:
+                    month = datetime.strptime(month_dir.name, "%Y-%m")
+                except ValueError:
+                    continue
+                if (month.year, month.month) > (cutoff.year, cutoff.month):
+                    continue
+                for path in sorted(
+                    month_dir.glob(f"*_{period}min.zip"),
+                    reverse=True,
+                ):
+                    date_text = path.name.split("_", 1)[0]
+                    try:
+                        archive_day = datetime.strptime(date_text, "%Y%m%d")
+                    except ValueError:
+                        continue
+                    archive_day = archive_day.replace(
+                        tzinfo=MARKET_TIMEZONE
+                    )
+                    if archive_day.date() <= cutoff.date():
+                        daily_paths.append((archive_day, path))
+                if len(daily_paths) >= daily_limit:
+                    break
+        daily_paths = sorted(
+            daily_paths,
+            key=lambda item: item[0],
+            reverse=True,
+        )[:daily_limit]
+        daily_candidates = [
+            _ArchiveCandidate(
+                path=path,
+                member=f"{prefix}{code}.csv",
+                kind="daily",
+                priority=2,
+                year=archive_day.year,
+            )
+            for archive_day, path in daily_paths
+        ]
+
+        annual_dir = market_root / f"{period}分钟_按年汇总"
+        annual_candidates: list[_ArchiveCandidate] = []
+        if annual_dir.is_dir():
+            annual_paths: list[tuple[int, Path]] = []
+            for path in annual_dir.glob(f"*_{period}min.zip"):
+                try:
+                    year = int(path.name.split("_", 1)[0])
+                except ValueError:
+                    continue
+                if year <= cutoff.year:
+                    annual_paths.append((year, path))
+            annual_candidates = [
+                _ArchiveCandidate(
+                    path=path,
+                    member=f"{prefix}{code}_{year}.csv",
+                    kind="annual",
+                    priority=1,
+                    year=year,
+                )
+                for year, path in sorted(annual_paths, reverse=True)
+            ]
+        return daily_candidates + annual_candidates
 
     def _apply_qfq(
         self,
@@ -563,9 +679,15 @@ def _read_member_rows(
     *,
     expected_code: str,
     expected_exchange: str,
-) -> list[dict[str, Any]]:
+    aggregate_daily: bool,
+    retention_limit: int,
+) -> _ReadResult:
     cutoff = _parse_as_of(as_of)
-    rows = []
+    retained: deque[dict[str, Any]] = deque(maxlen=retention_limit)
+    current_day: dict[str, Any] | None = None
+    previous_timestamp: datetime | None = None
+    data_cutoff: str | None = None
+    retained_peak = 0
     with zipfile.ZipFile(archive) as bundle:
         case_matches = []
         unsafe_matches = []
@@ -588,7 +710,7 @@ def _read_member_rows(
         if unsafe_matches:
             raise OfflineArchiveDataError("archive_member_unsafe")
         if not case_matches:
-            return []
+            return _ReadResult([], None, 0)
         member_name = case_matches[0]
         _validate_zip_member_info(bundle.getinfo(member_name))
         with bundle.open(member_name) as raw:
@@ -614,8 +736,14 @@ def _read_member_rows(
                     raise OfflineArchiveDataError("minute_row_code_mismatch")
                 timestamp = item.get("时间")
                 observed_at = _parse_archive_timestamp(timestamp)
-                if observed_at > cutoff:
-                    continue
+                if previous_timestamp is not None:
+                    if observed_at == previous_timestamp:
+                        raise OfflineArchiveDataError("duplicate_timestamp")
+                    if observed_at < previous_timestamp:
+                        raise OfflineArchiveDataError(
+                            "non_monotonic_timestamp"
+                        )
+                previous_timestamp = observed_at
                 numeric: dict[str, float] = {}
                 for field, column in NUMERIC_FIELDS.items():
                     raw_value = item.get(column)
@@ -644,16 +772,90 @@ def _read_member_rows(
                     or numeric["low"] > min(numeric["open"], numeric["close"])
                 ):
                     raise OfflineArchiveDataError("invalid_numeric_row")
-                rows.append(
-                    {
-                        "date": observed_at.replace(tzinfo=None).isoformat(
-                            sep=" ",
-                            timespec="seconds",
-                        ),
-                        **numeric,
-                    }
+                if observed_at > cutoff:
+                    continue
+                normalized_timestamp = observed_at.replace(
+                    tzinfo=None
+                ).isoformat(
+                    sep=" ",
+                    timespec="seconds",
                 )
-    return rows
+                data_cutoff = normalized_timestamp
+                if aggregate_daily:
+                    trade_date = normalized_timestamp[:10]
+                    if current_day is None:
+                        current_day = _new_daily_aggregate(
+                            trade_date,
+                            numeric,
+                        )
+                    elif current_day["date"] == trade_date:
+                        _update_daily_aggregate(current_day, numeric)
+                    else:
+                        retained.append(current_day)
+                        current_day = _new_daily_aggregate(
+                            trade_date,
+                            numeric,
+                        )
+                    retained_peak = max(
+                        retained_peak,
+                        len(retained) + (1 if current_day else 0),
+                    )
+                else:
+                    retained.append(
+                        {
+                            "date": normalized_timestamp,
+                            **numeric,
+                        }
+                    )
+                    retained_peak = max(retained_peak, len(retained))
+    if current_day is not None:
+        retained.append(current_day)
+        retained_peak = max(retained_peak, len(retained))
+    return _ReadResult(list(retained), data_cutoff, retained_peak)
+
+
+def _new_daily_aggregate(
+    trade_date: str,
+    numeric: dict[str, float],
+) -> dict[str, Any]:
+    return {
+        "date": trade_date,
+        "open": numeric["open"],
+        "close": numeric["close"],
+        "high": numeric["high"],
+        "low": numeric["low"],
+        "volume": numeric["volume"],
+        "amount": numeric["amount"],
+    }
+
+
+def _update_daily_aggregate(
+    aggregate: dict[str, Any],
+    numeric: dict[str, float],
+) -> None:
+    aggregate["close"] = numeric["close"]
+    aggregate["high"] = max(aggregate["high"], numeric["high"])
+    aggregate["low"] = min(aggregate["low"], numeric["low"])
+    aggregate["volume"] += numeric["volume"]
+    aggregate["amount"] += numeric["amount"]
+
+
+def _market_rows_equal(
+    left: dict[str, Any],
+    right: dict[str, Any],
+) -> bool:
+    return all(
+        left.get(field) == right.get(field)
+        for field in (
+            "date",
+            "open",
+            "close",
+            "high",
+            "low",
+            "volume",
+            "amount",
+        )
+    )
 
 
 def _validate_zip_member_info(info: zipfile.ZipInfo) -> None:
@@ -680,32 +882,12 @@ def _round_price(value: float) -> float:
     return round(value, 4)
 
 
-def _aggregate_daily(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    days: dict[str, dict[str, Any]] = {}
-    for row in rows:
-        trade_date = row["date"][:10]
-        if trade_date not in days:
-            days[trade_date] = {
-                "date": trade_date,
-                "open": row["open"],
-                "close": row["close"],
-                "high": row["high"],
-                "low": row["low"],
-                "volume": row["volume"],
-                "amount": row["amount"],
-            }
-            continue
-        day = days[trade_date]
-        day["close"] = row["close"]
-        day["high"] = max(day["high"], row["high"])
-        day["low"] = min(day["low"], row["low"])
-        day["volume"] += row["volume"]
-        day["amount"] += row["amount"]
-
+def _daily_bars_from_aggregates(
+    rows: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     bars = []
     previous_close = None
-    for trade_date in sorted(days):
-        day = days[trade_date]
+    for day in rows:
         change_pct = (
             (day["close"] - previous_close) / previous_close * 100
             if previous_close
@@ -713,7 +895,7 @@ def _aggregate_daily(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
         )
         bars.append(
             {
-                "date": trade_date,
+                "date": day["date"],
                 "open": _round_price(day["open"]),
                 "close": _round_price(day["close"]),
                 "high": _round_price(day["high"]),

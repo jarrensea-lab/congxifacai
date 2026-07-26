@@ -7,13 +7,28 @@ V6 新增: 为每支持仓股和推荐股提供历史回测指标，包括胜率
     result = await run_backtest(stock_code, period_days=180)
     # result: {total_trades, win_rate_pct, avg_profit_pct, ...}
 """
+from datetime import date, datetime, time
 from typing import Dict, Any
+from zoneinfo import ZoneInfo
 
 from app.data_sources.offline_market_data import (
     OfflineMinuteDataSource,
     validate_offline_kline_response,
 )
 from app.utils.logger import logger
+from app.utils.trading_calendar import is_trading_day, prev_trading_day
+
+
+MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
+
+
+def _expected_recent_trading_day() -> date:
+    """Return the latest trading day whose close should already exist."""
+    now = datetime.now(MARKET_TIMEZONE)
+    today = now.date()
+    if is_trading_day(today) and now.time() >= time(15, 0):
+        return today
+    return prev_trading_day(today)
 
 
 async def run_backtest(
@@ -94,15 +109,25 @@ async def _fetch_kline(stock_code: str, period_days: int):
         if kline.get("status") == "ok":
             bars, validation_error = validate_offline_kline_response(
                 kline,
-                minimum_bars=20,
+                minimum_bars=1,
             )
             if validation_error:
                 logger.warning(
                     "Offline kline returned malformed or partial success"
                 )
                 return []
-            return bars
-        if kline.get("status") != "error":
+            latest_day = date.fromisoformat(str(bars[-1]["date"])[:10])
+            if (
+                len(bars) < 20
+                or latest_day < _expected_recent_trading_day()
+            ):
+                logger.info(
+                    "Offline kline has insufficient recent coverage; "
+                    "falling back to a provider"
+                )
+            else:
+                return bars
+        elif kline.get("status") != "error":
             logger.warning("Offline kline returned an unknown status")
             return []
     except (OSError, ValueError) as e:

@@ -3,6 +3,7 @@ import json
 import math
 import stat
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,30 @@ def _write_minute_archive(
     )
     archive.parent.mkdir(parents=True, exist_ok=True)
     payload = root / member
+    _write_csv(payload, rows)
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        bundle.write(payload, arcname=member)
+    payload.unlink()
+
+
+def _write_daily_archive(
+    root: Path,
+    *,
+    period: str,
+    day: str,
+    member: str,
+    rows: list[list[object]],
+    market_dir: str = "A股_分时数据_沪深",
+) -> None:
+    archive = (
+        root
+        / market_dir
+        / f"{period}分钟_按月归档"
+        / day[:7]
+        / f"{day.replace('-', '')}_{period}min.zip"
+    )
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    payload = root / f"daily-{day}-{member}"
     _write_csv(payload, rows)
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
         bundle.write(payload, arcname=member)
@@ -1063,3 +1088,174 @@ def test_offline_response_validator_enforces_data_cutoff(data_cutoff, as_of):
 
     assert bars == []
     assert error == "offline_history_invalid"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stock_code", "member", "row_code", "market_dir"),
+    [
+        ("600000", "sh600000.csv", "sh600000", "A股_分时数据_沪深"),
+        ("000725", "sz000725.csv", "sz000725", "A股_分时数据_沪深"),
+        ("920001", "bj920001.csv", "bj920001", "A股_分时数据_京市"),
+    ],
+)
+async def test_current_daily_zip_layout_supports_sh_sz_and_bj(
+    tmp_path,
+    stock_code,
+    member,
+    row_code,
+    market_dir,
+):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_daily_archive(
+        registry.minute_root,
+        period="1",
+        day="2026-07-06",
+        member=member,
+        rows=[
+            header,
+            ["2026-07-06 09:30:00", row_code, "真实日包形态", 10, 10.1, 10.2, 9.9, 100, 1010, 0, 0],
+        ],
+        market_dir=market_dir,
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        stock_code,
+        period="1",
+        count=1,
+        adjustment="none",
+        as_of="2026-07-06",
+    )
+
+    assert result["status"] == "ok"
+    assert result["bars"][0]["date"] == "2026-07-06 09:30:00"
+    assert result["data_cutoff"] == "2026-07-06 09:30:00"
+
+
+@pytest.mark.asyncio
+async def test_annual_and_daily_archives_merge_with_identical_overlap(tmp_path):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    shared = ["2026-07-06 09:30:00", "sz000725", "京东方Ａ", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["2026-07-03 15:00:00", "sz000725", "京东方Ａ", 7.9, 8, 8.1, 7.8, 100, 800, 0, 0],
+            shared,
+        ],
+    )
+    _write_daily_archive(
+        registry.minute_root,
+        period="1",
+        day="2026-07-06",
+        member="sz000725.csv",
+        rows=[
+            header,
+            shared,
+            ["2026-07-06 09:31:00", "sz000725", "京东方Ａ", 8.1, 8.2, 8.3, 8, 110, 902, 0, 0],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="1",
+        count=4,
+        adjustment="none",
+        as_of="2026-07-06",
+    )
+
+    assert result["status"] == "ok"
+    assert [bar["date"] for bar in result["bars"]] == [
+        "2026-07-03 15:00:00",
+        "2026-07-06 09:30:00",
+        "2026-07-06 09:31:00",
+    ]
+    assert result["archive_count"] == 2
+
+
+@pytest.mark.asyncio
+async def test_conflicting_annual_and_daily_overlap_fails_closed(tmp_path):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["2026-07-06 09:30:00", "sz000725", "京东方Ａ", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0],
+        ],
+    )
+    _write_daily_archive(
+        registry.minute_root,
+        period="1",
+        day="2026-07-06",
+        member="sz000725.csv",
+        rows=[
+            header,
+            ["2026-07-06 09:30:00", "sz000725", "京东方Ａ", 8, 8.15, 8.2, 7.9, 100, 815, 0, 0],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="1",
+        count=1,
+        adjustment="none",
+        as_of="2026-07-06",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "conflicting_overlap_timestamp"
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+async def test_annual_member_retains_only_bounded_minute_tail(tmp_path):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    start = datetime(2026, 1, 1, 9, 30)
+    rows = [header]
+    for index in range(1000):
+        observed_at = start + timedelta(minutes=index)
+        price = 8 + index / 10000
+        rows.append(
+            [
+                observed_at.isoformat(sep=" "),
+                "sz000725",
+                "京东方Ａ",
+                price,
+                price,
+                price + 0.01,
+                price - 0.01,
+                100,
+                800,
+                0,
+                0,
+            ]
+        )
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=rows,
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="1",
+        count=5,
+        adjustment="none",
+        as_of="2026-12-31",
+    )
+
+    assert result["status"] == "ok"
+    assert len(result["bars"]) == 5
+    assert result["retained_row_peak"] <= 10

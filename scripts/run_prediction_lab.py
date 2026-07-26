@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -32,6 +33,9 @@ from app.services.quant_lifecycle import CandidatePoolStore
 
 BACKFILL_KLINE_PROVIDER_LIMIT = 2000
 BACKFILL_KLINE_SAFETY_DAYS = 10
+OFFLINE_COVERAGE_REASONS = frozenset(
+    {"prediction_date_not_in_bars", "horizon_not_due"}
+)
 
 
 def _today() -> str:
@@ -273,6 +277,8 @@ async def backfill_due_predictions(
     code_errors: list[dict] = []
     history_overflow_count = 0
     offline_history_code_count = 0
+    offline_history_insufficient_coverage_count = 0
+    offline_coverage_fallback_reasons: Counter[str] = Counter()
     for code, code_predictions in by_code.items():
         prediction_dates = [
             date.fromisoformat(str(item.get("prediction_date"))[:10])
@@ -348,8 +354,33 @@ async def backfill_due_predictions(
                             for prediction in code_predictions
                         )
                         continue
-                    kline = {**kline, "bars": validated_bars}
-                    offline_history_code_count += 1
+                    coverage_outcomes = [
+                        evaluate_prediction_record(
+                            prediction,
+                            bars=validated_bars,
+                            as_of=as_of,
+                        )
+                        for prediction in code_predictions
+                    ]
+                    incomplete_reasons = {
+                        (
+                            str(outcome.get("reason"))
+                            if outcome.get("reason")
+                            in OFFLINE_COVERAGE_REASONS
+                            else "coverage_incomplete"
+                        )
+                        for outcome in coverage_outcomes
+                        if outcome.get("status") != "verified"
+                    }
+                    if incomplete_reasons:
+                        offline_history_insufficient_coverage_count += 1
+                        offline_coverage_fallback_reasons.update(
+                            incomplete_reasons
+                        )
+                        kline = {}
+                    else:
+                        kline = {**kline, "bars": validated_bars}
+                        offline_history_code_count += 1
                 elif kline.get("status") == "error":
                     kline = {}
                 else:
@@ -423,6 +454,12 @@ async def backfill_due_predictions(
         "code_error_count": len(code_errors),
         "history_overflow_count": history_overflow_count,
         "offline_history_code_count": offline_history_code_count,
+        "offline_history_insufficient_coverage_count": (
+            offline_history_insufficient_coverage_count
+        ),
+        "offline_coverage_fallback_reasons": dict(
+            sorted(offline_coverage_fallback_reasons.items())
+        ),
         "code_errors": code_errors,
         "evaluated_count": len(outcomes),
         "verified_count": sum(item.get("status") == "verified" for item in outcomes),
