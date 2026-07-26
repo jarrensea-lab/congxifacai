@@ -33,6 +33,11 @@ from app.services.strategy_profile import (
     calculate_target_price,
     get_strategy_profile,
 )
+from app.services.market_data_health import (
+    EXPECTED_MARKET_INDEX_CODES,
+    aggregate_market_quote_truth,
+    is_recent_market_cutoff,
+)
 from app.services.visible_decision_gate import (
     ENTRY_ACTIONS,
     apply_visible_decision_gate,
@@ -373,109 +378,6 @@ def build_sentinel_research_section(package: dict | None, report_date: str | Non
     return lines
 
 
-MARKET_DATA_MAX_AGE_SECONDS = 15 * 60
-
-
-def _is_recent_market_cutoff(value) -> bool:
-    if not value:
-        return False
-    cutoff_text = value.isoformat() if isinstance(value, datetime) else str(value).strip()
-    try:
-        parsed = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
-    except ValueError:
-        return False
-    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
-    age_seconds = (now - parsed).total_seconds()
-    return -60 <= age_seconds <= MARKET_DATA_MAX_AGE_SECONDS
-
-
-def _fresh_market_quote_truth(quote: dict) -> tuple[str, str] | None:
-    freshness = str(
-        quote.get("freshness_status") or quote.get("freshness") or ""
-    ).strip().lower()
-    if freshness not in {"fresh", "ok"}:
-        return None
-    raw_cutoff = (
-        quote.get("data_cutoff")
-        or quote.get("quote_timestamp")
-        or quote.get("timestamp")
-    )
-    if not _is_recent_market_cutoff(raw_cutoff):
-        return None
-    cutoff_text = (
-        raw_cutoff.isoformat()
-        if isinstance(raw_cutoff, datetime)
-        else str(raw_cutoff).strip()
-    )
-    return cutoff_text, freshness
-
-
-def _aggregate_market_quote_truth(
-    quotes,
-    expected_codes: list[str],
-    *,
-    default_provider: str,
-) -> dict:
-    verified_quotes: dict[str, dict] = {}
-    missing_sources: list[str] = []
-    rejected_sources: list[str] = []
-    providers: set[str] = set()
-    data_cutoffs: list[str] = []
-    accepted_freshness: set[str] = set()
-
-    for code in expected_codes:
-        try:
-            quote = quotes.get(code) if quotes is not None else None
-        except Exception:
-            quote = None
-        if isinstance(quote, Exception) or not isinstance(quote, dict) or not quote:
-            missing_sources.append(code)
-            continue
-        try:
-            price = float(quote.get("price") or 0)
-        except (TypeError, ValueError):
-            price = 0
-        quote_truth = _fresh_market_quote_truth(quote)
-        if price <= 0 or not quote_truth:
-            rejected_sources.append(code)
-            continue
-        cutoff, freshness = quote_truth
-        verified_quotes[code] = quote
-        providers.add(str(quote.get("source") or default_provider))
-        data_cutoffs.append(cutoff)
-        accepted_freshness.add(freshness)
-
-    if verified_quotes and (missing_sources or rejected_sources):
-        source_status = "degraded"
-        freshness_status = "degraded"
-        source_error = "partial_market_coverage"
-    elif verified_quotes:
-        source_status = "ok"
-        freshness_status = "fresh" if accepted_freshness == {"fresh"} else "ok"
-        source_error = ""
-    else:
-        source_status = "failed"
-        freshness_status = "failed"
-        source_error = "fresh_market_indices_unavailable"
-
-    return {
-        "quotes": verified_quotes,
-        "market_source_status": {
-            "status": source_status,
-            "provider": "+".join(sorted(providers)) if providers else default_provider,
-            "data_cutoff": min(data_cutoffs) if data_cutoffs else None,
-            "freshness_status": freshness_status,
-            "error": source_error,
-            "missing_sources": missing_sources,
-            "rejected_sources": rejected_sources,
-            "coverage": {
-                "expected": len(expected_codes),
-                "verified": len(verified_quotes),
-            },
-        },
-    }
-
-
 def build_data_source_audit(
     *,
     market_data: dict,
@@ -511,11 +413,27 @@ def build_data_source_audit(
         f"missing={','.join(map(str, missing_sources)) or 'none'}；"
         f"rejected={','.join(map(str, rejected_sources)) or 'none'}"
     )
+    coverage_complete = (
+        expected_count == len(EXPECTED_MARKET_INDEX_CODES)
+        and verified_count == len(EXPECTED_MARKET_INDEX_CODES)
+    )
+    source_lists_complete = not missing_sources and not rejected_sources
+    index_keys_complete = {
+        "shanghai",
+        "shenzhen",
+        "cyb",
+    }.issubset(indices)
+    cutoff_recent = is_recent_market_cutoff(
+        data_cutoff,
+        now=datetime.now().astimezone(),
+    )
     market_ok = (
         market_status.get("status") == "ok"
-        and bool(indices)
+        and index_keys_complete
+        and coverage_complete
+        and source_lists_complete
         and freshness_status in {"fresh", "ok"}
-        and _is_recent_market_cutoff(data_cutoff)
+        and cutoff_recent
     )
     if market_ok:
         market_detail = (
@@ -531,9 +449,15 @@ def build_data_source_audit(
             )
         if not indices:
             failure_reasons.append("indices_missing")
+        elif not index_keys_complete:
+            failure_reasons.append("required_indices_missing")
+        if not coverage_complete:
+            failure_reasons.append("coverage_incomplete")
+        if not source_lists_complete:
+            failure_reasons.append("missing_or_rejected_sources")
         if not data_cutoff:
             failure_reasons.append("data_cutoff_missing")
-        elif not _is_recent_market_cutoff(data_cutoff):
+        elif not cutoff_recent:
             failure_reasons.append("data_cutoff_stale_or_invalid")
         if freshness_status not in {"fresh", "ok"}:
             failure_reasons.append(
@@ -2629,13 +2553,14 @@ async def main():
         "portfolio_sync_status": portfolio.get("portfolio_sync_status", "unknown"),
     }
 
-    index_codes = ["sh000001", "sz399001", "sz399006"]
+    index_codes = list(EXPECTED_MARKET_INDEX_CODES)
     try:
         raw_indices = await tc.fetch_batch(index_codes)
-        aggregate = _aggregate_market_quote_truth(
+        aggregate = aggregate_market_quote_truth(
             raw_indices,
             index_codes,
             default_provider=market_provider,
+            now=datetime.now().astimezone(),
         )
         verified_quotes = aggregate["quotes"]
         normalized_indices = {}
@@ -2656,10 +2581,11 @@ async def main():
         print(f"   上证: {sh.get('price','?')} ({sh.get('change_pct',0):+.2f}%) | "
               f"深证: {sz.get('price','?')} ({sz.get('change_pct',0):+.2f}%)", flush=True)
     except Exception as e:
-        aggregate = _aggregate_market_quote_truth(
+        aggregate = aggregate_market_quote_truth(
             {},
             index_codes,
             default_provider=market_provider,
+            now=datetime.now().astimezone(),
         )
         market_data["indices"] = {}
         market_data["market_source_status"] = aggregate["market_source_status"]

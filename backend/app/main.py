@@ -51,6 +51,10 @@ from app.services.schedule_policy import (
     should_run_premarket_calibration,
 )
 from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
+from app.services.market_data_health import (
+    EXPECTED_MARKET_INDEX_CODES,
+    aggregate_market_quote_truth,
+)
 from app.services.notification_gate import NotificationGate, build_alert_digest
 from app.services.visible_decision_gate import (
     build_runtime_blocked_gate,
@@ -308,128 +312,32 @@ app.include_router(strategy.router)
 # V6 定时任务实现
 # ============================================================
 
-MARKET_DATA_MAX_AGE_SECONDS = 15 * 60
-
-
-def _fresh_market_quote_truth(quote: dict) -> tuple[str, str] | None:
-    freshness = str(
-        quote.get("freshness_status") or quote.get("freshness") or ""
-    ).strip().lower()
-    if freshness not in {"fresh", "ok"}:
-        return None
-    raw_cutoff = (
-        quote.get("data_cutoff")
-        or quote.get("quote_timestamp")
-        or quote.get("timestamp")
-    )
-    if not raw_cutoff:
-        return None
-    cutoff_text = (
-        raw_cutoff.isoformat()
-        if isinstance(raw_cutoff, datetime)
-        else str(raw_cutoff).strip()
-    )
-    try:
-        parsed = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
-    age_seconds = (now - parsed).total_seconds()
-    if not -60 <= age_seconds <= MARKET_DATA_MAX_AGE_SECONDS:
-        return None
-    return cutoff_text, freshness
-
-
-def _aggregate_market_quote_truth(
-    quotes,
-    expected_codes: list[str],
-    *,
-    default_provider: str,
-) -> dict:
-    verified_quotes: dict[str, dict] = {}
-    missing_sources: list[str] = []
-    rejected_sources: list[str] = []
-    providers: set[str] = set()
-    data_cutoffs: list[str] = []
-    accepted_freshness: set[str] = set()
-
-    for code in expected_codes:
-        try:
-            quote = quotes.get(code) if quotes is not None else None
-        except Exception:
-            quote = None
-        if isinstance(quote, Exception) or not isinstance(quote, dict) or not quote:
-            missing_sources.append(code)
-            continue
-        try:
-            price = float(quote.get("price") or 0)
-        except (TypeError, ValueError):
-            price = 0
-        quote_truth = _fresh_market_quote_truth(quote)
-        if price <= 0 or not quote_truth:
-            rejected_sources.append(code)
-            continue
-        cutoff, freshness = quote_truth
-        verified_quotes[code] = quote
-        providers.add(str(quote.get("source") or default_provider))
-        data_cutoffs.append(cutoff)
-        accepted_freshness.add(freshness)
-
-    if verified_quotes and (missing_sources or rejected_sources):
-        source_status = "degraded"
-        freshness_status = "degraded"
-        source_error = "partial_market_coverage"
-    elif verified_quotes:
-        source_status = "ok"
-        freshness_status = "fresh" if accepted_freshness == {"fresh"} else "ok"
-        source_error = ""
-    else:
-        source_status = "failed"
-        freshness_status = "failed"
-        source_error = "fresh_market_indices_unavailable"
-
-    return {
-        "quotes": verified_quotes,
-        "market_source_status": {
-            "status": source_status,
-            "provider": "+".join(sorted(providers)) if providers else default_provider,
-            "data_cutoff": min(data_cutoffs) if data_cutoffs else None,
-            "freshness_status": freshness_status,
-            "error": source_error,
-            "missing_sources": missing_sources,
-            "rejected_sources": rejected_sources,
-            "coverage": {
-                "expected": len(expected_codes),
-                "verified": len(verified_quotes),
-            },
-        },
-    }
-
-
 async def _fetch_market_data() -> dict:
     """通过 DataRouter 拉取市场数据（多源容错）"""
-    expected_codes = ["sh000001", "sz399001", "sz399006"]
+    expected_codes = list(EXPECTED_MARKET_INDEX_CODES)
+    aggregation_time = datetime.now().astimezone()
     primary_quotes = {}
     for code in expected_codes:
         try:
             primary_quotes[code] = await data_router.fetch(code)
         except Exception:
             primary_quotes[code] = None
-    aggregate = _aggregate_market_quote_truth(
+    aggregate = aggregate_market_quote_truth(
         primary_quotes,
         expected_codes,
         default_provider="data_router",
+        now=aggregation_time,
     )
     if not aggregate["quotes"]:
-        fallback_codes = ["sh000001", "sz399001"]
         try:
-            fallback_quotes = await tencent_client.fetch_batch(fallback_codes)
+            fallback_quotes = await tencent_client.fetch_batch(expected_codes)
         except Exception:
             fallback_quotes = {}
-        aggregate = _aggregate_market_quote_truth(
+        aggregate = aggregate_market_quote_truth(
             fallback_quotes,
-            fallback_codes,
+            expected_codes,
             default_provider="data_router+tencent",
+            now=aggregation_time,
         )
 
     verified_quotes = aggregate["quotes"]

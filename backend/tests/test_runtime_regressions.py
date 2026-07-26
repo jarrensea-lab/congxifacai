@@ -422,6 +422,59 @@ async def test_fetch_market_data_fails_closed_when_all_index_sources_fail(
 
 
 @pytest.mark.asyncio
+async def test_fetch_market_data_fallback_requires_all_three_indices(monkeypatch):
+    import app.main as main_module
+
+    requested_codes = []
+    fresh_cutoff = datetime.now().astimezone().isoformat()
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def no_primary_quote(code):
+        return None
+
+    async def partial_fallback(codes):
+        requested_codes.extend(codes)
+        return {
+            code: {
+                "price": 4000,
+                "source": "tencent",
+                "quote_timestamp": fresh_cutoff,
+                "freshness": "fresh",
+            }
+            for code in codes
+            if code != "sz399006"
+        }
+
+    monkeypatch.setattr(main_module.data_router, "fetch", no_primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", partial_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert requested_codes == ["sh000001", "sz399001", "sz399006"]
+    assert list(result["indices"]) == ["sh000001", "sz399001"]
+    assert result["market_source_status"]["status"] == "degraded"
+    assert result["market_source_status"]["coverage"] == {
+        "expected": 3,
+        "verified": 2,
+    }
+    assert result["market_source_status"]["missing_sources"] == ["sz399006"]
+
+
+@pytest.mark.asyncio
 async def test_fetch_market_data_reports_real_index_source_and_cutoff(monkeypatch):
     import app.main as main_module
 
@@ -640,7 +693,18 @@ async def test_fetch_market_data_does_not_mark_mixed_freshness_ok(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("partial_kind", ["none", "exception", "empty", "price_zero"])
+@pytest.mark.parametrize(
+    "partial_kind",
+    [
+        "none",
+        "exception",
+        "empty",
+        "price_zero",
+        "price_nan",
+        "price_inf",
+        "price_negative_inf",
+    ],
+)
 async def test_fetch_market_data_degrades_incomplete_index_coverage(
     monkeypatch,
     partial_kind,
@@ -668,10 +732,13 @@ async def test_fetch_market_data_degrades_incomplete_index_coverage(
             raise RuntimeError("index source failed")
         if partial_kind == "empty":
             return {}
-        return {
-            **fresh_quote(),
-            "price": 0,
+        invalid_prices = {
+            "price_zero": 0,
+            "price_nan": float("nan"),
+            "price_inf": float("inf"),
+            "price_negative_inf": float("-inf"),
         }
+        return {**fresh_quote(), "price": invalid_prices[partial_kind]}
 
     async def unexpected_fallback(codes):
         raise AssertionError("partial primary data should be classified, not replaced")

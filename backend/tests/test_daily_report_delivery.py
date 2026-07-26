@@ -2143,13 +2143,20 @@ def test_data_source_audit_requires_structured_market_success_with_indices():
     ok_audit = "\n".join(
         build_data_source_audit(
             market_data={
-                "indices": {"shanghai": 4000},
+                "indices": {
+                    "shanghai": 4000,
+                    "shenzhen": 12000,
+                    "cyb": 2600,
+                },
                 "market_source_status": {
                     "status": "ok",
                     "provider": "tencent",
                     "data_cutoff": fresh_cutoff,
                     "freshness": "fresh",
                     "error": "",
+                    "coverage": {"expected": 3, "verified": 3},
+                    "missing_sources": [],
+                    "rejected_sources": [],
                 },
             },
             sentinel_package=None,
@@ -2177,6 +2184,78 @@ def test_data_source_audit_requires_structured_market_success_with_indices():
     assert "tencent" in ok_audit
     assert fresh_cutoff in ok_audit
     assert "| 行情数据 | degraded |" in empty_audit
+
+
+@pytest.mark.parametrize(
+    "status_patch",
+    [
+        {},
+        {"coverage": {"expected": 3, "verified": 2}},
+        {
+            "coverage": {"expected": 3, "verified": 3},
+            "missing_sources": ["sz399006"],
+        },
+        {
+            "coverage": {"expected": 3, "verified": 3},
+            "rejected_sources": ["sz399006"],
+        },
+    ],
+)
+def test_data_source_audit_rejects_incomplete_market_coverage(status_patch):
+    from scripts.daily_report import build_data_source_audit
+
+    status = {
+        "status": "ok",
+        "provider": "tencent",
+        "data_cutoff": datetime.now().astimezone().isoformat(),
+        "freshness_status": "fresh",
+        "error": "",
+        **status_patch,
+    }
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {
+                    "shanghai": 4000,
+                    "shenzhen": 12000,
+                    "cyb": 2600,
+                },
+                "market_source_status": status,
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | degraded |" in audit
+
+
+def test_data_source_audit_rejects_naive_market_cutoff():
+    from scripts.daily_report import build_data_source_audit
+
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {
+                    "shanghai": 4000,
+                    "shenzhen": 12000,
+                    "cyb": 2600,
+                },
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": datetime.now().replace(tzinfo=None).isoformat(),
+                    "freshness_status": "fresh",
+                    "error": "",
+                    "coverage": {"expected": 3, "verified": 3},
+                    "missing_sources": [],
+                    "rejected_sources": [],
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | degraded |" in audit
 
 
 @pytest.mark.parametrize(
@@ -2249,7 +2328,18 @@ def test_data_source_audit_rejects_nonfresh_market_status(freshness_status):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("partial_kind", ["none", "exception", "empty", "price_zero"])
+@pytest.mark.parametrize(
+    "partial_kind",
+    [
+        "none",
+        "exception",
+        "empty",
+        "price_zero",
+        "price_nan",
+        "price_inf",
+        "price_negative_inf",
+    ],
+)
 async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
     tmp_path,
     monkeypatch,
@@ -2312,7 +2402,13 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
             elif partial_kind == "empty":
                 quotes["sz399001"] = {}
             else:
-                quotes["sz399001"]["price"] = 0
+                invalid_prices = {
+                    "price_zero": 0,
+                    "price_nan": float("nan"),
+                    "price_inf": float("inf"),
+                    "price_negative_inf": float("-inf"),
+                }
+                quotes["sz399001"]["price"] = invalid_prices[partial_kind]
             return quotes
 
     class FakePositionWatchStore:
