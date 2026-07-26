@@ -344,7 +344,14 @@ async def test_run_debate_passes_active_strategy_profile_to_account_constraints(
             {
                 "status": "success",
                 "providers": ["DeepSeek", "Qwen"],
-                "calls": [],
+                "calls": [{
+                    "role": "输出校验",
+                    "provider": "DeepSeek",
+                    "attempted_provider": "DeepSeek",
+                    "requested_provider": "DeepSeek",
+                    "status": "success",
+                    "output_usable": True,
+                }],
                 "degradation_reasons": [],
             },
             "success",
@@ -354,7 +361,15 @@ async def test_run_debate_passes_active_strategy_profile_to_account_constraints(
             {
                 "status": "degraded",
                 "providers": ["DeepSeek"],
-                "calls": [],
+                "calls": [{
+                    "role": "输出校验",
+                    "provider": "DeepSeek",
+                    "attempted_provider": "DeepSeek",
+                    "requested_provider": "Qwen",
+                    "status": "degraded",
+                    "fallback_reason": "qwen_api_key_missing",
+                    "output_usable": True,
+                }],
                 "degradation_reasons": ["qwen_api_key_missing"],
             },
             "degraded",
@@ -410,6 +425,69 @@ async def test_run_debate_exposes_structured_model_runtime_status(
     assert runtime["status"] == expected_status
     if expected_reason:
         assert expected_reason in runtime["degradation_reasons"]
+
+
+def test_runtime_builder_cannot_report_success_without_usable_provider_output():
+    from app.ai.debate import build_model_runtime_status
+
+    unusable = build_model_runtime_status([{
+        "role": "输出校验",
+        "provider": "DeepSeek",
+        "attempted_provider": "DeepSeek",
+        "requested_provider": "DeepSeek",
+        "model": "validator-model",
+        "status": "success",
+        "output_usable": False,
+    }])
+    provider_missing = build_model_runtime_status([{
+        "role": "输出校验",
+        "provider": "",
+        "attempted_provider": "DeepSeek",
+        "requested_provider": "DeepSeek",
+        "model": "validator-model",
+        "status": "success",
+        "output_usable": True,
+    }])
+
+    assert unusable["status"] == "degraded"
+    assert unusable["providers"] == []
+    assert "required_output_unusable" in unusable["degradation_reasons"]
+    assert provider_missing["status"] == "degraded"
+    assert provider_missing["providers"] == []
+    assert "successful_provider_missing" in provider_missing[
+        "degradation_reasons"
+    ]
+
+
+def test_runtime_normalizer_reconciles_contradictory_success_claims():
+    from app.engine.workshop import normalize_model_runtime_status
+
+    runtime = normalize_model_runtime_status({
+        "status": "success",
+        "providers": ["DeepSeek"],
+        "calls": [{
+            "role": "输出校验",
+            "provider": "DeepSeek",
+            "attempted_provider": "DeepSeek",
+            "requested_provider": "DeepSeek",
+            "status": "success",
+            "output_usable": False,
+        }],
+        "degradation_reasons": [],
+    })
+    no_calls = normalize_model_runtime_status({
+        "status": "success",
+        "providers": ["DeepSeek"],
+        "calls": [],
+        "degradation_reasons": [],
+    })
+
+    assert runtime["status"] == "degraded"
+    assert runtime["providers"] == []
+    assert "required_output_unusable" in runtime["degradation_reasons"]
+    assert no_calls["status"] == "unavailable"
+    assert no_calls["providers"] == []
+    assert "runtime_status_unavailable" in no_calls["degradation_reasons"]
 
 
 @pytest.mark.asyncio

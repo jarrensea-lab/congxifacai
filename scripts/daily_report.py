@@ -163,18 +163,38 @@ def _over_position_sell_quantity(
     single_limit = round(assets * single_pct / 100, 2)
     if shares * price <= single_limit:
         return 0
-    lot_size = lot_size_for_code(code)
-    if shares <= lot_size:
+    minimum_declaration = lot_size_for_code(code)
+    if shares <= minimum_declaration:
         return shares
     target_shares = int(single_limit / price)
     requested_reduction = max(0, shares - target_shares)
+    clean_code = "".join(char for char in str(code) if char.isdigit())[-6:]
+    if clean_code.startswith(("688", "689")):
+        # 科创板申报下限为 200 股，超过下限后按 1 股递增；零股可一次卖清。
+        sell_quantity = min(
+            shares,
+            max(minimum_declaration, requested_reduction),
+        )
+        remaining = shares - sell_quantity
+        if remaining == 0 or remaining >= minimum_declaration:
+            return sell_quantity
+        retain_minimum = shares - minimum_declaration
+        if (
+            retain_minimum >= minimum_declaration
+            and retain_minimum >= requested_reduction
+        ):
+            return retain_minimum
+        return shares
+
     sell_quantity = (
-        (requested_reduction + lot_size - 1) // lot_size
-    ) * lot_size
+        (requested_reduction + minimum_declaration - 1)
+        // minimum_declaration
+    ) * minimum_declaration
     sell_quantity = min(sell_quantity, shares)
     remaining = shares - sell_quantity
     if remaining and (
-        remaining < lot_size or remaining % lot_size != 0
+        remaining < minimum_declaration
+        or remaining % minimum_declaration != 0
     ):
         return shares
     return sell_quantity
@@ -720,60 +740,18 @@ def _audit_reason_label(value: str) -> str:
 
 
 def _model_runtime_truth(value: dict | None) -> dict:
-    if not isinstance(value, dict):
-        return {
-            "status": "unavailable",
-            "providers": [],
-            "calls": [],
-            "degradation_reasons": ["runtime_status_unavailable"],
-        }
-    status = str(value.get("status") or "").strip().lower()
-    if status not in {"success", "degraded", "unavailable"}:
-        status = "unavailable"
-    providers = [
-        str(provider)
-        for provider in value.get("providers") or []
-        if str(provider).strip()
-    ]
-    calls = [
-        {
-            **{
-                key: str(call.get(key) or "")
-                for key in (
-                    "role",
-                    "provider",
-                    "attempted_provider",
-                    "requested_provider",
-                    "model",
-                    "status",
-                    "fallback_reason",
-                    "degradation_reason",
-                )
-            },
-            "output_usable": call.get("output_usable") is True,
-        }
-        for call in value.get("calls") or []
-        if isinstance(call, dict)
-    ]
-    reasons = [
-        str(reason)
-        for reason in value.get("degradation_reasons") or []
-        if str(reason).strip()
-    ]
-    if status == "unavailable" and not reasons:
-        reasons = ["runtime_status_unavailable"]
-    return {
-        "status": status,
-        "providers": list(dict.fromkeys(providers)),
-        "calls": calls,
-        "degradation_reasons": list(dict.fromkeys(reasons)),
-    }
+    from app.ai.debate import reconcile_model_runtime_status
+
+    return reconcile_model_runtime_status(value)
 
 
 def _model_degradation_text(reasons: list[str]) -> str:
     labels = {
         "qwen_api_key_missing": "Qwen 密钥缺失，实际回退到 DeepSeek",
         "cloud_call_failed": "云端模型调用失败",
+        "required_output_unusable": "必要模型输出不可用",
+        "successful_provider_missing": "成功输出缺少实际提供方",
+        "runtime_marked_degraded": "上游运行态已标记降级",
         "empty_model_output": "模型返回空内容",
         "judge_not_called": "裁判未完成调用",
         "debate_call_failed": "本次辩论调用失败",
@@ -2330,8 +2308,8 @@ def _candidate_rank(item: dict, source_index: int) -> tuple:
         else 3
     )
     return (
-        action_tier,
         -score,
+        action_tier,
         trigger_tier,
         _target_code(item),
         source_index,

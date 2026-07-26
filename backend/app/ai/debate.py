@@ -322,6 +322,10 @@ def build_model_runtime_status(calls: list[dict]) -> dict:
         reason = degradation_reason
         if not reason and sanitized["status"] != "success" and not fallback_reason:
             reason = "cloud_call_failed"
+        if not output_usable and not reason and not fallback_reason:
+            reason = "required_output_unusable"
+        if output_usable and not provider and not reason and not fallback_reason:
+            reason = "successful_provider_missing"
         if reason:
             if reason not in degradation_reasons:
                 degradation_reasons.append(reason)
@@ -340,6 +344,42 @@ def build_model_runtime_status(calls: list[dict]) -> dict:
         "providers": providers,
         "calls": sanitized_calls,
         "degradation_reasons": degradation_reasons,
+    }
+
+
+def reconcile_model_runtime_status(value) -> dict:
+    """Rebuild route truth from observed calls; declared summaries are hints."""
+    if not isinstance(value, dict):
+        return build_model_runtime_status([])
+    observed = build_model_runtime_status(value.get("calls") or [])
+    reasons = list(dict.fromkeys([
+        *observed["degradation_reasons"],
+        *(
+            str(reason)
+            for reason in value.get("degradation_reasons") or []
+            if str(reason).strip()
+        ),
+    ]))
+    declared_status = str(value.get("status") or "").strip().lower()
+    if observed["status"] == "success" and declared_status in {
+        "degraded",
+        "unavailable",
+    }:
+        marker = (
+            "runtime_marked_degraded"
+            if declared_status == "degraded"
+            else "runtime_status_unavailable"
+        )
+        if marker not in reasons:
+            reasons.append(marker)
+    status = observed["status"]
+    if reasons and status == "success":
+        status = "degraded"
+    return {
+        "status": status,
+        "providers": observed["providers"],
+        "calls": observed["calls"],
+        "degradation_reasons": reasons,
     }
 
 

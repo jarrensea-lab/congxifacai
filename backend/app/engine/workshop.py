@@ -49,13 +49,16 @@ def build_production_gate(engine_result: dict) -> dict:
         if isinstance(runtime, dict)
         else []
     )
-    validator_failed = any(
-        isinstance(call, dict)
-        and call.get("role") == "输出校验"
-        and call.get("output_usable") is not True
+    validator_calls = [
+        call
         for call in runtime_calls or []
-    )
-    if validator_failed:
+        if isinstance(call, dict) and call.get("role") == "输出校验"
+    ]
+    if not validator_calls:
+        reasons.append("validator_route_missing")
+    elif not any(
+        call.get("output_usable") is True for call in validator_calls
+    ):
         reasons.append("validator_route_degraded")
     return {
         "allowed": not reasons,
@@ -65,55 +68,10 @@ def build_production_gate(engine_result: dict) -> dict:
 
 
 def normalize_model_runtime_status(value) -> dict:
-    """Keep only the runtime route contract; missing truth fails closed."""
-    if not isinstance(value, dict):
-        return {
-            "status": "unavailable",
-            "providers": [],
-            "calls": [],
-            "degradation_reasons": ["runtime_status_unavailable"],
-        }
-    status = str(value.get("status") or "").strip().lower()
-    if status not in {"success", "degraded", "unavailable"}:
-        status = "unavailable"
-    providers = list(dict.fromkeys(
-        str(provider)
-        for provider in value.get("providers") or []
-        if str(provider).strip()
-    ))
-    calls = [
-        {
-            **{
-                key: str(call.get(key) or "")
-                for key in (
-                    "role",
-                    "provider",
-                    "attempted_provider",
-                    "requested_provider",
-                    "model",
-                    "status",
-                    "fallback_reason",
-                    "degradation_reason",
-                )
-            },
-            "output_usable": call.get("output_usable") is True,
-        }
-        for call in value.get("calls") or []
-        if isinstance(call, dict)
-    ]
-    reasons = list(dict.fromkeys(
-        str(reason)
-        for reason in value.get("degradation_reasons") or []
-        if str(reason).strip()
-    ))
-    if status == "unavailable" and not reasons:
-        reasons = ["runtime_status_unavailable"]
-    return {
-        "status": status,
-        "providers": providers,
-        "calls": calls,
-        "degradation_reasons": reasons,
-    }
+    """Expose one reconciled route contract at the workshop boundary."""
+    from app.ai.debate import reconcile_model_runtime_status
+
+    return reconcile_model_runtime_status(value)
 
 
 async def run_debate(analysis_report: dict, strategy_type: str = "premarket") -> dict:

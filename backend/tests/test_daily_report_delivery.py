@@ -3948,11 +3948,13 @@ def test_over_position_holding_uses_profile_cap_for_exact_partial_reduction():
                         "role": "猎手",
                         "provider": "DeepSeek",
                         "status": "success",
+                        "output_usable": True,
                     },
                     {
                         "role": "裁判",
                         "provider": "Qwen",
                         "status": "success",
+                        "output_usable": True,
                     },
                 ],
                 "degradation_reasons": [],
@@ -3971,6 +3973,7 @@ def test_over_position_holding_uses_profile_cap_for_exact_partial_reduction():
                         "requested_provider": "Qwen",
                         "status": "degraded",
                         "fallback_reason": "qwen_api_key_missing",
+                        "output_usable": True,
                     }
                 ],
                 "degradation_reasons": ["qwen_api_key_missing"],
@@ -4169,6 +4172,36 @@ def test_over_position_reduction_obeys_board_lot_and_odd_lot_exit_rules(
     assert result == expected
 
 
+@pytest.mark.parametrize(
+    ("shares", "target_shares", "expected"),
+    [
+        (201, 151, 201),
+        (399, 349, 399),
+        (400, 350, 200),
+        (401, 200, 201),
+    ],
+)
+def test_star_reduction_uses_200_share_minimum_then_one_share_increments(
+    shares,
+    target_shares,
+    expected,
+):
+    from scripts.daily_report import _over_position_sell_quantity
+
+    result = _over_position_sell_quantity(
+        code="688001",
+        shares=shares,
+        price=10,
+        total_assets=target_shares * 10 / 0.5,
+        profile={
+            "single_position_limit_pct": 50,
+            "standard_single_position_limit_pct": 50,
+        },
+    )
+
+    assert result == expected
+
+
 def test_stale_quote_sell_zero_precedes_star_lot_reduction():
     from scripts.daily_report import (
         build_next_day_strategy_sections,
@@ -4284,6 +4317,53 @@ def test_candidates_require_full_score_and_rank_globally_across_sources():
     assert "低分伪买入" not in candidates
     assert "未评分池外行" not in candidates
     assert candidates.count("| 备选") == 2
+
+
+def test_candidate_global_rank_is_score_first_before_action_wording():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="全局分数优先",
+            confidence=9,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    _full_tactical_candidate(
+                        "000070",
+                        "七十分买入",
+                        score=70,
+                        action="buy",
+                    )
+                ],
+                "outside_pool_scan": [
+                    _full_tactical_candidate(
+                        "000099",
+                        "九十九分可执行",
+                        score=99,
+                        action="actionable",
+                    )
+                ],
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    assert candidates.index("九十九分可执行(000099)") < candidates.index(
+        "七十分买入(000070)"
+    )
 
 
 def test_healthy_long_thesis_can_also_be_tactical_when_full_score_authorized():
