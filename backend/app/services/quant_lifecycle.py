@@ -23,8 +23,8 @@ from app.services.strategy_profile import (
     get_strategy_profile,
 )
 from app.services.long_horizon_transaction import (
-    transaction_guard,
     transaction_lock_path_for_store,
+    writer_transaction_guard,
 )
 
 
@@ -207,7 +207,7 @@ def _locked_store_mutation(method):
             "transaction_lock_path",
             transaction_lock_path_for_store(self.path),
         )
-        with transaction_guard(transaction_lock_path, exclusive=False):
+        with writer_transaction_guard(transaction_lock_path):
             with _pool_lock(self.path):
                 return method(self, *args, **kwargs)
 

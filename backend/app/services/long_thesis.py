@@ -13,8 +13,8 @@ from typing import Any
 
 from app.config import PROJECT_ROOT
 from app.services.long_horizon_transaction import (
-    transaction_guard,
     transaction_lock_path_for_store,
+    writer_transaction_guard,
 )
 
 _LONG_THESIS_PROCESS_LOCK = RLock()
@@ -167,10 +167,7 @@ class LongThesisStore:
             return self._load_unlocked()
 
     def save(self, payload: dict[str, Any]) -> None:
-        with transaction_guard(
-            self.transaction_lock_path,
-            exclusive=False,
-        ):
+        with writer_transaction_guard(self.transaction_lock_path):
             with self._store_lock(exclusive=True):
                 self._save_unlocked(payload)
 
@@ -181,10 +178,7 @@ class LongThesisStore:
         symbol = _clean_symbol(thesis.get("symbol") or thesis.get("code"))
         if not symbol:
             raise ValueError("long thesis requires symbol")
-        with transaction_guard(
-            self.transaction_lock_path,
-            exclusive=False,
-        ):
+        with writer_transaction_guard(self.transaction_lock_path):
             with self._store_lock(exclusive=True):
                 payload = self._load_unlocked()
                 items = payload.setdefault("items", {})
@@ -211,10 +205,7 @@ class LongThesisStore:
 
     def append_review(self, symbol: str, review: dict[str, Any]) -> dict[str, Any] | None:
         clean = _clean_symbol(symbol)
-        with transaction_guard(
-            self.transaction_lock_path,
-            exclusive=False,
-        ):
+        with writer_transaction_guard(self.transaction_lock_path):
             with self._store_lock(exclusive=True):
                 payload = self._load_unlocked()
                 item = payload.setdefault("items", {}).get(clean)

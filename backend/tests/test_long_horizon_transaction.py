@@ -5,6 +5,7 @@ import base64
 import hashlib
 import json
 import multiprocessing
+import os
 from pathlib import Path
 from threading import Event, Thread
 
@@ -48,6 +49,33 @@ def _process_append_and_upsert(
         errors.put(f"{type(exc).__name__}: {exc}")
     finally:
         finished.set()
+
+
+def _process_begin_partial_write_and_crash(
+    journal_path: str,
+    thesis_path: str,
+    ledger_path: str,
+    target_path: str,
+    ready,
+) -> None:
+    transaction = LongHorizonBatchTransaction(
+        journal_path,
+        [
+            ("long_thesis", thesis_path),
+            ("evidence_ledger", ledger_path),
+            ("target_pool", target_path),
+        ],
+    )
+    ledger = EvidenceLedgerStore(ledger_path)
+    with transaction.locked():
+        transaction.begin()
+        ledger.append_many([{
+            "evidence_id": "ev_crashed_transaction",
+            "type": "test",
+            "summary": "partial write before process crash",
+        }])
+        ready.set()
+        os._exit(17)
 
 
 def _transaction(
@@ -289,3 +317,116 @@ def test_recovery_rejects_late_hash_mismatch_before_changing_stores(tmp_path):
             transaction.recover_pending()
 
     assert {path: path.read_bytes() for _, path in stores} == before
+
+
+def test_crashed_pending_transaction_blocks_all_writers_until_recovery(
+    tmp_path,
+):
+    transaction, thesis_path, ledger_path, target_path = _transaction(tmp_path)
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    process = context.Process(
+        target=_process_begin_partial_write_and_crash,
+        args=(
+            str(transaction.journal_path),
+            str(thesis_path),
+            str(ledger_path),
+            str(target_path),
+            ready,
+        ),
+    )
+    process.start()
+    assert ready.wait(timeout=10)
+    process.join(timeout=10)
+    assert process.exitcode == 17
+    stores = (thesis_path, ledger_path, target_path)
+    after_crash = {
+        path: path.read_bytes() if path.exists() else None
+        for path in stores
+    }
+    ledger = EvidenceLedgerStore(ledger_path)
+    thesis = LongThesisStore(thesis_path)
+    target = TargetPoolStore(target_path)
+    ordinary_writes = [
+        lambda: ledger.append_many([{
+            "evidence_id": "ev_external_after_crash",
+            "type": "test",
+            "summary": "must wait for recovery",
+        }]),
+        lambda: thesis.upsert({
+            "symbol": "688001",
+            "name": "外部 thesis",
+            "core_thesis": "must wait for recovery",
+        }),
+        lambda: target.upsert_target(
+            code="920001",
+            name="外部 target",
+            status="long_research",
+            source="long_horizon",
+        ),
+    ]
+
+    for write in ordinary_writes:
+        with pytest.raises(
+            RuntimeError,
+            match="long_horizon_recovery_required",
+        ):
+            write()
+        assert {
+            path: path.read_bytes() if path.exists() else None
+            for path in stores
+        } == after_crash
+
+    with transaction.locked():
+        recovered = transaction.recover_pending()
+    assert recovered["status"] == "recovered"
+
+    for write in ordinary_writes:
+        write()
+    assert {
+        item["evidence_id"] for item in ledger.load_all()
+    } == {"ev_external_after_crash"}
+    assert thesis.get("688001")["name"] == "外部 thesis"
+    assert target.get("920001")["name"] == "外部 target"
+    after_retry = {path: path.read_bytes() for path in stores}
+    with transaction.locked():
+        assert transaction.recover_pending() is None
+    assert {path: path.read_bytes() for path in stores} == after_retry
+
+
+def test_corrupted_pending_journal_keeps_ordinary_writers_fail_closed(
+    tmp_path,
+):
+    transaction, thesis_path, ledger_path, _ = _transaction(tmp_path)
+    with transaction.locked():
+        transaction.begin()
+        transaction.journal_path.write_text("{broken", encoding="utf-8")
+    ledger = EvidenceLedgerStore(ledger_path)
+    before = ledger_path.read_bytes() if ledger_path.exists() else None
+
+    for _ in range(2):
+        with pytest.raises(
+            RuntimeError,
+            match="long_horizon_recovery_required",
+        ):
+            ledger.append_many([{
+                "evidence_id": "ev_must_not_write",
+                "type": "test",
+                "summary": "corrupted recovery required",
+            }])
+        assert (
+            ledger_path.read_bytes() if ledger_path.exists() else None
+        ) == before
+
+    with transaction.locked():
+        with pytest.raises(RuntimeError, match="journal unreadable"):
+            transaction.recover_pending()
+    with pytest.raises(
+        RuntimeError,
+        match="long_horizon_recovery_required",
+    ):
+        LongThesisStore(thesis_path).upsert({
+            "symbol": "688001",
+            "name": "仍需恢复",
+            "core_thesis": "must remain blocked",
+        })

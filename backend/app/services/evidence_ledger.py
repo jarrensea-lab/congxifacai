@@ -14,8 +14,8 @@ from typing import Any
 from app.config import PROJECT_ROOT
 from app.services.quant_lifecycle import TargetPoolStore
 from app.services.long_horizon_transaction import (
-    transaction_guard,
     transaction_lock_path_for_store,
+    writer_transaction_guard,
 )
 from app.utils.a_share_codes import validate_a_share_code
 
@@ -172,10 +172,7 @@ class EvidenceLedgerStore:
             return self._read_with_diagnostics_unlocked()
 
     def append_many(self, evidence: list[dict[str, Any]]) -> int:
-        with transaction_guard(
-            self.transaction_lock_path,
-            exclusive=False,
-        ):
+        with writer_transaction_guard(self.transaction_lock_path):
             with self._store_lock(exclusive=True):
                 diagnostics = self._read_with_diagnostics_unlocked()
                 if not diagnostics["ok"]:

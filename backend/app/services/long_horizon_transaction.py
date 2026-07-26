@@ -31,6 +31,13 @@ class TransactionSnapshotTooLarge(RuntimeError):
         )
 
 
+class LongHorizonRecoveryRequired(RuntimeError):
+    """Raised when a durable pending marker blocks ordinary store writes."""
+
+    def __init__(self):
+        super().__init__("long_horizon_recovery_required")
+
+
 def _max_snapshot_bytes(explicit_value: int | None) -> int:
     if explicit_value is not None:
         return max(1, int(explicit_value))
@@ -85,12 +92,78 @@ def transaction_guard(
         held[key] = {
             "mode": "exclusive" if exclusive else "shared",
             "depth": 1,
+            "file": lock_file,
         }
         try:
             yield
         finally:
             held.pop(key, None)
             flock(lock_file.fileno(), LOCK_UN)
+
+
+def _current_transaction_context(lock_path: str | Path) -> dict | None:
+    held = getattr(_TRANSACTION_CONTEXT, "held", {})
+    return held.get(str(Path(lock_path).resolve()))
+
+
+def _read_lock_marker(lock_path: str | Path) -> dict | None:
+    current = _current_transaction_context(lock_path)
+    if current is None:
+        raise RuntimeError("transaction guard required for marker read")
+    lock_file = current["file"]
+    lock_file.seek(0)
+    raw = lock_file.read().strip()
+    if not raw:
+        return None
+    try:
+        marker = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("transaction lock marker unreadable") from exc
+    if not isinstance(marker, dict) or not str(marker.get("status") or ""):
+        raise RuntimeError("transaction lock marker invalid")
+    return marker
+
+
+def _write_lock_marker(
+    lock_path: str | Path,
+    payload: dict,
+) -> None:
+    current = _current_transaction_context(lock_path)
+    if current is None or current["mode"] != "exclusive":
+        raise RuntimeError("exclusive transaction guard required for marker write")
+    lock_file = current["file"]
+    lock_file.seek(0)
+    lock_file.truncate(0)
+    lock_file.write(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    lock_file.flush()
+    os.fsync(lock_file.fileno())
+    _fsync_directory(Path(lock_path).resolve().parent)
+
+
+def _clear_lock_marker(lock_path: str | Path) -> None:
+    current = _current_transaction_context(lock_path)
+    if current is None or current["mode"] != "exclusive":
+        raise RuntimeError("exclusive transaction guard required for marker clear")
+    lock_file = current["file"]
+    lock_file.seek(0)
+    lock_file.truncate(0)
+    lock_file.flush()
+    os.fsync(lock_file.fileno())
+
+
+@contextmanager
+def writer_transaction_guard(lock_path: str | Path) -> Iterator[None]:
+    """Hold a shared guard and reject writes while durable recovery is pending."""
+    with transaction_guard(lock_path, exclusive=False):
+        current = _current_transaction_context(lock_path)
+        if current is not None and current["mode"] != "exclusive":
+            try:
+                marker = _read_lock_marker(lock_path)
+            except RuntimeError as exc:
+                raise LongHorizonRecoveryRequired() from exc
+            if marker is not None:
+                raise LongHorizonRecoveryRequired()
+        yield
 
 
 def default_transaction_path(thesis_path: Path) -> Path:
@@ -179,6 +252,8 @@ class LongHorizonBatchTransaction:
     def begin(self) -> str:
         if self.journal_path.exists():
             raise RuntimeError("pending transaction journal must be recovered first")
+        if _read_lock_marker(self.lock_path) is not None:
+            raise LongHorizonRecoveryRequired()
         batch_id = f"lh_{uuid.uuid4().hex}"
         snapshots = []
         total_bytes = 0
@@ -214,16 +289,55 @@ class LongHorizonBatchTransaction:
             "created_at": datetime.now().astimezone().isoformat(),
             "stores": snapshots,
         }
-        _atomic_write(
-            self.journal_path,
-            (json.dumps(journal, ensure_ascii=False, indent=2) + "\n").encode(
-                "utf-8"
-            ),
+        marker = {
+            "version": 1,
+            "batch_id": batch_id,
+            "status": "preparing",
+            "journal_path": str(self.journal_path.resolve()),
+        }
+        _write_lock_marker(self.lock_path, marker)
+        try:
+            _atomic_write(
+                self.journal_path,
+                (
+                    json.dumps(journal, ensure_ascii=False, indent=2)
+                    + "\n"
+                ).encode("utf-8"),
+            )
+        except Exception:
+            if not self.journal_path.exists():
+                _clear_lock_marker(self.lock_path)
+            raise
+        _write_lock_marker(
+            self.lock_path,
+            {**marker, "status": "pending"},
         )
         return batch_id
 
     def recover_pending(self) -> dict[str, object] | None:
+        marker = _read_lock_marker(self.lock_path)
+        if marker is not None:
+            marker_journal = Path(
+                str(marker.get("journal_path") or "")
+            )
+            if (
+                not marker_journal.is_absolute()
+                or marker_journal.resolve() != self.journal_path.resolve()
+            ):
+                raise RuntimeError("transaction lock marker path mismatch")
         if not self.journal_path.exists():
+            marker_status = str((marker or {}).get("status") or "")
+            if marker_status in {"preparing", "committing", "recovered"}:
+                _clear_lock_marker(self.lock_path)
+                return {
+                    "status": "recovery_marker_cleared",
+                    "batch_id": str((marker or {}).get("batch_id") or ""),
+                    "restored_stores": [],
+                }
+            if marker is not None:
+                raise RuntimeError(
+                    "transaction journal missing while recovery required"
+                )
             return None
         try:
             journal = json.loads(self.journal_path.read_text(encoding="utf-8"))
@@ -302,7 +416,17 @@ class LongHorizonBatchTransaction:
                 _durable_unlink(store_path)
             restored_names.append(name)
 
+        _write_lock_marker(
+            self.lock_path,
+            {
+                "version": 1,
+                "batch_id": str(journal.get("batch_id") or ""),
+                "status": "recovered",
+                "journal_path": str(self.journal_path.resolve()),
+            },
+        )
         _durable_unlink(self.journal_path)
+        _clear_lock_marker(self.lock_path)
         return {
             "status": "recovered",
             "batch_id": str(journal.get("batch_id") or ""),
@@ -320,4 +444,16 @@ class LongHorizonBatchTransaction:
         return {**recovered, "status": "rolled_back"}
 
     def commit(self) -> None:
+        marker = _read_lock_marker(self.lock_path)
+        batch_id = str((marker or {}).get("batch_id") or "")
+        _write_lock_marker(
+            self.lock_path,
+            {
+                "version": 1,
+                "batch_id": batch_id,
+                "status": "committing",
+                "journal_path": str(self.journal_path.resolve()),
+            },
+        )
         _durable_unlink(self.journal_path)
+        _clear_lock_marker(self.lock_path)
