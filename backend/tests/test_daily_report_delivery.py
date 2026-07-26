@@ -2212,7 +2212,10 @@ async def test_build_target_scores_fails_closed_when_long_thesis_store_is_corrup
 ):
     from app.services.long_thesis import LongThesisStore
     from app.services.quant_lifecycle import TargetPoolStore
-    from scripts.daily_report import build_target_scores_for_report
+    from scripts.daily_report import (
+        build_next_day_strategy_sections,
+        build_target_scores_for_report,
+    )
 
     lock_path = tmp_path / ".long_horizon_transaction.lock"
     journal_path = tmp_path / "long_horizon_transaction.json"
@@ -2267,13 +2270,46 @@ async def test_build_target_scores_fails_closed_when_long_thesis_store_is_corrup
         market_source=_OfflineScoreSource(),
         long_thesis_store=thesis_store,
     )
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-26",
+        target_date="2026-07-27",
+        risk_level=4,
+        final_view="长期论文存储待修复",
+        confidence=0,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {"shanghai": 0}},
+        analysis_report={"overall_bias": "unknown"},
+        decision={"target_scores": scores},
+        roles={},
+        sentinel_package=None,
+    ))
 
+    assert "长期论文存储损坏" in sections
+    assert "论文状态未知" in sections
+    assert "红线状态未知" in sections
+    assert "论文成立" not in sections
+    assert "红线未触发" not in sections
     assert scores[0]["action"] == "watch"
     assert scores[0]["block_reason"] == "long_thesis_store_invalid"
     assert scores[0]["entry_allowed"] is False
-    assert scores[0]["thesis_status"] == "healthy"
-    assert scores[0]["long_quality_score"] == 82
-    assert scores[0]["current_long_evidence_ids"] == [
+    assert scores[0]["combined_decision_reason"] == scores[0][
+        "decision_reason"
+    ]
+    assert scores[0]["thesis_status"] == "unknown"
+    assert scores[0]["long_quality_score"] is None
+    assert scores[0]["valuation_zone"] == "unknown"
+    assert scores[0]["red_line_status"] == "unknown"
+    assert scores[0]["current_long_evidence_ids"] == []
+    assert scores[0]["last_known_long_quality_score"] == 82
+    assert scores[0]["last_known_thesis_status"] == "healthy"
+    assert scores[0]["last_known_valuation_zone"] == "fair_zone"
+    assert scores[0]["last_known_red_line_status"] == "clear"
+    assert scores[0]["last_known_combined_decision_reason"] == (
+        "保留最后有效长期摘要。"
+    )
+    assert scores[0]["last_known_long_evidence_ids"] == [
         "long-thesis:002123:v1"
     ]
     assert target_store.path.read_bytes() == before

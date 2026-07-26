@@ -1232,6 +1232,8 @@ def _trend_text(item: dict) -> str:
     parts = []
     if item.get("thesis_status"):
         parts.append(_thesis_status_label(item.get("thesis_status")))
+    if item.get("red_line_status") == "unknown":
+        parts.append("红线状态未知")
     if item.get("valuation_zone"):
         parts.append(_valuation_zone_label(item.get("valuation_zone")))
     if item.get("long_quality_score") is not None:
@@ -1728,6 +1730,7 @@ def _thesis_status_label(status: str) -> str:
         "weakened": "边际弱化",
         "broken": "红线触发",
         "stale": "论文过期",
+        "unknown": "论文状态未知",
     }.get(str(status or ""), "未建论文")
 
 
@@ -2192,6 +2195,14 @@ async def build_target_scores_for_report(
             if isinstance(item.get("scoring_decision"), dict)
             else {}
         )
+        last_known_long_evidence_ids = list(
+            item.get("current_long_evidence_ids") or []
+        )
+        corruption_reason = (
+            "长期论文存储损坏，本批评分已安全阻断；"
+            "当前论文与红线状态未知，历史摘要仅作 last-known 审计，"
+            "修复存储后再评分。"
+        )
         return {
             "code": str(item.get("code") or snapshot.get("code") or ""),
             "name": str(item.get("name") or snapshot.get("name") or ""),
@@ -2203,25 +2214,38 @@ async def build_target_scores_for_report(
             ),
             "block_reason": "long_thesis_store_invalid",
             "entry_allowed": False,
-            "decision_reason": (
-                "长期论文存储损坏，本批评分已安全阻断；"
-                "保留上一版长期摘要，修复存储后再评分。"
-            ),
-            "combined_decision_reason": previous.get(
-                "combined_decision_reason",
-                previous.get("decision_reason", ""),
-            ),
+            "decision_reason": corruption_reason,
+            "combined_decision_reason": corruption_reason,
             "missing_data": previous.get("missing_data") or [],
             "playbook": previous.get("playbook", "watch"),
             "source_status": source_status_for(snapshot),
-            "long_quality_score": previous.get("long_quality_score", 0),
-            "thesis_status": previous.get("thesis_status", ""),
-            "valuation_zone": previous.get("valuation_zone", "unknown"),
-            "red_line_status": previous.get("red_line_status", ""),
-            "long_horizon_reason": previous.get("long_horizon_reason", ""),
-            "current_long_evidence_ids": list(
-                item.get("current_long_evidence_ids") or []
+            "long_quality_score": None,
+            "thesis_status": "unknown",
+            "valuation_zone": "unknown",
+            "red_line_status": "unknown",
+            "long_horizon_reason": "long_thesis_store_invalid",
+            "current_long_evidence_ids": [],
+            "last_known_long_quality_score": previous.get(
+                "long_quality_score"
             ),
+            "last_known_thesis_status": previous.get("thesis_status", ""),
+            "last_known_valuation_zone": previous.get(
+                "valuation_zone",
+                "unknown",
+            ),
+            "last_known_red_line_status": previous.get(
+                "red_line_status",
+                "",
+            ),
+            "last_known_long_horizon_reason": previous.get(
+                "long_horizon_reason",
+                "",
+            ),
+            "last_known_combined_decision_reason": previous.get(
+                "combined_decision_reason",
+                previous.get("decision_reason", ""),
+            ),
+            "last_known_long_evidence_ids": last_known_long_evidence_ids,
             "production_eligibility": target_production_eligibility(item),
         }
 
