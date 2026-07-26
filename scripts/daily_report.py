@@ -118,6 +118,11 @@ def build_feishu_summary(md_content: str, limit: int = 3000) -> str:
     return summary[:limit].rstrip() + "\n\n...*(完整报告已保存至 Obsidian 报告目录)*"
 
 
+def _legacy_report_sections_enabled() -> bool:
+    """Return true only for the explicit legacy compatibility opt-in."""
+    return os.getenv("CONGXI_REPORT_LEGACY_SECTIONS", "0") == "1"
+
+
 def _append_new_report_sections(
     lines: list[str],
     *,
@@ -3770,7 +3775,7 @@ async def main():
     lines.append("")
     lines.append("---")
     lines.append("")
-    legacy_mode = os.getenv("CONGXI_REPORT_LEGACY_SECTIONS", "0") == "1"
+    legacy_mode = _legacy_report_sections_enabled()
     rendered_new_report = _append_new_report_sections(
         lines,
         legacy_mode=legacy_mode,

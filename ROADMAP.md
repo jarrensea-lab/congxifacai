@@ -4,11 +4,11 @@
 
 ## 当前已经落地
 
-- [x] 主报告第一屏以持仓处置和次日动作优先；默认渲染已委托给 `backend/app/report_engine/templates/next_day.py`，`scripts/daily_report.py` 仍保留 `CONGXI_REPORT_LEGACY_SECTIONS=1` 控制的 legacy 大模板/兼容渲染。
+- [x] 主报告第一屏以持仓处置和次日动作优先；默认动作优先渲染已委托给 `backend/app/report_engine/templates/next_day.py`，`scripts/daily_report.py` 仍保留 `CONGXI_REPORT_LEGACY_SECTIONS=1` 控制的 legacy 大模板/兼容渲染。
 - [x] Target Pool 区分 `executable`、`watching`、`research_reference`、`removed`，并执行最小交易单位、账户预算、剧本和风控阻断。
 - [x] APScheduler 作业已集中到 `backend/app/services/scheduler_service.py`，`backend/app/main.py` 只注入处理函数和启动一次调度服务。
 - [x] Sentinel 在周一至周五和周日 20:00 生成研究证据，Serenity 深挖随后物化到 Long Thesis、Evidence Ledger 和 Target Pool；全链路保持 `research_only`。
-- [x] 中线/长线建议不再整段缺席，完整状态机为 `unknown`（无 thesis/空输入的未建论文展示）、`forming`（证据形成中）、`healthy`（假设有效且未过期）、`stale`（证据过期）、`weakened`（假设弱化）、`broken`（红线或核心假设失败）。所有状态只约束研究和风险，不等于交易授权。
+- [x] 中线/长线建议不再整段缺席。未建论文空状态中，空 `thesis_status == ""` 是正常无 thesis，报告显示“未建论文”；六个显式状态为 `unknown`、`forming`、`healthy`、`stale`、`weakened`、`broken`。`unknown` 表示已有上下文但状态无法可靠判定，不能与空状态合并；空状态和六态只约束研究和风险，不等于交易授权。
 - [x] 外部分钟数据和 Tushare 复权因子进入 shadow 数据层；支持年度汇总、日档月归档、沪深北股票和前复权，且不复制、不整包解压。
 - [x] 离线覆盖不足可回退到配置 provider；ZIP、路径、时间戳、数值、重叠数据或复权因子损坏一律 fail-closed。
 - [x] DeepSeek/Qwen 按运行时配置路由；Qwen 缺失会留下显式 fallback 元数据。fallback 成功、角色/裁判与 validator 输出可用且质量通过时，即使汇总状态是 runtime `degraded` 也可通过生产门；provider 不可用、角色/裁判输出降级/报错、validator 缺失/不可用或质量失败才阻断。
