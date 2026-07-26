@@ -1,5 +1,6 @@
 """Daily report delivery and Obsidian archive regression tests."""
 import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
@@ -2182,8 +2183,10 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
 
     monkeypatch.setenv("CONGXI_PORTFOLIO_PATH", str(portfolio_path))
     monkeypatch.setenv("CONGXI_VISIBLE_DECISION_GATE_PATH", str(gate_path))
-    monkeypatch.setenv("CONGXI_REPORT_DATE", "2026-07-21")
-    monkeypatch.setenv("CONGXI_TARGET_DATE", "2026-07-22")
+    report_day = date.today()
+    target_day = report_day + timedelta(days=1)
+    monkeypatch.setenv("CONGXI_REPORT_DATE", report_day.isoformat())
+    monkeypatch.setenv("CONGXI_TARGET_DATE", target_day.isoformat())
     monkeypatch.delenv("CONGXI_REPORT_LEGACY_SECTIONS", raising=False)
     monkeypatch.setattr(daily_report, "ARCHIVE_DIR", str(archive_dir))
     monkeypatch.setattr(daily_report, "load_sentinel_research_package", lambda day: None)

@@ -56,7 +56,128 @@ def test_visible_decision_gate_degrades_entry_only_and_preserves_risk_actions():
     assert "今天不主动买入" in entry_lines
 
 
-def test_visible_decision_gate_persists_atomically_and_has_target_date_validity(tmp_path):
+def test_quote_validation_blocks_entry_but_preserves_risk_actions():
+    """Catches quote failure hiding a stop-loss or leaving a buy executable."""
+    from app.services.visible_decision_gate import (
+        apply_visible_decision_gate,
+        build_visible_decision_gate,
+    )
+
+    decision = {
+        "target_scores": [
+            {"code": "600000", "action": "buy", "position_amount": 1000},
+            {"code": "000001", "action": "stop_loss"},
+        ]
+    }
+    quote_validation = {
+        "enabled": True,
+        "status": "blocked",
+        "as_of": "2026-07-21T19:59:00+08:00",
+        "validations": {
+            "600000": {
+                "code": "600000",
+                "status": "stale",
+                "market_time": "2026-07-21T19:58:00+08:00",
+                "blocks_new_entry": True,
+                "requires_manual_price_check": True,
+                "reasons": ["quote_stale"],
+            },
+            "000001": {
+                "code": "000001",
+                "status": "conflict",
+                "market_time": "2026-07-21T19:59:00+08:00",
+                "blocks_new_entry": True,
+                "requires_manual_price_check": True,
+                "reasons": ["price_divergence"],
+            },
+        },
+    }
+
+    gate = build_visible_decision_gate(
+        report_date="2026-07-21",
+        target_date="2026-07-22",
+        decision=decision,
+        quote_validation=quote_validation,
+    )
+    visible = apply_visible_decision_gate(decision, gate)
+
+    assert gate["entry_allowed"] is False
+    assert "quote_validation_blocked" in gate["reasons"]
+    assert visible["target_scores"][0]["action"] == "watching"
+    assert visible["target_scores"][0]["quote_status"] == "stale"
+    assert visible["target_scores"][0]["execution_blocked_reason"] == (
+        "quote_validation_blocked"
+    )
+    assert visible["target_scores"][1]["action"] == "stop_loss"
+    assert visible["target_scores"][1]["quote_status"] == "conflict"
+    assert visible["target_scores"][1]["requires_manual_price_check"] is True
+
+
+def test_quote_not_enabled_is_visible_but_keeps_existing_entry_path():
+    """Catches disabled integration pretending quotes were checked."""
+    from app.services.visible_decision_gate import (
+        apply_visible_decision_gate,
+        build_visible_decision_gate,
+    )
+
+    decision = {
+        "target_scores": [
+            {"code": "600000", "action": "buy", "position_amount": 1000},
+        ]
+    }
+    gate = build_visible_decision_gate(
+        report_date="2026-07-21",
+        target_date="2026-07-22",
+        decision=decision,
+        quote_validation={
+            "enabled": False,
+            "status": "not_enabled",
+            "validations": {},
+        },
+    )
+    visible = apply_visible_decision_gate(decision, gate)
+
+    assert gate["entry_allowed"] is True
+    assert visible["target_scores"][0]["action"] == "buy"
+    assert visible["target_scores"][0]["quote_status"] == "not_enabled"
+    assert visible["target_scores"][0]["requires_manual_price_check"] is False
+
+
+def test_quote_reader_unavailable_blocks_buy_without_hiding_stop_loss():
+    """Catches a broker read failure suppressing the holding risk path."""
+    from app.services.visible_decision_gate import (
+        apply_visible_decision_gate,
+        build_visible_decision_gate,
+    )
+
+    decision = {
+        "target_scores": [
+            {"code": "600000", "action": "buy", "position_amount": 1000},
+            {"code": "000001", "action": "stop_loss"},
+        ]
+    }
+    gate = build_visible_decision_gate(
+        report_date="2026-07-21",
+        target_date="2026-07-22",
+        decision=decision,
+        quote_validation={
+            "enabled": True,
+            "status": "unavailable",
+            "validations": {},
+            "reasons": ["quote_read_failed"],
+        },
+    )
+    visible = apply_visible_decision_gate(decision, gate)
+
+    assert visible["target_scores"][0]["action"] == "watching"
+    assert visible["target_scores"][0]["quote_status"] == "unavailable"
+    assert visible["target_scores"][1]["action"] == "stop_loss"
+    assert visible["target_scores"][1]["requires_manual_price_check"] is True
+
+
+def test_visible_decision_gate_persists_atomically_and_has_target_date_validity(
+    tmp_path,
+):
     from app.services.visible_decision_gate import (
         load_effective_visible_decision_gate,
         write_visible_decision_gate,
@@ -65,13 +186,20 @@ def test_visible_decision_gate_persists_atomically_and_has_target_date_validity(
     path = tmp_path / "visible-decision.json"
     write_visible_decision_gate(_gate(), path=path)
 
-    assert load_effective_visible_decision_gate(path=path, today=date(2026, 7, 22)) == _gate()
-    assert load_effective_visible_decision_gate(path=path, today=date(2026, 7, 23)) is None
+    assert (
+        load_effective_visible_decision_gate(path=path, today=date(2026, 7, 22))
+        == _gate()
+    )
+    assert (
+        load_effective_visible_decision_gate(path=path, today=date(2026, 7, 23)) is None
+    )
     assert path.exists()
     assert not list(tmp_path.glob("*.tmp"))
 
 
-def test_gate_schema_rejects_contradictions_unknown_reasons_and_invalid_time_order(tmp_path):
+def test_gate_schema_rejects_contradictions_unknown_reasons_and_invalid_time_order(
+    tmp_path,
+):
     from app.services.visible_decision_gate import (
         load_effective_visible_decision_gate,
         load_runtime_visible_decision_gate,
@@ -87,12 +215,20 @@ def test_gate_schema_rejects_contradictions_unknown_reasons_and_invalid_time_ord
         _gate(reasons=["unregistered_reason"]),
         _gate(report_date="2026-07-23", target_date="2026-07-22"),
         _gate(generated_at="2026-07-21T20:00:00"),
-        _gate(generated_at="2099-07-21T20:00:00+08:00", entry_allowed=True, reasons=[], state="allowed"),
+        _gate(
+            generated_at="2099-07-21T20:00:00+08:00",
+            entry_allowed=True,
+            reasons=[],
+            state="allowed",
+        ),
         _gate(generated_at="2026-07-20T23:59:59+08:00"),
     ]
     for invalid in invalid_gates:
         path.write_text(json.dumps(invalid), encoding="utf-8")
-        assert load_effective_visible_decision_gate(path=path, today=date(2026, 7, 22)) is None
+        assert (
+            load_effective_visible_decision_gate(path=path, today=date(2026, 7, 22))
+            is None
+        )
         runtime = load_runtime_visible_decision_gate(path=path, today=date(2026, 7, 22))
         assert runtime["entry_allowed"] is False
         assert runtime["reasons"] == ["visible_decision_gate_missing"]
@@ -101,7 +237,9 @@ def test_gate_schema_rejects_contradictions_unknown_reasons_and_invalid_time_ord
         write_visible_decision_gate(invalid_gates[0], path=path)
 
 
-def test_gate_schema_accepts_generated_time_between_friday_report_and_monday_target(tmp_path):
+def test_gate_schema_accepts_generated_time_between_friday_report_and_monday_target(
+    tmp_path,
+):
     from app.services.visible_decision_gate import (
         load_effective_visible_decision_gate,
         write_visible_decision_gate,
@@ -116,7 +254,10 @@ def test_gate_schema_accepts_generated_time_between_friday_report_and_monday_tar
 
     write_visible_decision_gate(weekend_gate, path=path)
 
-    assert load_effective_visible_decision_gate(path=path, today=date(2026, 7, 20)) == weekend_gate
+    assert (
+        load_effective_visible_decision_gate(path=path, today=date(2026, 7, 20))
+        == weekend_gate
+    )
 
 
 def test_invalid_future_existing_gate_cannot_block_current_valid_replacement(tmp_path):
@@ -129,7 +270,9 @@ def test_invalid_future_existing_gate_cannot_block_current_valid_replacement(tmp
         reasons=[],
         state="allowed",
     )
-    current = _gate(generated_at="2026-07-21T20:30:00+08:00", reasons=["hard_risk_veto"])
+    current = _gate(
+        generated_at="2026-07-21T20:30:00+08:00", reasons=["hard_risk_veto"]
+    )
     path.write_text(json.dumps(future), encoding="utf-8")
 
     write_visible_decision_gate(current, path=path)
@@ -150,7 +293,9 @@ def test_gate_writer_keeps_newest_version_even_when_older_write_finishes_last(tm
     assert json.loads(path.read_text(encoding="utf-8")) == newer
 
 
-def test_gate_writer_serializes_concurrent_writers_and_replaces_invalid_existing(tmp_path):
+def test_gate_writer_serializes_concurrent_writers_and_replaces_invalid_existing(
+    tmp_path,
+):
     from app.services.visible_decision_gate import write_visible_decision_gate
 
     path = tmp_path / "visible-decision.json"
@@ -160,7 +305,11 @@ def test_gate_writer_serializes_concurrent_writers_and_replaces_invalid_existing
         for hour in range(16, 22)
     ]
     with ThreadPoolExecutor(max_workers=len(gates)) as executor:
-        list(executor.map(lambda gate: write_visible_decision_gate(gate, path=path), gates))
+        list(
+            executor.map(
+                lambda gate: write_visible_decision_gate(gate, path=path), gates
+            )
+        )
 
     assert json.loads(path.read_text(encoding="utf-8")) == gates[-1]
 
@@ -247,10 +396,13 @@ def test_stale_explicit_unsynced_gate_remains_blocking(tmp_path):
     unresolved = _gate(reasons=["portfolio_truth_unresolved"])
     write_visible_decision_gate(unresolved, path=path)
 
-    assert load_effective_visible_decision_gate(
-        path=path,
-        today=date(2026, 7, 23),
-    ) == unresolved
+    assert (
+        load_effective_visible_decision_gate(
+            path=path,
+            today=date(2026, 7, 23),
+        )
+        == unresolved
+    )
 
 
 def test_backend_main_gate_filters_entries_but_keeps_cancel_and_stop(tmp_path):
@@ -278,7 +430,11 @@ def test_backend_main_gate_filters_entries_but_keeps_cancel_and_stop(tmp_path):
         gate_path=path,
     )
 
-    assert [item["action"] for item in filtered] == ["entry_cancelled", "stop_loss", "sell"]
+    assert [item["action"] for item in filtered] == [
+        "entry_cancelled",
+        "stop_loss",
+        "sell",
+    ]
 
 
 def test_report_gate_downgrades_unknown_entry_action_but_preserves_explicit_non_entry_states():
@@ -308,7 +464,9 @@ def test_report_gate_downgrades_unknown_entry_action_but_preserves_explicit_non_
         "research_reference",
         "removed",
     ]
-    assert [row["position_amount"] for row in visible["target_scores"][1:-1]] == [1000] * 4
+    assert [row["position_amount"] for row in visible["target_scores"][1:-1]] == [
+        1000
+    ] * 4
 
 
 def test_backend_main_missing_invalid_or_expired_gate_fails_closed_for_entry(tmp_path):
@@ -321,29 +479,40 @@ def test_backend_main_missing_invalid_or_expired_gate_fails_closed_for_entry(tmp
         {"code": "000002", "action": "stop_loss"},
         {"code": "000003", "action": "entry_cancelled"},
     ]
-    assert _filter_candidate_alerts_by_visible_gate(
-        alerts,
-        today=date(2026, 7, 22),
-        gate_path=path,
-    ) == alerts[1:]
+    assert (
+        _filter_candidate_alerts_by_visible_gate(
+            alerts,
+            today=date(2026, 7, 22),
+            gate_path=path,
+        )
+        == alerts[1:]
+    )
 
     path.write_text("{not-json}\n", encoding="utf-8")
-    assert _filter_candidate_alerts_by_visible_gate(
-        alerts,
-        today=date(2026, 7, 22),
-        gate_path=path,
-    ) == alerts[1:]
+    assert (
+        _filter_candidate_alerts_by_visible_gate(
+            alerts,
+            today=date(2026, 7, 22),
+            gate_path=path,
+        )
+        == alerts[1:]
+    )
 
     write_visible_decision_gate(_gate(), path=path)
-    assert _filter_candidate_alerts_by_visible_gate(
-        alerts,
-        today=date(2026, 7, 23),
-        gate_path=path,
-    ) == alerts[1:]
+    assert (
+        _filter_candidate_alerts_by_visible_gate(
+            alerts,
+            today=date(2026, 7, 23),
+            gate_path=path,
+        )
+        == alerts[1:]
+    )
 
 
 def test_blocked_gate_keeps_non_entry_safety_alerts():
-    from app.services.visible_decision_gate import filter_alerts_by_visible_decision_gate
+    from app.services.visible_decision_gate import (
+        filter_alerts_by_visible_decision_gate,
+    )
 
     alerts = [
         {"code": "000001", "action": "actionable"},
@@ -404,12 +573,16 @@ async def test_main_scan_passes_runtime_fallback_gate_before_candidate_evaluatio
 
 
 @pytest.mark.asyncio
-async def test_main_scan_uses_portfolio_sync_failure_override_for_evaluation_and_output(monkeypatch):
+async def test_main_scan_uses_portfolio_sync_failure_override_for_evaluation_and_output(
+    monkeypatch,
+):
     import app.main as main_module
     from app.services.visible_decision_gate import build_runtime_blocked_gate
 
     captured = {}
-    sync_failure_gate = build_runtime_blocked_gate("portfolio_sync_failed", today=date(2026, 7, 22))
+    sync_failure_gate = build_runtime_blocked_gate(
+        "portfolio_sync_failed", today=date(2026, 7, 22)
+    )
 
     async def fake_evaluate(store, quote_source, **kwargs):
         captured["entry_gate"] = kwargs.get("entry_gate")
@@ -422,7 +595,9 @@ async def test_main_scan_uses_portfolio_sync_failure_override_for_evaluation_and
         }
 
     monkeypatch.setattr(main_module, "evaluate_candidate_pool", fake_evaluate)
-    monkeypatch.setattr(main_module.notification_gate, "filter_alerts", lambda alerts, stage: alerts)
+    monkeypatch.setattr(
+        main_module.notification_gate, "filter_alerts", lambda alerts, stage: alerts
+    )
     monkeypatch.setattr(main_module, "_feishu_webhook_push", lambda *args: None)
 
     result = await main_module._scan_candidate_pool_and_push(
@@ -437,7 +612,9 @@ async def test_main_scan_uses_portfolio_sync_failure_override_for_evaluation_and
 
 
 @pytest.mark.asyncio
-async def test_intraday_sync_failure_blocks_candidates_but_still_runs_position_watch(monkeypatch):
+async def test_intraday_sync_failure_blocks_candidates_but_still_runs_position_watch(
+    monkeypatch,
+):
     import app.main as main_module
 
     class FakeQuery:
@@ -481,8 +658,12 @@ async def test_intraday_sync_failure_blocks_candidates_but_still_runs_position_w
     monkeypatch.setattr(main_module, "sync_db_from_user_portfolio", fail_sync)
     monkeypatch.setattr(main_module, "PositionWatchStore", lambda: object())
     monkeypatch.setattr(main_module, "evaluate_position_watch", fake_watch)
-    monkeypatch.setattr(main_module.notification_gate, "filter_alerts", lambda alerts, stage: alerts)
-    monkeypatch.setattr(main_module, "_feishu_webhook_push", lambda *args: pushed.append(args))
+    monkeypatch.setattr(
+        main_module.notification_gate, "filter_alerts", lambda alerts, stage: alerts
+    )
+    monkeypatch.setattr(
+        main_module, "_feishu_webhook_push", lambda *args: pushed.append(args)
+    )
     monkeypatch.setattr(main_module, "_scan_candidate_pool_and_push", fake_scan)
     main_module.generation_status["event_scan"]["running"] = False
 

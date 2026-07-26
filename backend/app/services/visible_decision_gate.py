@@ -61,6 +61,7 @@ REASON_LABELS = {
     "visible_decision_gate_missing": "当日统一入场闸门缺失、损坏或已过期",
     "portfolio_sync_failed": "持仓真值同步失败",
     "portfolio_truth_invalid": "持仓真值数据结构无效",
+    "quote_validation_blocked": "易淘金行情过期、冲突、缺失或不可用",
 }
 ALLOWED_REASONS = frozenset(REASON_LABELS)
 PROJECT_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -185,6 +186,7 @@ def build_visible_decision_gate(
     decision: dict[str, Any] | None,
     portfolio_truth: dict[str, Any] | None = None,
     stop_breaches: list[dict[str, Any]] | None = None,
+    quote_validation: dict[str, Any] | None = None,
     generated_at: str | None = None,
 ) -> dict[str, Any]:
     """Build the deterministic report/notification entry gate without writing state."""
@@ -206,6 +208,34 @@ def build_visible_decision_gate(
         reasons.append("hard_risk_veto")
     if decision.get("entry_allowed") is False:
         reasons.append("decision_entry_veto")
+    normalized_quotes = _normalize_quote_validation(quote_validation)
+    if (
+        normalized_quotes["enabled"]
+        and normalized_quotes["status"] != "ok"
+    ):
+        reasons.append("quote_validation_blocked")
+    elif normalized_quotes["enabled"]:
+        validations = normalized_quotes["validations"]
+        for field, outside_pool in (
+            ("target_scores", False),
+            ("outside_pool_scan", True),
+        ):
+            rows = decision.get(field)
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict) or not _entry_candidate(
+                    row,
+                    outside_pool=outside_pool,
+                ):
+                    continue
+                code = _item_code(row)
+                validation = validations.get(code)
+                if not isinstance(validation, dict) or validation.get(
+                    "blocks_new_entry"
+                ) is True:
+                    reasons.append("quote_validation_blocked")
+                    break
     reasons = list(dict.fromkeys(reasons))
     return {
         "report_date": report_date,
@@ -214,6 +244,7 @@ def build_visible_decision_gate(
         "entry_allowed": not reasons,
         "reasons": reasons,
         "state": "allowed" if not reasons else "blocked",
+        "quote_validation": normalized_quotes,
     }
 
 
@@ -234,6 +265,101 @@ def _entry_candidate(item: dict[str, Any], *, outside_pool: bool) -> bool:
     )
 
 
+def _item_code(item: dict[str, Any]) -> str:
+    return str(item.get("code") or item.get("stock_code") or "").strip()
+
+
+def _normalize_quote_validation(
+    summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not isinstance(summary, dict):
+        enabled = os.environ.get(
+            "CONGXI_YITAOJIN_ENABLED",
+            "",
+        ).strip().lower() == "true"
+        return {
+            "enabled": enabled,
+            "status": "unavailable" if enabled else "not_enabled",
+            "as_of": None,
+            "validations": {},
+            "reasons": [
+                "quote_snapshot_unavailable"
+                if enabled
+                else "quote_validation_not_enabled"
+            ],
+        }
+    enabled = summary.get("enabled") is True
+    raw_validations = summary.get("validations")
+    validations = (
+        {
+            str(code): dict(validation)
+            for code, validation in raw_validations.items()
+            if isinstance(validation, dict)
+        }
+        if isinstance(raw_validations, dict)
+        else {}
+    )
+    status = str(summary.get("status") or "").strip().lower()
+    if not enabled:
+        status = "not_enabled"
+    elif status not in {"ok", "blocked", "unavailable"}:
+        status = "unavailable"
+    return {
+        "enabled": enabled,
+        "status": status,
+        "as_of": summary.get("as_of"),
+        "validations": validations,
+        "reasons": [
+            str(reason)
+            for reason in summary.get("reasons") or []
+            if isinstance(reason, str)
+        ],
+    }
+
+
+def _quote_metadata(
+    item: dict[str, Any],
+    gate: dict[str, Any],
+) -> dict[str, Any]:
+    summary = gate.get("quote_validation")
+    if not isinstance(summary, dict):
+        return {}
+    enabled = summary.get("enabled") is True
+    if not enabled:
+        return {
+            "quote_status": "not_enabled",
+            "quote_as_of": summary.get("as_of"),
+            "requires_manual_price_check": False,
+        }
+    validations = summary.get("validations")
+    validation = (
+        validations.get(_item_code(item))
+        if isinstance(validations, dict)
+        else None
+    )
+    if not isinstance(validation, dict):
+        return {
+            "quote_status": (
+                "unavailable"
+                if summary.get("status") == "unavailable"
+                else "missing"
+            ),
+            "quote_as_of": summary.get("as_of"),
+            "requires_manual_price_check": True,
+            "execution_blocked_reason": "quote_validation_blocked",
+        }
+    metadata = {
+        "quote_status": str(validation.get("status") or "missing"),
+        "quote_as_of": validation.get("market_time") or summary.get("as_of"),
+        "requires_manual_price_check": (
+            validation.get("requires_manual_price_check") is True
+        ),
+    }
+    if validation.get("blocks_new_entry") is True:
+        metadata["execution_blocked_reason"] = "quote_validation_blocked"
+    return metadata
+
+
 def apply_visible_decision_gate(
     decision: dict[str, Any],
     gate: dict[str, Any],
@@ -241,9 +367,6 @@ def apply_visible_decision_gate(
     """Return a report-safe decision copy; never mutate or persist the source decision."""
     visible = dict(decision)
     visible["visible_decision_gate"] = dict(gate)
-    if gate.get("entry_allowed") is not False:
-        return visible
-
     reason_text = format_visible_decision_reasons(gate)
     for field, outside_pool in (("target_scores", False), ("outside_pool_scan", True)):
         source_rows = decision.get(field)
@@ -255,7 +378,26 @@ def apply_visible_decision_gate(
                 safe_rows.append(raw)
                 continue
             item = dict(raw)
-            if _entry_candidate(item, outside_pool=outside_pool):
+            quote_metadata = _quote_metadata(item, gate)
+            item.update(quote_metadata)
+            if quote_metadata.get("requires_manual_price_check") is True:
+                existing_reason = str(
+                    item.get("decision_reason")
+                    or item.get("watch_reason")
+                    or ""
+                ).strip()
+                item["decision_reason"] = "；".join(
+                    part
+                    for part in (
+                        "易淘金行情需人工核价",
+                        existing_reason,
+                    )
+                    if part
+                )
+            if (
+                gate.get("entry_allowed") is False
+                and _entry_candidate(item, outside_pool=outside_pool)
+            ):
                 item["blocked_entry_action"] = item.get("action") or item.get("status")
                 item["action"] = "watching"
                 item_status = _state(item.get("status"))
@@ -265,7 +407,15 @@ def apply_visible_decision_gate(
                 item["entry_allowed"] = False
                 item["suggested_amount"] = 0
                 item["position_amount"] = 0
-                existing_reason = str(item.get("decision_reason") or item.get("watch_reason") or "").strip()
+                item.setdefault(
+                    "execution_blocked_reason",
+                    "visible_decision_gate_blocked",
+                )
+                existing_reason = str(
+                    item.get("decision_reason")
+                    or item.get("watch_reason")
+                    or ""
+                ).strip()
                 item["decision_reason"] = "；".join(part for part in (reason_text, existing_reason) if part)
             safe_rows.append(item)
         visible[field] = safe_rows
@@ -290,6 +440,21 @@ def _valid_gate(gate: Any) -> bool:
         return False
     if any(not isinstance(reason, str) or reason not in ALLOWED_REASONS for reason in reasons):
         return False
+    quote_validation = gate.get("quote_validation")
+    if quote_validation is not None:
+        if not isinstance(quote_validation, dict):
+            return False
+        if not isinstance(quote_validation.get("enabled"), bool):
+            return False
+        if quote_validation.get("status") not in {
+            "ok",
+            "blocked",
+            "unavailable",
+            "not_enabled",
+        }:
+            return False
+        if not isinstance(quote_validation.get("validations"), dict):
+            return False
     try:
         report_day = date.fromisoformat(gate["report_date"])
         target_day = date.fromisoformat(gate["target_date"])
