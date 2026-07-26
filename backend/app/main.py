@@ -308,49 +308,111 @@ app.include_router(strategy.router)
 # V6 定时任务实现
 # ============================================================
 
+MARKET_DATA_MAX_AGE_SECONDS = 15 * 60
+
+
+def _fresh_market_quote_truth(quote: dict) -> tuple[str, str] | None:
+    freshness = str(
+        quote.get("freshness_status") or quote.get("freshness") or ""
+    ).strip().lower()
+    if freshness not in {"fresh", "ok"}:
+        return None
+    raw_cutoff = (
+        quote.get("data_cutoff")
+        or quote.get("quote_timestamp")
+        or quote.get("timestamp")
+    )
+    if not raw_cutoff:
+        return None
+    cutoff_text = (
+        raw_cutoff.isoformat()
+        if isinstance(raw_cutoff, datetime)
+        else str(raw_cutoff).strip()
+    )
+    try:
+        parsed = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+    age_seconds = (now - parsed).total_seconds()
+    if not -60 <= age_seconds <= MARKET_DATA_MAX_AGE_SECONDS:
+        return None
+    return cutoff_text, freshness
+
+
 async def _fetch_market_data() -> dict:
     """通过 DataRouter 拉取市场数据（多源容错）"""
     indices = {}
     providers: set[str] = set()
     data_cutoffs: list[str] = []
+    observed_freshness: set[str] = set()
+    rejected_quote_truth = False
     for code in ["sh000001", "sz399001", "sz399006"]:
         try:
             result = await data_router.fetch(code)
-            if result and result.get("price"):
+            if result:
+                observed_freshness.add(str(
+                    result.get("freshness_status") or result.get("freshness") or "unknown"
+                ).strip().lower())
+            quote_truth = _fresh_market_quote_truth(result) if result else None
+            if result and result.get("price") and not quote_truth:
+                rejected_quote_truth = True
+            if result and result.get("price") and quote_truth:
+                cutoff, _freshness = quote_truth
                 indices[code] = {"price": result["price"], "change_pct": result.get("change_pct", 0)}
                 providers.add(str(result.get("source") or "data_router"))
-                cutoff = (
-                    result.get("quote_timestamp")
-                    or result.get("trading_date")
-                    or result.get("captured_at")
-                )
-                if cutoff:
-                    data_cutoffs.append(str(cutoff))
+                data_cutoffs.append(cutoff)
         except Exception:
             continue
     if not indices:
+        fallback_freshness: set[str] = set()
+        fallback_rejected = False
         try:
             batch = await tencent_client.fetch_batch(["sh000001", "sz399001"])
             for k, v in batch.items():
-                if not v.get("price"):
+                fallback_freshness.add(str(
+                    v.get("freshness_status") or v.get("freshness") or "unknown"
+                ).strip().lower())
+                quote_truth = _fresh_market_quote_truth(v)
+                if v.get("price") and not quote_truth:
+                    fallback_rejected = True
+                if not v.get("price") or not quote_truth:
                     continue
+                cutoff, _freshness = quote_truth
                 indices[k] = {"price": v["price"], "change_pct": v.get("change_pct", 0)}
                 providers.add(str(v.get("source") or "tencent"))
-                cutoff = (
-                    v.get("quote_timestamp")
-                    or v.get("trading_date")
-                    or v.get("captured_at")
-                )
-                if cutoff:
-                    data_cutoffs.append(str(cutoff))
+                data_cutoffs.append(cutoff)
         except Exception:
             pass
+        if indices:
+            observed_freshness = fallback_freshness
+            rejected_quote_truth = fallback_rejected
+        else:
+            observed_freshness.update(fallback_freshness)
+            rejected_quote_truth = rejected_quote_truth or fallback_rejected
 
+    if indices and rejected_quote_truth:
+        source_status = "degraded"
+        freshness_status = "degraded"
+        source_error = "partial_or_unfresh_market_indices"
+    elif indices:
+        source_status = "ok"
+        freshness_status = "fresh" if observed_freshness == {"fresh"} else "ok"
+        source_error = ""
+    elif len(observed_freshness) == 1:
+        source_status = "failed"
+        freshness_status = next(iter(observed_freshness))
+        source_error = "fresh_market_indices_unavailable"
+    else:
+        source_status = "failed"
+        freshness_status = "failed"
+        source_error = "fresh_market_indices_unavailable"
     market_source_status = {
-        "status": "ok" if indices else "failed",
+        "status": source_status,
         "provider": "+".join(sorted(providers)) if indices else "data_router+tencent",
-        "data_cutoff": max(data_cutoffs) if data_cutoffs else None,
-        "error": "" if indices else "all_realtime_index_sources_failed",
+        "data_cutoff": min(data_cutoffs) if data_cutoffs else None,
+        "freshness_status": freshness_status,
+        "error": source_error,
     }
 
     db = SessionLocal()

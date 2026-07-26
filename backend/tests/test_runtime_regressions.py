@@ -425,6 +425,8 @@ async def test_fetch_market_data_fails_closed_when_all_index_sources_fail(
 async def test_fetch_market_data_reports_real_index_source_and_cutoff(monkeypatch):
     import app.main as main_module
 
+    fresh_cutoff = datetime.now().astimezone().isoformat()
+
     class FakeDb:
         def close(self):
             pass
@@ -434,7 +436,8 @@ async def test_fetch_market_data_reports_real_index_source_and_cutoff(monkeypatc
             "price": 4000,
             "change_pct": 1.2,
             "source": "tencent",
-            "quote_timestamp": "2026-07-24T15:00:00+08:00",
+            "quote_timestamp": fresh_cutoff,
+            "freshness": "fresh",
         }
 
     async def unexpected_fallback(codes):
@@ -460,9 +463,177 @@ async def test_fetch_market_data_reports_real_index_source_and_cutoff(monkeypatc
     assert result["market_source_status"] == {
         "status": "ok",
         "provider": "tencent",
-        "data_cutoff": "2026-07-24T15:00:00+08:00",
+        "data_cutoff": fresh_cutoff,
+        "freshness_status": "fresh",
         "error": "",
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("freshness", ["stale", "conflict", "unknown", "failed"])
+async def test_fetch_market_data_rejects_unfresh_source_quotes(
+    monkeypatch,
+    freshness,
+):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "change_pct": 1.2,
+            "source": "tencent",
+            "quote_timestamp": datetime.now().astimezone().isoformat(),
+            "freshness": freshness,
+        }
+
+    async def empty_fallback(codes):
+        return {}
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", empty_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] != "ok"
+    assert result["market_source_status"]["freshness_status"] != "fresh"
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_rejects_captured_at_as_data_cutoff(monkeypatch):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "source": "tencent",
+            "captured_at": datetime.now().astimezone().isoformat(),
+            "freshness": "fresh",
+        }
+
+    async def empty_fallback(codes):
+        return {}
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", empty_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] != "ok"
+    assert result["market_source_status"]["data_cutoff"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_rejects_expired_data_cutoff(monkeypatch):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "source": "tencent",
+            "quote_timestamp": (
+                datetime.now().astimezone() - timedelta(hours=1)
+            ).isoformat(),
+            "freshness": "fresh",
+        }
+
+    async def empty_fallback(codes):
+        return {}
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", empty_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] != "ok"
+    assert result["market_source_status"]["data_cutoff"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_does_not_mark_mixed_freshness_ok(monkeypatch):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "source": "tencent",
+            "quote_timestamp": datetime.now().astimezone().isoformat(),
+            "freshness": "fresh" if code == "sh000001" else "stale",
+        }
+
+    async def unexpected_fallback(codes):
+        raise AssertionError("partial primary data should be classified, not replaced")
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", unexpected_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert list(result["indices"]) == ["sh000001"]
+    assert result["market_source_status"]["status"] == "degraded"
+    assert result["market_source_status"]["freshness_status"] == "degraded"
 
 
 def test_repair_final_decision_uses_roles_when_judge_json_invalid():

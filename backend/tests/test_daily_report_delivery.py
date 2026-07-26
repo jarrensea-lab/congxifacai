@@ -1,6 +1,6 @@
 """Daily report delivery and Obsidian archive regression tests."""
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -2125,6 +2125,7 @@ def test_data_source_audit_marks_sqlite_degraded_from_structured_sync_truth():
 def test_data_source_audit_requires_structured_market_success_with_indices():
     from scripts.daily_report import build_data_source_audit
 
+    fresh_cutoff = datetime.now().astimezone().isoformat()
     failed_audit = "\n".join(
         build_data_source_audit(
             market_data={
@@ -2146,7 +2147,8 @@ def test_data_source_audit_requires_structured_market_success_with_indices():
                 "market_source_status": {
                     "status": "ok",
                     "provider": "tencent",
-                    "data_cutoff": "2026-07-24T15:00:00+08:00",
+                    "data_cutoff": fresh_cutoff,
+                    "freshness": "fresh",
                     "error": "",
                 },
             },
@@ -2160,7 +2162,8 @@ def test_data_source_audit_requires_structured_market_success_with_indices():
                 "market_source_status": {
                     "status": "ok",
                     "provider": "tencent",
-                    "data_cutoff": "2026-07-24T15:00:00+08:00",
+                    "data_cutoff": fresh_cutoff,
+                    "freshness_status": "fresh",
                     "error": "",
                 },
             },
@@ -2172,8 +2175,77 @@ def test_data_source_audit_requires_structured_market_success_with_indices():
     assert "all_realtime_index_sources_failed" in failed_audit
     assert "| 行情数据 | ok |" in ok_audit
     assert "tencent" in ok_audit
-    assert "2026-07-24T15:00:00+08:00" in ok_audit
+    assert fresh_cutoff in ok_audit
     assert "| 行情数据 | degraded |" in empty_audit
+
+
+@pytest.mark.parametrize(
+    "market_source_status",
+    [
+        {
+            "status": "ok",
+            "provider": "tencent",
+            "data_cutoff": None,
+            "freshness_status": "fresh",
+            "error": "",
+        },
+        {
+            "status": "ok",
+            "provider": "tencent",
+            "data_cutoff": "2000-01-01T00:00:00+08:00",
+            "freshness_status": "fresh",
+            "error": "",
+        },
+        {
+            "status": "ok",
+            "provider": "tencent",
+            "data_cutoff": "FRESH_CUTOFF",
+            "error": "",
+        },
+    ],
+)
+def test_data_source_audit_rejects_missing_stale_or_unproven_market_truth(
+    market_source_status,
+):
+    from scripts.daily_report import build_data_source_audit
+
+    status = dict(market_source_status)
+    if status.get("data_cutoff") == "FRESH_CUTOFF":
+        status["data_cutoff"] = datetime.now().astimezone().isoformat()
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {"shanghai": 4000},
+                "market_source_status": status,
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | degraded |" in audit
+
+
+@pytest.mark.parametrize("freshness_status", ["stale", "conflict", "unknown", "failed"])
+def test_data_source_audit_rejects_nonfresh_market_status(freshness_status):
+    from scripts.daily_report import build_data_source_audit
+
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {"shanghai": 4000},
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": datetime.now().astimezone().isoformat(),
+                    "freshness_status": freshness_status,
+                    "error": "",
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | degraded |" in audit
 
 
 @pytest.mark.asyncio

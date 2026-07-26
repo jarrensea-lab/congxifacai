@@ -373,6 +373,43 @@ def build_sentinel_research_section(package: dict | None, report_date: str | Non
     return lines
 
 
+MARKET_DATA_MAX_AGE_SECONDS = 15 * 60
+
+
+def _is_recent_market_cutoff(value) -> bool:
+    if not value:
+        return False
+    cutoff_text = value.isoformat() if isinstance(value, datetime) else str(value).strip()
+    try:
+        parsed = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    now = datetime.now(parsed.tzinfo) if parsed.tzinfo else datetime.now()
+    age_seconds = (now - parsed).total_seconds()
+    return -60 <= age_seconds <= MARKET_DATA_MAX_AGE_SECONDS
+
+
+def _fresh_market_quote_truth(quote: dict) -> tuple[str, str] | None:
+    freshness = str(
+        quote.get("freshness_status") or quote.get("freshness") or ""
+    ).strip().lower()
+    if freshness not in {"fresh", "ok"}:
+        return None
+    raw_cutoff = (
+        quote.get("data_cutoff")
+        or quote.get("quote_timestamp")
+        or quote.get("timestamp")
+    )
+    if not _is_recent_market_cutoff(raw_cutoff):
+        return None
+    cutoff_text = (
+        raw_cutoff.isoformat()
+        if isinstance(raw_cutoff, datetime)
+        else str(raw_cutoff).strip()
+    )
+    return cutoff_text, freshness
+
+
 def build_data_source_audit(
     *,
     market_data: dict,
@@ -386,16 +423,41 @@ def build_data_source_audit(
     indices = market_data.get("indices", {}) if isinstance(market_data, dict) else {}
     market_status = market_data.get("market_source_status", {}) if isinstance(market_data, dict) else {}
     market_status = market_status if isinstance(market_status, dict) else {}
-    market_ok = market_status.get("status") == "ok" and bool(indices)
+    data_cutoff = market_status.get("data_cutoff")
+    freshness_status = str(
+        market_status.get("freshness_status") or market_status.get("freshness") or ""
+    ).strip().lower()
+    market_ok = (
+        market_status.get("status") == "ok"
+        and bool(indices)
+        and freshness_status in {"fresh", "ok"}
+        and _is_recent_market_cutoff(data_cutoff)
+    )
     if market_ok:
         market_detail = (
             f"指数 {len(indices)} 项；provider={market_status.get('provider') or 'unknown'}；"
-            f"data_cutoff={market_status.get('data_cutoff') or 'unknown'}"
+            f"data_cutoff={data_cutoff}；freshness={freshness_status}"
         )
     else:
+        failure_reasons = []
+        if market_status.get("status") != "ok":
+            failure_reasons.append(
+                str(market_status.get("error") or "market_status_not_ok")
+            )
+        if not indices:
+            failure_reasons.append("indices_missing")
+        if not data_cutoff:
+            failure_reasons.append("data_cutoff_missing")
+        elif not _is_recent_market_cutoff(data_cutoff):
+            failure_reasons.append("data_cutoff_stale_or_invalid")
+        if freshness_status not in {"fresh", "ok"}:
+            failure_reasons.append(
+                f"freshness_unproven:{freshness_status or 'missing'}"
+            )
         market_detail = (
             f"指数 {len(indices)} 项；provider={market_status.get('provider') or 'unknown'}；"
-            f"失败原因={market_status.get('error') or 'market_source_status_missing_or_no_indices'}"
+            f"data_cutoff={data_cutoff or 'unknown'}；"
+            f"失败原因={','.join(failure_reasons)}"
         )
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
     deepseek_status = "configured" if os.getenv("DEEPSEEK_API_KEY") else "missing"
@@ -2469,6 +2531,7 @@ async def main():
             "status": "failed",
             "provider": "fast_realtime_market_data",
             "data_cutoff": None,
+            "freshness_status": "failed",
             "error": "index_quotes_not_fetched",
         },
         "sectors": [],
@@ -2489,29 +2552,49 @@ async def main():
         normalized_indices = {}
         cutoffs = []
         providers = set()
+        observed_freshness = set()
+        rejected_quote_truth = False
         for quote, price_key, change_key in (
             (sh, "shanghai", "sh_change"),
             (sz, "shenzhen", "sz_change"),
             (cy, "cyb", "cy_change"),
         ):
-            if not quote.get("price"):
+            observed_freshness.add(str(
+                quote.get("freshness_status") or quote.get("freshness") or "unknown"
+            ).strip().lower())
+            quote_truth = _fresh_market_quote_truth(quote)
+            if quote.get("price") and not quote_truth:
+                rejected_quote_truth = True
+            if not quote.get("price") or not quote_truth:
                 continue
+            cutoff, _freshness = quote_truth
             normalized_indices[price_key] = quote["price"]
             normalized_indices[change_key] = quote.get("change_pct", 0)
             providers.add(str(quote.get("source") or market_provider))
-            cutoff = (
-                quote.get("quote_timestamp")
-                or quote.get("trading_date")
-                or quote.get("captured_at")
-            )
-            if cutoff:
-                cutoffs.append(str(cutoff))
+            cutoffs.append(cutoff)
+        if normalized_indices and rejected_quote_truth:
+            source_status = "degraded"
+            freshness_status = "degraded"
+            source_error = "partial_or_unfresh_market_indices"
+        elif normalized_indices:
+            source_status = "ok"
+            freshness_status = "fresh" if observed_freshness == {"fresh"} else "ok"
+            source_error = ""
+        elif len(observed_freshness) == 1:
+            source_status = "failed"
+            freshness_status = next(iter(observed_freshness))
+            source_error = "fresh_market_indices_unavailable"
+        else:
+            source_status = "failed"
+            freshness_status = "failed"
+            source_error = "fresh_market_indices_unavailable"
         market_data["indices"] = normalized_indices
         market_data["market_source_status"] = {
-            "status": "ok" if normalized_indices else "failed",
+            "status": source_status,
             "provider": "+".join(sorted(providers)) if normalized_indices else market_provider,
-            "data_cutoff": max(cutoffs) if cutoffs else None,
-            "error": "" if normalized_indices else "all_realtime_index_sources_failed",
+            "data_cutoff": min(cutoffs) if cutoffs else None,
+            "freshness_status": freshness_status,
+            "error": source_error,
         }
         print(f"   上证: {sh.get('price','?')} ({sh.get('change_pct',0):+.2f}%) | "
               f"深证: {sz.get('price','?')} ({sz.get('change_pct',0):+.2f}%)", flush=True)
@@ -2521,7 +2604,8 @@ async def main():
             "status": "failed",
             "provider": market_provider,
             "data_cutoff": None,
-            "error": "all_realtime_index_sources_failed",
+            "freshness_status": "failed",
+            "error": "fresh_market_indices_unavailable",
         }
         print(f"   ⚠️ 指数获取失败: {e}", flush=True)
 
