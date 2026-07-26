@@ -162,9 +162,10 @@ def test_build_next_day_strategy_sections_include_required_blocks():
             "accountant": {"analysis": "估值未到安全区"},
             "guardian": {"analysis": "小账户先保本金"},
             "researcher": {"analysis": "半导体主题热度高但不可直接交易"},
-        },
-        sentinel_package={
-            "event_count": 5674,
+            },
+            sentinel_package={
+                "date": "2026-06-28",
+                "event_count": 5674,
             "key_event_count": 2558,
             "top_themes": [{"name": "AI半导体", "count": 88}],
             "risk_events": [{"excerpt": "监管问询风险"}],
@@ -987,6 +988,90 @@ def test_load_sentinel_research_package_falls_back_to_latest(monkeypatch, tmp_pa
     assert package["date"] == "2026-06-30"
     assert package["fallback_used"] is True
     assert package["requested_date"] == "2026-07-01"
+
+
+@pytest.mark.parametrize(
+    ("package_date", "expected_status", "expected_text"),
+    [
+        ("2026-07-01", "stale", "历史"),
+        ("2026-07-05", "future", "未来"),
+        (None, "unknown_date", "日期缺失或非法"),
+        ("not-a-date", "unknown_date", "日期缺失或非法"),
+    ],
+)
+def test_inactive_sentinel_package_is_audit_only(
+    package_date,
+    expected_status,
+    expected_text,
+):
+    import scripts.daily_report as daily_report
+
+    package = {
+        "date": package_date,
+        "event_count": 10,
+        "top_themes": [{"name": "AI", "count": 2}],
+    }
+    market_data = {}
+    calls = []
+
+    result = daily_report._inject_active_sentinel_evidence(
+        package,
+        "2026-07-04",
+        market_data,
+        context_builder=lambda value: calls.append(("context", value)) or "ctx",
+        target_upserter=lambda value: calls.append(("upsert", value)) or {},
+    )
+
+    assert result["status"] == expected_status
+    assert result["active"] is False
+    assert calls == []
+    assert "sentinel_evidence" not in market_data
+    rendered = "\n".join(
+        daily_report.build_sentinel_research_section(
+            package,
+            report_date="2026-07-04",
+        )
+    )
+    assert expected_text in rendered
+    assert "当前候选" not in rendered or "不参与当前候选" in rendered
+
+
+@pytest.mark.parametrize("package_date", ["2026-07-02", "2026-07-03", "2026-07-04"])
+def test_recent_sentinel_fallback_can_enter_decision_context(package_date):
+    import scripts.daily_report as daily_report
+
+    package = {"date": package_date, "event_count": 10}
+    market_data = {}
+    calls = []
+
+    result = daily_report._inject_active_sentinel_evidence(
+        package,
+        "2026-07-04",
+        market_data,
+        context_builder=lambda value: calls.append("context") or "ctx",
+        target_upserter=lambda value: calls.append("upsert") or {
+            "evidence_count": 1,
+            "upserted_targets": 1,
+        },
+    )
+
+    assert result["status"] == "active"
+    assert result["active"] is True
+    assert result["age_days"] in {0, 1, 2}
+    assert calls == ["context", "upsert"]
+    assert market_data["sentinel_evidence"] == "ctx"
+
+
+def test_sentinel_package_age_preserves_future_sign():
+    import scripts.daily_report as daily_report
+
+    assert (
+        daily_report._sentinel_package_age_days(
+            {"date": "2026-07-05"},
+            "2026-07-04",
+        )
+        == -1
+    )
 
 
 def test_build_next_day_strategy_sections_render_role_votes():

@@ -406,21 +406,15 @@ def materialize_serenity_long_horizon(
                     if verified:
                         result["verified_count"] += 1
 
-                    existing_target = target_pool.get(symbol)
-                    merged_evidence_ids = list(dict.fromkeys([
-                        *((existing_target or {}).get("evidence_ids") or []),
-                        *thesis["evidence_ids"],
-                    ]))
-                    target_semantics = {
-                        "code": symbol,
-                        "name": stored["name"],
-                        "status": "long_research",
-                        "source": "long_horizon",
-                        "evidence_ids": merged_evidence_ids,
-                        "current_long_evidence_ids": (
-                            current_long_evidence_ids
-                        ),
-                        "evidence": {
+                    target_outcome = target_pool.merge_research_overlay(
+                        code=symbol,
+                        name=stored["name"],
+                        overlay_name="long_horizon",
+                        status="long_research",
+                        source="long_horizon",
+                        evidence_ids=thesis["evidence_ids"],
+                        current_long_evidence_ids=current_long_evidence_ids,
+                        evidence={
                             "stage": "shadow_only",
                             "boundary": "shadow_only",
                             "research_only": True,
@@ -428,37 +422,20 @@ def materialize_serenity_long_horizon(
                             "thesis_status": stored["thesis_status"],
                             "source_report_path": stored["source_report_path"],
                         },
-                        "serenity": {
+                        serenity={
                             "quality_score": stored["quality_score"],
                             "bottleneck_duration": stored["bottleneck_duration"],
                             "boundary": "research_only",
                         },
-                    }
-                    target_unchanged = _semantically_matches(
-                        existing_target,
-                        target_semantics,
                     )
+                    if not target_outcome["accepted"]:
+                        raise RuntimeError("target_pool_upsert_rejected")
+                    target_unchanged = not target_outcome["changed"]
                     if target_unchanged:
-                        target_written = True
                         result["unchanged_target_count"] += 1
                         result["skipped_count"] += 1
                     else:
-                        target_written = target_pool.upsert_target(
-                            code=symbol,
-                            name=stored["name"],
-                            status="long_research",
-                            source="long_horizon",
-                            evidence_ids=current_long_evidence_ids,
-                            current_long_evidence_ids=(
-                                current_long_evidence_ids
-                            ),
-                            evidence=target_semantics["evidence"],
-                            serenity=target_semantics["serenity"],
-                        )
-                        if target_written:
-                            result["write_count"] += 1
-                    if not target_written:
-                        raise RuntimeError("target_pool_upsert_rejected")
+                        result["write_count"] += 1
                     result["target_count"] += 1
                     if thesis_unchanged and target_unchanged:
                         result["unchanged_count"] += 1

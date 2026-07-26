@@ -227,6 +227,34 @@ def run_all(report_date: str, output_root: str | Path = DEFAULT_OUTPUT_ROOT) -> 
     }
 
 
+def _sentinel_result_exit_code(result: dict[str, Any]) -> int:
+    """Map nested long-horizon materialization truth to the CLI contract."""
+    statuses: list[str] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            summary = value.get("long_horizon_summary")
+            if isinstance(summary, dict):
+                statuses.append(
+                    str(summary.get("status") or "unknown").strip().lower()
+                )
+            for key, nested in value.items():
+                if key != "long_horizon_summary":
+                    collect(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                collect(nested)
+
+    collect(result)
+    if not statuses:
+        return 0
+    if any(status not in {"success", "partial", "degraded"} for status in statuses):
+        return 1
+    if any(status in {"partial", "degraded"} for status in statuses):
+        return 2
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--date", default=_today_iso(), help="Report date in YYYY-MM-DD format")
@@ -241,7 +269,7 @@ def main() -> int:
     else:
         result = run_all(args.date, output_root=args.output_root)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return 0
+    return _sentinel_result_exit_code(result)
 
 
 if __name__ == "__main__":

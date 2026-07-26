@@ -1,5 +1,6 @@
 """Sentinel research package tests."""
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -235,11 +236,50 @@ async def test_sentinel_research_job_runs_news_mode(monkeypatch):
 
     monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
 
-    await main._run_sentinel_research_with_status()
+    status = await main._run_sentinel_research_with_status()
 
     command = captured["args"][0]
     assert command[command.index("--mode") + 1] == "news"
     assert captured["kwargs"]["timeout"] >= 120
+    assert status["state"] == "completed"
+    assert status["returncode"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("returncode", "expected_state", "expected_log"),
+    [
+        (0, "completed", "完成"),
+        (2, "degraded", "降级"),
+        (1, "failed", "失败"),
+    ],
+)
+async def test_sentinel_scheduler_returns_structured_materialization_status(
+    monkeypatch,
+    caplog,
+    returncode,
+    expected_state,
+    expected_log,
+):
+    from app import main
+
+    async def fake_to_thread(func, *args, **kwargs):
+        return SimpleNamespace(
+            returncode=returncode,
+            stdout='{"mode":"news"}',
+            stderr="materialization diagnostic",
+        )
+
+    monkeypatch.setattr(main.asyncio, "to_thread", fake_to_thread)
+
+    with caplog.at_level("INFO"):
+        status = await main._run_sentinel_research_with_status()
+
+    assert status["state"] == expected_state
+    assert status["returncode"] == returncode
+    assert expected_log in caplog.text
+    if returncode != 0:
+        assert "Sentinel研究包与Serenity深挖完成" not in caplog.text
 
 
 def test_sentinel_research_job_is_registered_before_main_report():
@@ -362,6 +402,102 @@ def test_run_sentinel_news_job_writes_news_events_and_package(monkeypatch, tmp_p
     assert package["serenity_deep_dives"][0]["theme"] == "AI半导体"
     assert "learning_report_path" in package["serenity_deep_dives"][0]
     assert not package["serenity_deep_dives"][0].get("learning_report_markdown")
+
+
+def test_run_sentinel_news_job_persists_audit_package_after_materialization_failure(
+    monkeypatch,
+    tmp_path,
+):
+    import scripts.run_sentinel as runner
+
+    monkeypatch.setattr(
+        runner,
+        "import_default_tushare_news_events",
+        lambda report_date: _sample_events(),
+    )
+    monkeypatch.setattr(runner, "build_serenity_deep_dives", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        runner,
+        "materialize_serenity_long_horizon",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("broken store")),
+    )
+    monkeypatch.setenv("CONGXI_PORTFOLIO_PATH", str(tmp_path / "missing.json"))
+
+    result = runner.run_news_job(
+        "2026-07-27",
+        output_root=tmp_path,
+        quote_fetcher=lambda codes: {},
+        financial_fetcher=lambda codes: {},
+    )
+
+    package_path = tmp_path / "research_packages" / "2026-07-27.json"
+    assert package_path.exists()
+    persisted = json.loads(package_path.read_text(encoding="utf-8"))
+    assert persisted["long_horizon_summary"]["status"] == "failed"
+    assert result["long_horizon_summary"]["status"] == "failed"
+    assert runner._sentinel_result_exit_code(result) == 1
+
+
+@pytest.mark.parametrize(
+    ("summary_status", "expected_code"),
+    [
+        ("success", 0),
+        ("failed", 1),
+        ("partial", 2),
+        ("degraded", 2),
+    ],
+)
+def test_run_sentinel_main_returns_materialization_exit_code(
+    monkeypatch,
+    tmp_path,
+    summary_status,
+    expected_code,
+):
+    import scripts.run_sentinel as runner
+
+    monkeypatch.setattr(
+        runner,
+        "run_news_job",
+        lambda *args, **kwargs: {
+            "mode": "news",
+            "long_horizon_summary": {"status": summary_status},
+        },
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_sentinel.py",
+            "--date",
+            "2026-07-27",
+            "--mode",
+            "news",
+            "--output-root",
+            str(tmp_path),
+        ],
+    )
+
+    assert runner.main() == expected_code
+
+
+def test_run_sentinel_all_recursively_prioritizes_failure():
+    import scripts.run_sentinel as runner
+
+    assert (
+        runner._sentinel_result_exit_code(
+            {
+                "news": {
+                    "long_horizon_summary": {"status": "partial"},
+                },
+                "review": {
+                    "nested": {
+                        "long_horizon_summary": {"status": "failed"},
+                    }
+                },
+            }
+        )
+        == 1
+    )
 
 
 def test_run_sentinel_news_job_wires_account_fetchers_and_materializes_before_package(

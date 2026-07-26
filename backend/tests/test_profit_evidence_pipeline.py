@@ -119,6 +119,74 @@ def test_sentinel_serenity_candidates_enter_target_pool_with_evidence(tmp_path):
     assert all(item["reason"] == "invalid_a_share_code" for item in result["skipped"])
 
 
+def test_sentinel_overlay_preserves_existing_production_target(tmp_path):
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    scoring_decision = {
+        "action": "buy",
+        "score": 82,
+        "missing_data": [],
+        "source_status": {
+            "quote": "ok",
+            "kline": "ok",
+            "fund_flow": "ok",
+            "financial": "ok",
+        },
+    }
+    target_pool.upsert_target(
+        code="688008",
+        name="澜起科技",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=scoring_decision,
+        current_price=68.5,
+        available_cash=50000,
+        total_assets=50000,
+    )
+    before = target_pool.get("688008")
+
+    result = upsert_sentinel_evidence_to_target_pool(
+        _sample_sentinel_package(),
+        target_pool=target_pool,
+        ledger=ledger,
+    )
+
+    item = target_pool.get("688008")
+    assert result["upserted_targets"] == 1
+    for key in (
+        "status",
+        "source",
+        "provenance",
+        "production_eligibility",
+        "production_approval",
+        "scoring_decision",
+        "execution",
+    ):
+        assert item[key] == before[key]
+    assert item["status"] == "executable"
+    assert item["production_eligibility"]["eligible"] is True
+    assert item["scoring_decision"]["authorization_valid"] is True
+    assert {row["code"] for row in target_pool.active_items()} == {"688008"}
+    assert item["evidence"].get("stage") is None
+    assert item["evidence"].get("boundary") is None
+    assert item["evidence"].get("research_only") is None
+    assert item["research_overlays"]["sentinel_serenity"]["research_only"] is True
+
+    target_pool.upsert_target(
+        code="688008",
+        name="澜起科技",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=scoring_decision,
+        current_price=68.5,
+        available_cash=50000,
+        total_assets=50000,
+    )
+    rescored = target_pool.get("688008")
+    assert rescored["status"] == "executable"
+    assert rescored["production_eligibility"]["eligible"] is True
+
+
 def test_sentinel_evidence_context_is_strategy_input_summary():
     context = build_sentinel_evidence_context(_sample_sentinel_package())
 

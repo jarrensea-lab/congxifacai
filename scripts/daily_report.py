@@ -414,7 +414,79 @@ def _sentinel_package_age_days(package: dict | None, report_date: str | None) ->
         package_date = datetime.strptime(str(package.get("date")), "%Y-%m-%d").date()
     except ValueError:
         return None
-    return max(0, (current - package_date).days)
+    return (current - package_date).days
+
+
+def _sentinel_package_freshness(
+    package: dict | None,
+    report_date: str | None,
+) -> dict[str, object]:
+    if not package:
+        return {
+            "status": "unavailable",
+            "active": False,
+            "age_days": None,
+            "package_date": None,
+            "report_date": report_date,
+        }
+    package_date = package.get("date")
+    age_days = _sentinel_package_age_days(package, report_date)
+    if age_days is None:
+        status = "unknown_date"
+    elif age_days < 0:
+        status = "future"
+    elif age_days > 2:
+        status = "stale"
+    else:
+        status = "active"
+    return {
+        "status": status,
+        "active": status == "active",
+        "age_days": age_days,
+        "package_date": package_date,
+        "report_date": report_date,
+    }
+
+
+def _sentinel_audit_only_message(freshness: dict[str, object]) -> str:
+    status = freshness.get("status")
+    package_date = freshness.get("package_date")
+    report_date = freshness.get("report_date")
+    age_days = freshness.get("age_days")
+    if status == "stale":
+        return (
+            f"研究包日期 {package_date}，已过期 {age_days} 天；"
+            "只保留历史审计/复盘，不参与当前候选或 AI 决策。"
+        )
+    if status == "future":
+        return (
+            f"研究包日期 {package_date} 晚于报告日 {report_date}（未来日期）；"
+            "日期异常，包仅保留历史审计，不参与当前候选或 AI 决策。"
+        )
+    return (
+        "研究包日期缺失或非法，无法验证时效；"
+        "包仅保留历史审计，不参与当前候选或 AI 决策。"
+    )
+
+
+def _inject_active_sentinel_evidence(
+    package: dict | None,
+    report_date: str,
+    market_data: dict,
+    *,
+    context_builder,
+    target_upserter,
+) -> dict[str, object]:
+    """Inject only a fresh, parseable Sentinel package into decision inputs."""
+    freshness = _sentinel_package_freshness(package, report_date)
+    if freshness["active"] is not True:
+        return freshness
+    market_data["sentinel_evidence"] = context_builder(package)
+    ingest_result = target_upserter(package)
+    return {
+        **freshness,
+        "ingest_result": ingest_result,
+    }
 
 
 def build_sentinel_research_section(package: dict | None, report_date: str | None = None) -> list[str]:
@@ -428,15 +500,15 @@ def build_sentinel_research_section(package: dict | None, report_date: str | Non
         f"- Sentinel 状态：{(package.get('source_status') or {}).get('status', 'unknown')}",
         f"- 高频新闻：{package.get('event_count', 0)} 条，关键新闻 {package.get('key_event_count', 0)} 条。",
     ]
-    age_days = _sentinel_package_age_days(
+    freshness = _sentinel_package_freshness(
         package,
         report_date or package.get("requested_date"),
     )
-    if age_days is not None and age_days > 2:
+    if freshness["active"] is not True:
         lines.extend([
-            f"- 研究包日期：{package.get('date')}，已过期 {age_days} 天。",
-            "- Serenity：旧深挖不参与当前候选判断；等待新的研究包生成。",
-            "- 边界：旧报告只保留作历史复盘。",
+            f"- 研究包时效：{_sentinel_audit_only_message(freshness)}",
+            "- Serenity：该深挖不参与当前候选判断；等待日期有效的新研究包生成。",
+            "- 边界：该报告只保留作历史审计/复盘。",
         ])
         return lines
     if package.get("fallback_used"):
@@ -475,6 +547,7 @@ def build_data_source_audit(
     deepseek_ok: bool | None = None,
     qwen_ok: bool | None = None,
     model_runtime_status: dict | None = None,
+    report_date: str | None = None,
 ) -> list[str]:
     """Render data-source audit rows for the main report."""
     indices = market_data.get("indices", {}) if isinstance(market_data, dict) else {}
@@ -559,6 +632,21 @@ def build_data_source_audit(
             f"{coverage_detail}"
         )
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
+    sentinel_freshness = _sentinel_package_freshness(
+        sentinel_package,
+        report_date,
+    )
+    if not sentinel_package:
+        sentinel_package_status = "missing"
+        sentinel_package_detail = "未找到研究包"
+    elif sentinel_freshness["active"] is True:
+        sentinel_package_status = "ok"
+        sentinel_package_detail = "当前决策研究输入，不产生交易指令"
+    else:
+        sentinel_package_status = "degraded"
+        sentinel_package_detail = _sentinel_audit_only_message(
+            sentinel_freshness
+        )
     if model_runtime_status is None and (
         deepseek_ok is not None or qwen_ok is not None
     ):
@@ -604,7 +692,7 @@ def build_data_source_audit(
         "|---|---|---|",
         f"| 行情数据 | {_status_label('ok' if market_ok else 'degraded')} | {market_detail} |",
         f"| Tushare 高频新闻 | {_status_label(sentinel_status.get('status', 'missing'))} | 新闻 {(sentinel_package or {}).get('event_count', 0)} 条 |",
-        f"| Sentinel 研究包 | {_status_label('ok' if sentinel_package else 'missing')} | 研究输入，不产生交易指令 |",
+        f"| Sentinel 研究包 | {_status_label(sentinel_package_status)} | {sentinel_package_detail} |",
     ]
     rows.extend(_model_runtime_audit_rows(model_runtime_status))
     rows.extend([
@@ -1575,14 +1663,24 @@ def _project_status_section(
         theme_text = "、".join(
             f"{item.get('name')}({item.get('count')})" for item in themes[:3] if isinstance(item, dict)
         ) or "无明确主题"
-        age_days = _sentinel_package_age_days(sentinel_package, report_date)
+        freshness = _sentinel_package_freshness(
+            sentinel_package,
+            report_date,
+        )
         dives = sentinel_package.get("serenity_deep_dives") or []
-        if age_days is not None and age_days > 2:
+        if freshness["active"] is not True:
             lines.append(
-                f"- Sentinel：研究包日期 {sentinel_package.get('date')}，已过期 {age_days} 天；"
-                "只保留历史复盘，不作为当前候选证据。"
+                f"- Sentinel：{_sentinel_audit_only_message(freshness)}"
             )
-            lines.append("- Serenity：旧深挖不参与当前候选判断；等待20:00研究任务刷新。")
+            dive_label = (
+                "旧深挖"
+                if freshness["status"] == "stale"
+                else "该深挖"
+            )
+            lines.append(
+                f"- Serenity：{dive_label}不参与当前候选判断；"
+                "等待20:00研究任务刷新。"
+            )
             lines.append("")
             return lines
         dive_names = []
@@ -1862,11 +1960,14 @@ def _research_archive_lines(
         "- Serenity 深挖：保留产业链瓶颈、候选锚点和验证问题；进入策略前必须再过账户与行情评分。",
     ]
     if sentinel_package:
-        age_days = _sentinel_package_age_days(sentinel_package, report_date)
-        if age_days is not None and age_days > 2:
+        freshness = _sentinel_package_freshness(
+            sentinel_package,
+            report_date,
+        )
+        if freshness["active"] is not True:
             lines.append(
-                f"- Serenity 深挖归档：最新研究包已过期 {age_days} 天；"
-                "旧文件只作历史复盘，不参与当前候选判断。"
+                "- Serenity 深挖归档："
+                f"{_sentinel_audit_only_message(freshness)}"
             )
             return lines
         lines.append(
@@ -2562,10 +2663,14 @@ def _next_day_audit_lines(
                 f"- 易淘金行情校验：读取不可用；截至 {as_of}；新开仓关闭。"
             )
     if sentinel_package:
-        age_days = _sentinel_package_age_days(sentinel_package, report_date)
-        if age_days is not None and age_days > 2:
+        freshness = _sentinel_package_freshness(
+            sentinel_package,
+            report_date,
+        )
+        if freshness["active"] is not True:
             lines.append(
-                f"- Sentinel/Serenity：研究包已过期 {age_days} 天，只作历史复盘。"
+                "- Sentinel/Serenity："
+                f"{_sentinel_audit_only_message(freshness)}"
             )
         else:
             themes = sentinel_package.get("top_themes") or []
@@ -2591,6 +2696,7 @@ def _next_day_audit_lines(
             market_data=market_data,
             sentinel_package=sentinel_package,
             model_runtime_status=model_runtime_status,
+            report_date=report_date,
         )
     )
     return lines
@@ -3654,15 +3760,28 @@ async def main():
     market_data["total_assets"] = portfolio["total_assets"]
     sentinel_package = load_sentinel_research_package(today)
     if sentinel_package:
-        market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
         try:
-            ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
-            print(
-                "   Sentinel evidence 接入: "
-                f"{ingest_result.get('evidence_count', 0)} 条证据, "
-                f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
-                flush=True,
+            sentinel_decision = _inject_active_sentinel_evidence(
+                sentinel_package,
+                today,
+                market_data,
+                context_builder=build_sentinel_evidence_context,
+                target_upserter=upsert_sentinel_evidence_to_target_pool,
             )
+            if sentinel_decision["active"] is True:
+                ingest_result = sentinel_decision.get("ingest_result") or {}
+                print(
+                    "   Sentinel evidence 接入: "
+                    f"{ingest_result.get('evidence_count', 0)} 条证据, "
+                    f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
+                    flush=True,
+                )
+            else:
+                print(
+                    "   Sentinel evidence 仅归档: "
+                    f"{_sentinel_audit_only_message(sentinel_decision)}",
+                    flush=True,
+                )
         except Exception as e:
             print(f"   ⚠️ Sentinel evidence 入池失败，降级继续: {e}", flush=True)
 

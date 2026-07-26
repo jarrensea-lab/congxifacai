@@ -181,6 +181,139 @@ def test_materialize_serenity_long_horizon_persists_verified_and_forming_researc
     assert all(item["enters_strategy"] is False for item in ledger_after_first)
 
 
+def test_long_horizon_overlay_preserves_existing_production_target(tmp_path):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    scoring_decision = {
+        "action": "buy",
+        "score": 82,
+        "missing_data": [],
+        "source_status": {
+            "quote": "ok",
+            "kline": "ok",
+            "fund_flow": "ok",
+            "financial": "ok",
+        },
+    }
+    target_pool.upsert_target(
+        code="688001",
+        name="验证材料",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=scoring_decision,
+        current_price=18.6,
+        available_cash=50000,
+        total_assets=50000,
+    )
+    before = target_pool.get("688001")
+    package = _package()
+    package["serenity_deep_dives"] = [package["serenity_deep_dives"][0]]
+
+    summary = materialize_serenity_long_horizon(
+        package,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+
+    assert summary["status"] == "success"
+    item = target_pool.get("688001")
+    for key in (
+        "status",
+        "source",
+        "provenance",
+        "production_eligibility",
+        "production_approval",
+        "scoring_decision",
+        "execution",
+    ):
+        assert item[key] == before[key]
+    assert item["status"] == "executable"
+    assert item["production_eligibility"]["eligible"] is True
+    assert item["current_long_evidence_ids"]
+    assert item["research_overlays"]["long_horizon"]["status"] == "long_research"
+    assert {row["code"] for row in target_pool.active_items()} == {"688001"}
+
+    target_pool.upsert_target(
+        code="688001",
+        name="验证材料",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=scoring_decision,
+        current_price=18.6,
+        available_cash=50000,
+        total_assets=50000,
+    )
+    assert target_pool.get("688001")["status"] == "executable"
+
+
+def test_broken_long_thesis_blocks_only_when_formal_scoring_runs(tmp_path):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+    from app.services.target_scoring import score_target
+
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+    target_pool.upsert_target(
+        code="688001",
+        name="验证材料",
+        status="executable",
+        source="target_scoring",
+        scoring_decision={
+            "action": "buy",
+            "score": 82,
+            "missing_data": [],
+            "source_status": {
+                "quote": "ok",
+                "kline": "ok",
+                "fund_flow": "ok",
+                "financial": "ok",
+            },
+        },
+        current_price=18.6,
+        available_cash=50000,
+        total_assets=50000,
+    )
+    package = _package()
+    package["serenity_deep_dives"] = [package["serenity_deep_dives"][0]]
+    package["serenity_deep_dives"][0]["top_candidates"][0]["red_lines"][0][
+        "status"
+    ] = "triggered"
+
+    materialize_serenity_long_horizon(
+        package,
+        "2026-07-26",
+        thesis_store,
+        EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl"),
+        target_pool,
+    )
+
+    materialized = target_pool.get("688001")
+    assert materialized["status"] == "executable"
+    assert materialized["production_eligibility"]["eligible"] is True
+    scored = score_target(
+        {
+            **materialized,
+            "quote": {"status": "ok", "price": 18.6},
+            "kline": {"status": "ok", "bars": []},
+            "fund_flow": {"status": "ok"},
+            "financial": {"status": "ok"},
+        },
+        available_cash=50000,
+        total_assets=50000,
+        long_thesis=thesis_store.get("688001"),
+    )
+    assert scored["action"] == "watch"
+    assert scored["block_reason"] == "long_thesis_broken"
+
+
 def test_materializer_fails_closed_when_store_history_is_corrupted(tmp_path):
     from app.services.long_horizon_pipeline import (
         materialize_serenity_long_horizon,
@@ -543,7 +676,7 @@ def test_materializer_rolls_back_all_stores_after_each_write_stage_failure(
     method_name = {
         "ledger": "append_many",
         "thesis": "upsert",
-        "target": "upsert_target",
+        "target": "merge_research_overlay",
     }[failed_stage]
     original = getattr(owner, method_name)
 

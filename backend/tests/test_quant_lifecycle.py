@@ -1845,6 +1845,43 @@ def test_target_pool_routes_unaffordable_serenity_candidate_to_research_referenc
     assert item["execution"]["block_reason"] == "lot_size_exceeded"
 
 
+def test_target_pool_research_overlay_entry_is_fail_closed_for_new_target(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    merge_overlay = getattr(store, "merge_research_overlay", None)
+
+    assert callable(merge_overlay)
+    outcome = merge_overlay(
+        code="688008",
+        name="澜起科技",
+        overlay_name="sentinel_serenity",
+        status="research_reference",
+        source="sentinel_serenity",
+        evidence_ids=["ev_test"],
+        evidence={
+            "stage": "shadow_only",
+            "boundary": "research_only",
+            "research_only": True,
+        },
+        serenity={"score": 62.5},
+    )
+
+    item = store.get("688008")
+    assert outcome["accepted"] is True
+    assert outcome["changed"] is True
+    assert item["status"] == "research_reference"
+    assert item["source"] == "sentinel_serenity"
+    assert item["production_eligibility"]["eligible"] is False
+    assert item["provenance"]["research_only"] is True
+    assert item["evidence"].get("stage") is None
+    assert item["evidence"].get("boundary") is None
+    assert item["evidence"].get("research_only") is None
+    assert item["research_overlays"]["sentinel_serenity"]["evidence"] == {
+        "stage": "shadow_only",
+        "boundary": "research_only",
+        "research_only": True,
+    }
+
+
 def test_target_pool_source_rewrite_cannot_promote_research_only_item(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
     store.upsert_target(
@@ -1862,6 +1899,7 @@ def test_target_pool_source_rewrite_cannot_promote_research_only_item(tmp_path):
         name="梦网科技",
         status="executable",
         source="target_scoring",
+        scoring_decision=full_score_decision(),
         current_price=3.2,
         available_cash=6085.61,
         total_assets=6085.61,
@@ -1873,6 +1911,72 @@ def test_target_pool_source_rewrite_cannot_promote_research_only_item(tmp_path):
     assert item["provenance"]["original_source"] == "sentinel_serenity"
     assert item["provenance"]["research_only"] is True
     assert item["production_eligibility"]["eligible"] is False
+
+
+def test_full_score_reauthorization_recovers_legacy_polluted_production_item(
+    tmp_path,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="历史污染标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    payload = store.load()
+    polluted = payload["items"]["002123"]
+    polluted["status"] = "research_reference"
+    polluted["source"] = "long_horizon"
+    polluted["provenance"] = {
+        "original_status": "executable",
+        "original_source": "target_scoring",
+        "research_only": True,
+    }
+    polluted["production_eligibility"] = {
+        "eligible": False,
+        "research_only": True,
+        "approved": False,
+        "original_status": "executable",
+        "original_source": "target_scoring",
+        "reason": "research_only_provenance",
+        "approval": {},
+    }
+    polluted["research_overlays"] = {
+        "long_horizon": {
+            "status": "long_research",
+            "source": "long_horizon",
+            "research_only": True,
+        }
+    }
+    store.save(payload)
+
+    store.upsert_target(
+        code="002123",
+        name="历史污染标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    restored = store.get("002123")
+    assert restored["status"] == "executable"
+    assert restored["source"] == "target_scoring"
+    assert restored["production_eligibility"]["eligible"] is True
+    assert restored["production_eligibility"]["research_only"] is False
+    assert restored["provenance"] == {
+        "original_status": "executable",
+        "original_source": "target_scoring",
+        "research_only": False,
+    }
+    assert restored["scoring_decision"]["authorization_valid"] is True
+    assert {item["code"] for item in store.active_items()} == {"002123"}
 
 
 def test_target_pool_rejects_self_declared_approval_for_research_only_item(tmp_path):

@@ -1093,12 +1093,38 @@ async def _run_sentinel_research_with_status():
             capture_output=True,
             timeout=180,
         )
-        if result.returncode != 0:
-            logger.warning(f"Sentinel研究包与Serenity深挖失败: {result.stderr[:800]}")
-            return
-        logger.info(f"Sentinel研究包与Serenity深挖完成: {result.stdout[:800]}")
+        detail = (result.stderr or result.stdout or "")[:800]
+        if result.returncode == 0:
+            logger.info(
+                f"Sentinel研究包与Serenity深挖完成: {result.stdout[:800]}"
+            )
+            return {
+                "state": "completed",
+                "returncode": 0,
+                "detail": detail,
+            }
+        if result.returncode == 2:
+            logger.warning(
+                f"Sentinel研究包与Serenity深挖降级: {detail}"
+            )
+            return {
+                "state": "degraded",
+                "returncode": 2,
+                "detail": detail,
+            }
+        logger.error(f"Sentinel研究包与Serenity深挖失败: {detail}")
+        return {
+            "state": "failed",
+            "returncode": result.returncode,
+            "detail": detail,
+        }
     except Exception as e:
         logger.error(f"Sentinel研究包与Serenity深挖异常: {e}", exc_info=True)
+        return {
+            "state": "failed",
+            "returncode": 1,
+            "detail": e.__class__.__name__,
+        }
 
 
 async def _run_sentinel_review_with_status():

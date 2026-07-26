@@ -1,6 +1,7 @@
 """Production candidate/position lifecycle for scheduled trading assistance."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -459,7 +460,30 @@ def target_production_eligibility(
         }
         return bool(normalized_stages & {"hypothesis", "shadow", "shadow_mode", "paper_only", "unpromoted"})
 
-    research_only = (
+    current_scoring = (
+        current.get("scoring_decision")
+        if isinstance(current.get("scoring_decision"), dict)
+        else {}
+    )
+    prior_scoring = (
+        prior.get("scoring_decision")
+        if isinstance(prior.get("scoring_decision"), dict)
+        else {}
+    )
+    legacy_full_score_reauthorization = (
+        str(current.get("source") or "").strip().lower() == "target_scoring"
+        and str(current.get("status") or "").strip().lower() == "executable"
+        and current_scoring.get("authorization_valid") is True
+        and prior_scoring.get("authorization_valid") is True
+        and prior_gate.get("eligible") is False
+        and prior_gate.get("reason") == "research_only_provenance"
+        and prior_provenance.get("research_only") is True
+        and str(prior_provenance.get("original_source") or "").strip().lower()
+        == "target_scoring"
+        and str(prior_provenance.get("original_status") or "").strip().lower()
+        in {"watching", "executable", "actionable"}
+    )
+    research_only = False if legacy_full_score_reauthorization else (
         prior_gate.get("eligible") is False
         or research_only_marker(prior)
         or research_only_marker(current)
@@ -492,6 +516,8 @@ def target_production_eligibility(
         "reason": (
             "auditable_production_approval"
             if approval
+            else "full_score_reauthorization"
+            if legacy_full_score_reauthorization
             else "cooldown_after_loss"
             if cooldown_after_loss
             else "research_only_provenance"
@@ -597,6 +623,207 @@ class TargetPoolStore(CandidatePoolStore):
             self.save(working)
         return written
 
+    @_locked_store_mutation
+    def merge_research_overlay(
+        self,
+        *,
+        code: str,
+        name: str,
+        overlay_name: str,
+        status: str,
+        source: str,
+        evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+        sentinel: dict[str, Any] | None = None,
+        serenity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Merge inert research without replacing a production lifecycle."""
+        payload = self.load()
+        outcome = self._merge_research_overlay_in_payload(
+            payload,
+            code=code,
+            name=name,
+            overlay_name=overlay_name,
+            status=status,
+            source=source,
+            evidence_ids=evidence_ids,
+            current_long_evidence_ids=current_long_evidence_ids,
+            evidence=evidence,
+            sentinel=sentinel,
+            serenity=serenity,
+        )
+        if outcome["changed"]:
+            self.save(payload)
+        return outcome
+
+    def _merge_research_overlay_in_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        code: str,
+        name: str,
+        overlay_name: str,
+        status: str,
+        source: str,
+        evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+        sentinel: dict[str, Any] | None = None,
+        serenity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean = _clean_code(code)
+        namespace = str(overlay_name or source or "").strip()
+        if not clean or not namespace:
+            return {
+                "accepted": False,
+                "changed": False,
+                "production_preserved": False,
+            }
+        items = payload.setdefault("items", {})
+        raw_existing = items.get(clean)
+        existing = (
+            copy.deepcopy(raw_existing)
+            if isinstance(raw_existing, dict)
+            else {}
+        )
+
+        def normalized_ids(values: Any) -> list[str]:
+            if not isinstance(values, (list, tuple)):
+                return []
+            return list(dict.fromkeys(
+                str(value).strip()
+                for value in values
+                if str(value).strip()
+            ))
+
+        incoming_ids = normalized_ids(evidence_ids)
+        incoming_long_ids = (
+            normalized_ids(current_long_evidence_ids)
+            if current_long_evidence_ids is not None
+            else None
+        )
+        incoming_evidence = evidence if isinstance(evidence, dict) else {}
+        incoming_sentinel = sentinel if isinstance(sentinel, dict) else {}
+        incoming_serenity = serenity if isinstance(serenity, dict) else {}
+        saved_gate = (
+            existing.get("production_eligibility")
+            if isinstance(existing.get("production_eligibility"), dict)
+            else self.production_eligibility_for(existing)
+        )
+        production_preserved = bool(existing) and saved_gate.get("eligible") is True
+
+        if production_preserved:
+            candidate = copy.deepcopy(existing)
+            candidate["evidence_ids"] = list(dict.fromkeys([
+                *normalized_ids(candidate.get("evidence_ids")),
+                *incoming_ids,
+            ]))
+            if incoming_long_ids is not None:
+                candidate["current_long_evidence_ids"] = incoming_long_ids
+            existing_sentinel = (
+                candidate.get("sentinel")
+                if isinstance(candidate.get("sentinel"), dict)
+                else {}
+            )
+            existing_serenity = (
+                candidate.get("serenity")
+                if isinstance(candidate.get("serenity"), dict)
+                else {}
+            )
+            candidate["sentinel"] = {
+                **existing_sentinel,
+                **incoming_sentinel,
+            }
+            candidate["serenity"] = {
+                **existing_serenity,
+                **incoming_serenity,
+            }
+        else:
+            self._upsert_target_in_payload(
+                payload,
+                code=clean,
+                name=name,
+                status=status,
+                source=source,
+                evidence_ids=incoming_ids,
+                current_long_evidence_ids=incoming_long_ids,
+                evidence=None,
+                sentinel=incoming_sentinel,
+                serenity=incoming_serenity,
+            )
+            candidate = copy.deepcopy(items[clean])
+            if existing:
+                candidate["updated_at"] = existing.get("updated_at", "")
+
+        research_overlays = (
+            copy.deepcopy(candidate.get("research_overlays"))
+            if isinstance(candidate.get("research_overlays"), dict)
+            else {}
+        )
+        existing_overlay = (
+            research_overlays.get(namespace)
+            if isinstance(research_overlays.get(namespace), dict)
+            else {}
+        )
+        overlay_evidence = (
+            existing_overlay.get("evidence")
+            if isinstance(existing_overlay.get("evidence"), dict)
+            else {}
+        )
+        overlay_sentinel = (
+            existing_overlay.get("sentinel")
+            if isinstance(existing_overlay.get("sentinel"), dict)
+            else {}
+        )
+        overlay_serenity = (
+            existing_overlay.get("serenity")
+            if isinstance(existing_overlay.get("serenity"), dict)
+            else {}
+        )
+        overlay = {
+            **existing_overlay,
+            "status": status,
+            "source": source,
+            "research_only": True,
+            "evidence_ids": list(dict.fromkeys([
+                *normalized_ids(existing_overlay.get("evidence_ids")),
+                *incoming_ids,
+            ])),
+            "evidence": {
+                **overlay_evidence,
+                **incoming_evidence,
+            },
+            "sentinel": {
+                **overlay_sentinel,
+                **incoming_sentinel,
+            },
+            "serenity": {
+                **overlay_serenity,
+                **incoming_serenity,
+            },
+        }
+        if incoming_long_ids is not None:
+            overlay["current_long_evidence_ids"] = incoming_long_ids
+        research_overlays[namespace] = overlay
+        candidate["research_overlays"] = research_overlays
+
+        if existing and candidate == existing:
+            return {
+                "accepted": True,
+                "changed": False,
+                "production_preserved": production_preserved,
+            }
+        candidate["updated_at"] = _now()
+        candidate.setdefault("created_at", _now())
+        candidate.setdefault("decision_history", [])
+        items[clean] = candidate
+        return {
+            "accepted": True,
+            "changed": True,
+            "production_preserved": production_preserved,
+        }
+
     def _upsert_target_in_payload(
         self,
         payload: dict[str, Any],
@@ -653,6 +880,7 @@ class TargetPoolStore(CandidatePoolStore):
                 "source": source,
                 "evidence": incoming_evidence,
                 "production_approval": production_approval or {},
+                "scoring_decision": normalized_scoring,
             },
             previous=existing,
         )

@@ -429,17 +429,21 @@ def upsert_sentinel_evidence_to_target_pool(
 
     upserted = 0
     for code, item in by_code.items():
-        ok = target_pool.upsert_target(
+        outcome = target_pool.merge_research_overlay(
             code=code,
             name=item.get("name", code),
-            status="candidate",
+            overlay_name="sentinel_serenity",
+            status="research_reference",
             source="sentinel_serenity",
             evidence_ids=evidence_by_code.get(code, []),
-            evidence={"reason": "Sentinel/Serenity evidence candidate"},
+            evidence={
+                "reason": "Sentinel/Serenity evidence candidate",
+                "boundary": "research_only",
+            },
             sentinel={"theme": item.get("theme", ""), "symbol_count": item.get("symbol_count", 0)},
             serenity=item.get("serenity", {}),
         )
-        if ok:
+        if outcome["accepted"]:
             upserted += 1
 
     return {
