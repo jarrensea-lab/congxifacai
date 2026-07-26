@@ -165,7 +165,18 @@ CONGXI_YITAOJIN_WRITE_ENABLED=false
 
 ### v8.1.0-dev 中长期研究闭环
 
-`v8.1.0-dev` 将 ai-berkshire 式中长期研究方法接入恭喜发财主链路，但保持交易边界。中线和长线不再因为“没有数据”而整段缺席：系统会明确呈现 `unknown`（尚无可验证 thesis）、`stale`（证据过期）或 `healthy`（证据仍有效）；任何状态都只属于研究层，不会单独触发买入。
+`v8.1.0-dev` 将 ai-berkshire 式中长期研究方法接入恭喜发财主链路，但保持交易边界。中线和长线不再因为“没有数据”而整段缺席，当前状态机为：
+
+| 状态 | 真实语义 |
+|------|----------|
+| `unknown` | 没有 thesis、输入为空，或报告只能展示“未建论文/未知”，不能假装已有中长期结论 |
+| `forming` | thesis 正在形成，但关键候选、财务或验证证据尚未补齐 |
+| `healthy` | 核心假设仍成立、红线未触发，且证据未超过新鲜度期限 |
+| `stale` | thesis 或复核记录超过期限，需要刷新证据后再使用 |
+| `weakened` | 至少一个核心假设正在弱化，但尚未达到明确失效 |
+| `broken` | 红线已触发或核心假设已失败，必须阻断买入并进入复核/退出判断 |
+
+以上六种状态都是研究和风险约束语义，不等于交易授权；即使是 `healthy`，仍需通过实时行情、交易剧本、账户预算、生产来源和风控门。
 
 - **长期 thesis 存储**：新增长期论文 store，记录核心假设、红线、估值锚和复核记录。
 - **长期状态入池但不扫短线**：Target Pool 支持 `long_research`、`long_watch`、`accumulation_zone`、`thesis_review`、`exit_candidate` 等状态，默认不进入短线 active scan。
@@ -217,7 +228,7 @@ CONGXI_YITAOJIN_WRITE_ENABLED=false
 | 🛡 守夜人（Watchman） | DeepSeek-chat | 风险扫描、下行空间评估、止损逻辑 |
 | 🔬 研究员（Serenity） | Qwen-Plus | 产业链深度分析、供需缺口、技术壁垒、竞争格局 |
 
-裁判角色优先按配置路由到 Qwen-Plus，聚合四路观点。这里的模型名是路由目标，不代表运行时一定已经可用：Qwen 凭证缺失时会显式降级到 DeepSeek，并记录 `fallback_reason`；没有可用 provider、响应失败或质量校验不通过时，生产候选写入 fail-closed，不能伪装成完整的多模型辩论。
+裁判角色优先按配置路由到 Qwen-Plus，聚合四路观点。这里的模型名是路由目标，不代表运行时一定已经可用：Qwen 凭证缺失时会尝试 DeepSeek，并记录 `fallback_reason`。如果 fallback 成功，角色/裁判内容和 validator 输出都可用，且质量校验通过，即使汇总路由状态显示 runtime `degraded`，也可通过生产门。阻断条件是 provider 不可用、角色/裁判内容带 `degraded` 或 `error`、validator 缺失或输出不可用、或者质量校验失败；不能把“发生过 fallback”和“输出不可用”混为一谈。
 
 ### 多源数据层
 
@@ -253,7 +264,7 @@ CONGXI_YITAOJIN_WRITE_ENABLED=false
 
 `growth_sprint` 只改变报告和人工复核的风险边界，不承诺收益，也不触发自动交易。v8 的实际买入股数会再经过 `position_sizing.py` 的风险预算倒推。需要恢复保守档时设置 `CONGXI_STRATEGY_MODE=capital_preservation`。AI 原文若出现旧仓位或现金规则，以报告中的“机器可执行校验”为准。
 
-AI 推荐进入生产候选池采用 fail-closed：裁判质量校验必须明确通过，且任一角色/裁判输出不得带有 `degraded` 或 `error` 标记。校验服务异常、空响应或降级结果仍可进入本地快照和报告审计，但不会写入生产候选池。
+AI 推荐进入生产候选池采用 fail-closed：裁判质量校验必须明确通过，任一角色/裁判输出不得带有 `degraded` 或 `error` 标记，且必须存在 `output_usable=true` 的 validator 调用。仅汇总 runtime `degraded` 不构成阻断；成功的 Qwen→DeepSeek fallback 可以通过。provider 不可用、角色/裁判输出降级、validator 缺失/不可用或质量失败时，结果只进入本地快照和报告审计，不写入生产候选池。
 
 ### 飞书全通道
 
@@ -285,8 +296,10 @@ Sentinel 与 Serenity 的边界：
 
 ### 次日投资策略主报告
 
-动作优先模板已经迁移到 `backend/app/report_engine/templates/next_day.py`；
-`scripts/daily_report.py` 负责取数、编排和落盘，不再同时维护一份独立大模板。
+默认动作优先渲染已经委托给 `backend/app/report_engine/templates/next_day.py`；
+`scripts/daily_report.py` 仍负责视图准备和流程编排，并保留
+`CONGXI_REPORT_LEGACY_SECTIONS=1` 控制的 legacy 大模板/兼容渲染路径。
+默认路径迁移已经完成，legacy 模板拆分仍是待办，不能把当前状态描述成已经完全去重。
 主报告定位为盘后或周日晚生成，服务下一交易日盘前决策。报告结构包括：
 
 - 明日唯一实盘狙击标的：干不干、干谁、买入逻辑、触发价、一手金额、止损和第一目标。
