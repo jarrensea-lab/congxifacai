@@ -284,26 +284,42 @@ def build_model_runtime_status(calls: list[dict]) -> dict:
     for call in calls:
         if not isinstance(call, dict):
             continue
+        fallback_reason = str(call.get("fallback_reason") or "")
+        degradation_reason = str(call.get("degradation_reason") or "")
+        content = str(call.get("content") or "")
+        explicit_usable = call.get("output_usable")
+        output_usable = (
+            explicit_usable is True
+            if isinstance(explicit_usable, bool)
+            else bool(content) and not degradation_reason
+        )
+        raw_provider = str(call.get("provider") or "")
+        provider = raw_provider if output_usable else ""
+        attempted_provider = str(
+            call.get("attempted_provider") or raw_provider
+        )
         sanitized = {
             key: str(call.get(key) or "")
             for key in (
                 "role",
-                "provider",
                 "requested_provider",
                 "model",
                 "status",
-                "fallback_reason",
-                "degradation_reason",
             )
         }
+        sanitized.update({
+            "provider": provider,
+            "attempted_provider": attempted_provider,
+            "fallback_reason": fallback_reason,
+            "degradation_reason": degradation_reason,
+            "output_usable": output_usable,
+        })
         sanitized_calls.append(sanitized)
-        provider = sanitized["provider"]
         if provider and provider not in providers:
             providers.append(provider)
-        fallback_reason = sanitized["fallback_reason"]
         if fallback_reason and fallback_reason not in degradation_reasons:
             degradation_reasons.append(fallback_reason)
-        reason = sanitized["degradation_reason"]
+        reason = degradation_reason
         if not reason and sanitized["status"] != "success" and not fallback_reason:
             reason = "cloud_call_failed"
         if reason:
@@ -406,6 +422,7 @@ class AIDebateEngine:
                     )
                     route_metadata = {
                         "provider": provider,
+                        "attempted_provider": provider,
                         "requested_provider": str(
                             result.get("requested_provider")
                             or requested_provider
@@ -415,6 +432,8 @@ class AIDebateEngine:
                             "degraded" if fallback_reason else "success"
                         ),
                         "fallback_reason": fallback_reason,
+                        "degradation_reason": "",
+                        "output_usable": bool(content),
                     }
                     if content:
                         logger.info(
@@ -439,12 +458,16 @@ class AIDebateEngine:
                             ),
                             "thinking": "",
                             **route_metadata,
+                            "provider": "",
                             "status": "degraded",
                             "degradation_reason": "empty_model_output",
+                            "output_usable": False,
                         }
                 except Exception as ce:
-                    provider = str(
-                        getattr(ce, "provider", "") or requested_provider
+                    attempted_provider = str(
+                        getattr(ce, "attempted_provider", "")
+                        or getattr(ce, "provider", "")
+                        or requested_provider
                     )
                     routed_requested_provider = str(
                         getattr(ce, "requested_provider", "")
@@ -458,7 +481,7 @@ class AIDebateEngine:
                         or "cloud_call_failed"
                     )
                     logger.warning(
-                        f"{provider} 调用不可用({name})"
+                        f"{attempted_provider} 调用不可用({name})"
                     )
                     return {
                         "content": _json.dumps(
@@ -470,7 +493,8 @@ class AIDebateEngine:
                             ensure_ascii=False,
                         ),
                         "thinking": "",
-                        "provider": provider,
+                        "provider": "",
+                        "attempted_provider": attempted_provider,
                         "requested_provider": routed_requested_provider,
                         "model": str(
                             getattr(ce, "model", "") or model
@@ -478,6 +502,7 @@ class AIDebateEngine:
                         "status": "degraded",
                         "fallback_reason": fallback_reason,
                         "degradation_reason": degradation_reason,
+                        "output_usable": False,
                     }
 
             # === llama.cpp 本地模型 ===
@@ -490,6 +515,7 @@ class AIDebateEngine:
             return {
                 **result,
                 "provider": "llama.cpp",
+                "attempted_provider": "llama.cpp",
                 "requested_provider": "llama.cpp",
                 "model": model,
                 "status": "success" if content else "degraded",
@@ -497,18 +523,21 @@ class AIDebateEngine:
                 "degradation_reason": (
                     "" if content else "empty_model_output"
                 ),
+                "output_usable": bool(content),
             }
-        except Exception as e:
-            logger.error(f"{name} 调用异常: {e}")
+        except Exception:
+            logger.error(f"{name} 调用异常")
             return {
                 "content": "",
                 "thinking": "",
-                "provider": requested_provider,
+                "provider": "",
+                "attempted_provider": requested_provider,
                 "requested_provider": requested_provider,
                 "model": model,
                 "status": "degraded",
                 "fallback_reason": "",
                 "degradation_reason": "cloud_call_failed",
+                "output_usable": False,
             }
 
     async def _call_llamacpp(self, name: str, prompt: str, timeout: float = 120.0) -> Dict[str, Any]:
@@ -576,11 +605,13 @@ class AIDebateEngine:
             runtime_calls.append({
                 "role": "裁判",
                 "provider": "",
+                "attempted_provider": "",
                 "requested_provider": "Qwen",
                 "model": self._aggregator_model(),
                 "status": "degraded",
                 "fallback_reason": "",
                 "degradation_reason": "judge_not_called",
+                "output_usable": False,
             })
             return {
                 "debate": {},
@@ -622,18 +653,35 @@ class AIDebateEngine:
             else:
                 logger.warning("裁判聚合返回空内容")
                 final_decision = ""
-        except Exception as e:
-            logger.error(f"裁判聚合异常: {e}")
+        except Exception:
+            logger.error("裁判聚合异常")
             final_decision = ""
             agg_res = {
-                "provider": "Qwen",
+                "provider": "",
+                "attempted_provider": "Qwen",
                 "requested_provider": "Qwen",
                 "model": self._aggregator_model(),
                 "status": "degraded",
                 "fallback_reason": "",
                 "degradation_reason": "cloud_call_failed",
+                "output_usable": False,
             }
         runtime_calls.append({"role": "裁判", **agg_res})
+        if final_decision:
+            quality, validator_route = (
+                await self.validate_output_with_route(final_decision)
+            )
+            runtime_calls.append({
+                "role": "输出校验",
+                **validator_route,
+            })
+        else:
+            quality = {
+                "pass": False,
+                "score": 0,
+                "issues": ["裁判未产出"],
+                "summary": "无输出可校验",
+            }
 
         return {
             "debate": {
@@ -644,7 +692,7 @@ class AIDebateEngine:
             },
             "final": self._parse_json(final_decision) if final_decision else {"final_decision": "聚合失败", "confidence": 0, "reasoning": "AI 裁判未返回有效结果"},
             "judge_thinking": judge_thinking,
-            "quality": (await self.validate_output(final_decision) if final_decision else {"pass": False, "score": 0, "issues": ["裁判未产出"], "summary": "无输出可校验"}) or {},
+            "quality": quality or {},
             "model_runtime_status": build_model_runtime_status(runtime_calls),
         }
 
@@ -720,8 +768,11 @@ class AIDebateEngine:
             "judge_thinking": "",
         }
 
-    async def validate_output(self, content: str) -> Dict[str, Any]:
-        """用云端模型校验 AI 输出是否包含具体投资建议"""
+    async def validate_output_with_route(
+        self,
+        content: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Return validator quality plus sanitized per-call route truth."""
         validator_prompt = f"""你是AI输出质量校验员。请检查以下AI投资建议是否包含具体的投资建议。
 检查标准：
 1. 是否推荐了具体的行业板块？
@@ -738,12 +789,92 @@ class AIDebateEngine:
             from app.ai.cloud_client import cloud
             result = await cloud.chat("reporter", [{"role": "user", "content": validator_prompt}], max_tokens=512)
             text = result.get("content", "")
+            attempted_provider = str(
+                result.get("provider") or "DeepSeek"
+            )
+            requested_provider = str(
+                result.get("requested_provider") or "DeepSeek"
+            )
+            fallback_reason = str(
+                result.get("fallback_reason") or ""
+            )
             if text:
-                return self._parse_json(text)
-            return {"pass": False, "score": 0, "issues": ["校验调用失败"], "summary": "未能校验，禁止进入生产池"}
-        except Exception as e:
-            logger.error(f"输出校验异常: {e}")
-            return {"pass": False, "score": 0, "issues": [str(e)], "summary": "校验异常，禁止进入生产池"}
+                quality = self._parse_json(text)
+                usable = isinstance(quality.get("pass"), bool)
+                degradation_reason = (
+                    "" if usable else "validator_call_failed"
+                )
+                return quality, {
+                    "provider": (
+                        attempted_provider if usable else ""
+                    ),
+                    "attempted_provider": attempted_provider,
+                    "requested_provider": requested_provider,
+                    "model": str(
+                        result.get("model") or self._validator_model()
+                    ),
+                    "status": (
+                        "degraded"
+                        if fallback_reason or not usable
+                        else "success"
+                    ),
+                    "fallback_reason": fallback_reason,
+                    "degradation_reason": degradation_reason,
+                    "output_usable": usable,
+                }
+            return {
+                "pass": False,
+                "score": 0,
+                "issues": ["validator_call_failed"],
+                "summary": "未能校验，禁止进入生产池",
+            }, {
+                "provider": "",
+                "attempted_provider": attempted_provider,
+                "requested_provider": requested_provider,
+                "model": str(
+                    result.get("model") or self._validator_model()
+                ),
+                "status": "degraded",
+                "fallback_reason": fallback_reason,
+                "degradation_reason": "validator_call_failed",
+                "output_usable": False,
+            }
+        except Exception as error:
+            attempted_provider = str(
+                getattr(error, "attempted_provider", "")
+                or getattr(error, "provider", "")
+                or "DeepSeek"
+            )
+            requested_provider = str(
+                getattr(error, "requested_provider", "")
+                or "DeepSeek"
+            )
+            logger.error("输出校验异常: validator_call_failed")
+            return {
+                "pass": False,
+                "score": 0,
+                "issues": ["validator_call_failed"],
+                "summary": "校验异常，禁止进入生产池",
+            }, {
+                "provider": "",
+                "attempted_provider": attempted_provider,
+                "requested_provider": requested_provider,
+                "model": str(
+                    getattr(error, "model", "")
+                    or self._validator_model()
+                ),
+                "status": "degraded",
+                "fallback_reason": str(
+                    getattr(error, "fallback_reason", "") or ""
+                ),
+                "degradation_reason": "validator_call_failed",
+                "output_usable": False,
+            }
+
+    async def validate_output(self, content: str) -> Dict[str, Any]:
+        """Compatibility quality-only validator API."""
+        quality, _route = await self.validate_output_with_route(content)
+        return quality
 
     def _parse_json(self, text: str) -> Dict:
         text = text.strip()

@@ -11,14 +11,15 @@ class CloudRouteError(RuntimeError):
     def __init__(
         self,
         *,
-        provider: str,
+        attempted_provider: str,
         requested_provider: str,
         model: str,
         fallback_reason: str,
         degradation_reason: str,
     ):
         super().__init__("cloud model route failed")
-        self.provider = provider
+        self.provider = ""
+        self.attempted_provider = attempted_provider
         self.requested_provider = requested_provider
         self.model = model
         self.fallback_reason = fallback_reason
@@ -66,7 +67,7 @@ class CloudClient:
                 )
             except Exception:
                 raise CloudRouteError(
-                    provider="DeepSeek",
+                    attempted_provider="DeepSeek",
                     requested_provider="Qwen",
                     model=model_name,
                     fallback_reason="qwen_api_key_missing",

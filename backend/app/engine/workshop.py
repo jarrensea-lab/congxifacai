@@ -39,6 +39,24 @@ def build_production_gate(engine_result: dict) -> dict:
         reasons.append("degraded_role_output")
     if _contains_degraded_output((engine_result or {}).get("final", {})):
         reasons.append("degraded_judge_output")
+    runtime = (
+        engine_result.get("model_runtime_status")
+        if isinstance(engine_result, dict)
+        else {}
+    )
+    runtime_calls = (
+        runtime.get("calls")
+        if isinstance(runtime, dict)
+        else []
+    )
+    validator_failed = any(
+        isinstance(call, dict)
+        and call.get("role") == "输出校验"
+        and call.get("output_usable") is not True
+        for call in runtime_calls or []
+    )
+    if validator_failed:
+        reasons.append("validator_route_degraded")
     return {
         "allowed": not reasons,
         "reasons": reasons,
@@ -65,16 +83,20 @@ def normalize_model_runtime_status(value) -> dict:
     ))
     calls = [
         {
-            key: str(call.get(key) or "")
-            for key in (
-                "role",
-                "provider",
-                "requested_provider",
-                "model",
-                "status",
-                "fallback_reason",
-                "degradation_reason",
-            )
+            **{
+                key: str(call.get(key) or "")
+                for key in (
+                    "role",
+                    "provider",
+                    "attempted_provider",
+                    "requested_provider",
+                    "model",
+                    "status",
+                    "fallback_reason",
+                    "degradation_reason",
+                )
+            },
+            "output_usable": call.get("output_usable") is True,
         }
         for call in value.get("calls") or []
         if isinstance(call, dict)

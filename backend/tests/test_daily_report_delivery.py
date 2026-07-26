@@ -310,6 +310,12 @@ def test_build_next_day_strategy_sections_is_concise_enough_for_feishu():
             ],
             "outside_pool_scan": [
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=82,
+                        action="actionable",
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "current_price": 3.55,
@@ -455,6 +461,11 @@ def test_build_next_day_strategy_sections_promotes_breached_stop_to_first_screen
                 "items": {"000725": {"stop_loss_price": 7.61, "target_price": 8.65}}
             },
             "target_scores": [{
+                **_full_tactical_candidate(
+                    "000629",
+                    "钒钛股份",
+                    score=80,
+                ),
                 "code": "000629",
                 "name": "钒钛股份",
                 "action": "buy",
@@ -818,6 +829,11 @@ def test_build_next_day_strategy_sections_excludes_current_holdings_from_new_ent
             },
             "target_scores": [
                 {
+                    **_full_tactical_candidate(
+                        "000725",
+                        "京东方A",
+                        score=80,
+                    ),
                     "code": "000725",
                     "name": "京东方A",
                     "action": "buy",
@@ -828,6 +844,11 @@ def test_build_next_day_strategy_sections_excludes_current_holdings_from_new_ent
                     "decision_reason": "候选池残留记录。",
                 },
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=81,
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "action": "buy",
@@ -891,6 +912,12 @@ def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
             ],
             "outside_pool_scan": [
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=82,
+                        action="actionable",
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "source": "small_account_discovery",
@@ -900,8 +927,9 @@ def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
                     "trigger_price": 3.55,
                     "stop_loss": 3.37,
                     "target_price": 3.98,
-                    "suggested_amount": 355.0,
-                    "watch_reason": "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。",
+                        "suggested_amount": 355.0,
+                        "next_signal": "已具备量能线索，等待资金流转正。",
+                        "watch_reason": "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。",
                 }
             ],
             "role_votes": {
@@ -1025,6 +1053,11 @@ def test_build_next_day_strategy_sections_hides_budget_blocked_research_referenc
         decision={
             "target_scores": [
                 {
+                    **_full_tactical_candidate(
+                        "002123",
+                        "低价突破",
+                        score=78,
+                    ),
                     "code": "002123",
                     "name": "低价突破",
                     "action": "buy",
@@ -1158,6 +1191,12 @@ def test_build_next_day_strategy_sections_renders_outside_pool_scan_when_no_buy(
             ],
             "outside_pool_scan": [
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=82,
+                        action="actionable",
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "source": "small_account_discovery",
@@ -3033,7 +3072,7 @@ def test_data_source_audit_marks_sqlite_degraded_from_structured_sync_truth():
         )
     )
 
-    assert "| SQLite | degraded |" in audit
+    assert "| SQLite | 降级 |" in audit
     assert "SECRET" not in audit
 
 
@@ -3093,12 +3132,12 @@ def test_data_source_audit_requires_structured_market_success_with_indices():
         )
     )
 
-    assert "| 行情数据 | degraded |" in failed_audit
-    assert "all_realtime_index_sources_failed" in failed_audit
-    assert "| 行情数据 | ok |" in ok_audit
+    assert "| 行情数据 | 降级 |" in failed_audit
+    assert "所有实时指数行情源均失败" in failed_audit
+    assert "| 行情数据 | 成功 |" in ok_audit
     assert "tencent" in ok_audit
     assert fresh_cutoff in ok_audit
-    assert "| 行情数据 | degraded |" in empty_audit
+    assert "| 行情数据 | 降级 |" in empty_audit
 
 
 @pytest.mark.parametrize(
@@ -3141,7 +3180,7 @@ def test_data_source_audit_rejects_incomplete_market_coverage(status_patch):
         )
     )
 
-    assert "| 行情数据 | degraded |" in audit
+    assert "| 行情数据 | 降级 |" in audit
 
 
 def test_data_source_audit_rejects_naive_market_cutoff():
@@ -3170,7 +3209,7 @@ def test_data_source_audit_rejects_naive_market_cutoff():
         )
     )
 
-    assert "| 行情数据 | degraded |" in audit
+    assert "| 行情数据 | 降级 |" in audit
 
 
 @pytest.mark.parametrize(
@@ -3216,7 +3255,7 @@ def test_data_source_audit_rejects_missing_stale_or_unproven_market_truth(
         )
     )
 
-    assert "| 行情数据 | degraded |" in audit
+    assert "| 行情数据 | 降级 |" in audit
 
 
 @pytest.mark.parametrize("freshness_status", ["stale", "conflict", "unknown", "failed"])
@@ -3239,7 +3278,7 @@ def test_data_source_audit_rejects_nonfresh_market_status(freshness_status):
         )
     )
 
-    assert "| 行情数据 | degraded |" in audit
+    assert "| 行情数据 | 降级 |" in audit
 
 
 @pytest.mark.asyncio
@@ -3440,10 +3479,10 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
         "stop_loss",
         "entry_cancelled",
     ]
-    assert "| SQLite | degraded |" in captured["rendered_sections"]
-    assert "| SQLite | degraded |" in report_content
-    assert "| 行情数据 | degraded |" in captured["rendered_sections"]
-    assert "coverage=2/3" in captured["rendered_sections"]
+    assert "| SQLite | 降级 |" in captured["rendered_sections"]
+    assert "| SQLite | 降级 |" in report_content
+    assert "| 行情数据 | 降级 |" in captured["rendered_sections"]
+    assert "覆盖=2/3" in captured["rendered_sections"]
     assert "sz399001" in captured["rendered_sections"]
     for artifact in (output, report_content, json.dumps(persisted_gate), json.dumps(persisted_portfolio)):
         assert "SECRET-MAIN-PROBE" not in artifact
@@ -3537,9 +3576,14 @@ def test_next_day_report_is_action_first_with_exact_quantities_and_candidate_cap
         },
         "target_scores": [
             {
+                **_full_tactical_candidate(
+                    f"00000{idx}",
+                    f"候选{idx}",
+                    score=90 - idx,
+                ),
                 "code": f"00000{idx}",
                 "name": f"候选{idx}",
-                "action": "buy" if idx == 1 else "watch",
+                "action": "buy",
                 "score": 90 - idx,
                 "entry_price": float(idx + 2),
                 "stop_loss": round((idx + 2) * 0.9, 2),
@@ -3966,7 +4010,7 @@ def test_report_model_status_uses_actual_runtime_truth(
         assert "调用成功" not in header
 
 
-def test_report_shows_deepseek_as_actual_failed_qwen_fallback_route():
+def test_report_shows_deepseek_only_as_failed_qwen_fallback_attempt():
     from scripts.daily_report import (
         build_data_source_audit,
         format_model_runtime_header,
@@ -3974,15 +4018,18 @@ def test_report_shows_deepseek_as_actual_failed_qwen_fallback_route():
 
     runtime_status = {
         "status": "degraded",
-        "providers": ["DeepSeek"],
+        "providers": [],
         "calls": [
             {
                 "role": "裁判",
-                "provider": "DeepSeek",
+                "provider": "",
+                "attempted_provider": "DeepSeek",
                 "requested_provider": "Qwen",
                 "model": "deepseek-chat",
                 "status": "degraded",
                 "fallback_reason": "qwen_api_key_missing",
+                "degradation_reason": "cloud_call_failed",
+                "output_usable": False,
             }
         ],
         "degradation_reasons": [
@@ -4000,12 +4047,393 @@ def test_report_shows_deepseek_as_actual_failed_qwen_fallback_route():
         )
     )
 
-    assert header == "> 🤖 本次AI路由：DeepSeek（降级）"
+    assert header == "> 🤖 本次AI路由：无成功提供方（降级）"
+    assert "DeepSeek" not in header
     assert "Qwen" not in header
     assert (
-        "实际提供方：DeepSeek；"
+        "实际提供方：无成功提供方；失败尝试：DeepSeek（原请求 Qwen）；"
         "Qwen 密钥缺失，实际回退到 DeepSeek；云端模型调用失败"
     ) in audit
+
+
+def _full_tactical_candidate(
+    code,
+    name,
+    *,
+    score=80,
+    action="buy",
+    playbook="breakout_entry",
+    **updates,
+):
+    row = {
+        "code": code,
+        "name": name,
+        "score": score,
+        "action": action,
+        "entry_price": 3.2,
+        "stop_loss": 3.0,
+        "target_price": 3.8,
+        "lot_value": 320,
+        "position_shares": 100,
+        "position_amount": 320,
+        "missing_data": [],
+        "source_status": {
+            "quote": "ok",
+            "kline": "ok",
+            "fund_flow": "ok",
+            "financial": "ok",
+        },
+        "authorization_valid": True,
+        "production_eligibility": {"eligible": True},
+        "playbook": playbook,
+        "next_signal": "量价资金触发后人工核价。",
+    }
+    row.update(updates)
+    return row
+
+
+def test_zero_buy_budget_blocks_every_positive_lot_from_main_candidates():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=3,
+            final_view="现金不足不买",
+            confidence=8,
+            positions=[],
+            available_cash=0,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    _full_tactical_candidate(
+                        "002123",
+                        "零预算样本",
+                    )
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    first_screen = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+    assert "零预算样本(002123)" not in first_screen
+    assert "新开仓结论：不下单" in first_screen
+    assert "可执行预算为 ¥0.00" in first_screen
+    assert "零预算样本(002123)" in appendix
+    assert "一手金额 ¥320.00 超过可执行预算 ¥0.00" in appendix
+
+
+@pytest.mark.parametrize(
+    ("code", "shares", "expected"),
+    [
+        ("000001", 50, 50),
+        ("000001", 100, 100),
+        ("000001", 150, 150),
+        ("000001", 200, 100),
+        ("000001", 300, 100),
+        ("000001", 400, 100),
+        ("688001", 50, 50),
+        ("688001", 100, 100),
+        ("688001", 150, 150),
+        ("688001", 200, 200),
+        ("688001", 300, 300),
+        ("688001", 400, 200),
+    ],
+)
+def test_over_position_reduction_obeys_board_lot_and_odd_lot_exit_rules(
+    code,
+    shares,
+    expected,
+):
+    from scripts.daily_report import (
+        _over_position_sell_quantity,
+        get_strategy_profile,
+    )
+
+    target_shares = max(0, shares - 50)
+    total_assets = max(1, target_shares * 10 / 0.5)
+    result = _over_position_sell_quantity(
+        code=code,
+        shares=shares,
+        price=10,
+        total_assets=total_assets,
+        profile=get_strategy_profile("growth_sprint"),
+    )
+
+    assert result == expected
+
+
+def test_stale_quote_sell_zero_precedes_star_lot_reduction():
+    from scripts.daily_report import (
+        build_next_day_strategy_sections,
+        get_strategy_profile,
+    )
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="先核价",
+            confidence=8,
+            positions=[
+                {
+                    "code": "688001",
+                    "name": "科创陈旧行情",
+                    "shares": 400,
+                    "avg_cost": 10,
+                    "current_price": 10,
+                    "quote_status": "stale",
+                    "quote_freshness": "stale",
+                }
+            ],
+            available_cash=0,
+            total_assets=4000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={},
+            roles={},
+            sentinel_package=None,
+            strategy_profile=get_strategy_profile("growth_sprint"),
+        )
+    )
+
+    holding = sections.split("### 持仓处理", 1)[1].split(
+        "### 新开仓机会",
+        1,
+    )[0]
+    assert "精确卖出0股" in holding
+    assert "精确卖出200股" not in holding
+
+
+def test_candidates_require_full_score_and_rank_globally_across_sources():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    rows = [
+        _full_tactical_candidate(
+            "000010",
+            "低分伪买入",
+            score=10,
+            authorization_valid=False,
+        ),
+        {
+            "code": "000011",
+            "name": "未评分池外行",
+            "action": "actionable",
+            "entry_price": 2.8,
+            "stop_loss": 2.6,
+            "target_price": 3.2,
+            "lot_value": 280,
+            "suggested_amount": 280,
+        },
+        _full_tactical_candidate(
+            "000099",
+            "九十九分主选",
+            score=99,
+        ),
+        _full_tactical_candidate(
+            "000080",
+            "八十分突破",
+            score=80,
+            playbook="breakout_entry",
+        ),
+        _full_tactical_candidate(
+            "000081",
+            "八十分回踩",
+            score=80,
+            playbook="dip_entry",
+        ),
+    ]
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="按完整评分排序",
+            confidence=9,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [rows[0], rows[2], rows[4]],
+                "outside_pool_scan": [rows[1], rows[3]],
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    assert candidates.index("九十九分主选(000099)") < candidates.index(
+        "八十分突破(000080)"
+    )
+    assert candidates.index("八十分突破(000080)") < candidates.index(
+        "八十分回踩(000081)"
+    )
+    assert "低分伪买入" not in candidates
+    assert "未评分池外行" not in candidates
+    assert candidates.count("| 备选") == 2
+
+
+def test_healthy_long_thesis_can_also_be_tactical_when_full_score_authorized():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    row = _full_tactical_candidate(
+        "002123",
+        "长短双资格",
+        score=91,
+        thesis_status="healthy",
+        long_quality_score=88,
+        red_line_status="clear",
+        valuation_zone="fair_zone",
+        combined_decision_reason="长期论文成立，短线放量触发。",
+    )
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="双轨独立判断",
+            confidence=9,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={"target_scores": [row]},
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = sections.split("## 二、中长期论文状态", 1)[1].split(
+        "<!-- FEISHU_SUMMARY_END -->",
+        1,
+    )[0]
+    assert "长短双资格(002123)" in candidates
+    assert "长短双资格(002123)" in long_section
+
+
+def test_long_quality_without_full_tactical_authorization_never_grants_entry():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    row = _full_tactical_candidate(
+        "002124",
+        "只有长期质量",
+        score=99,
+        action="watch",
+        authorization_valid=False,
+        source_status={
+            "quote": "ok",
+            "kline": "missing",
+            "fund_flow": "ok",
+            "financial": "ok",
+        },
+        missing_data=["kline"],
+        thesis_status="healthy",
+        long_quality_score=99,
+        red_line_status="clear",
+    )
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="长期不替代战术",
+            confidence=8,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={"target_scores": [row]},
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = sections.split("## 二、中长期论文状态", 1)[1]
+    assert "只有长期质量(002124)" not in candidates
+    assert "只有长期质量(002124)" in long_section
+
+
+def test_append_new_sections_is_lazy_and_mutually_exclusive_in_legacy_mode():
+    from scripts.daily_report import _append_new_report_sections
+
+    lines = ["header"]
+    called = []
+
+    rendered = _append_new_report_sections(
+        lines,
+        legacy_mode=True,
+        builder=lambda: called.append(True) or ["new"],
+    )
+
+    assert rendered is False
+    assert called == []
+    assert lines == ["header"]
+
+
+def test_data_source_audit_hides_internal_enums_from_visible_markdown():
+    from scripts.daily_report import build_data_source_audit
+
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {},
+                "market_source_status": {
+                    "status": "degraded",
+                    "freshness_status": "conflict",
+                    "error": "index_quotes_not_fetched",
+                    "coverage": {"expected": 3, "verified": 0},
+                    "missing_sources": ["sh000001"],
+                    "rejected_sources": [],
+                },
+                "portfolio_sync_status": "unavailable",
+            },
+            sentinel_package={
+                "source_status": {"status": "partial"},
+                "event_count": 0,
+            },
+            model_runtime_status=None,
+        )
+    )
+
+    for raw_enum in (
+        "market_status_not_ok",
+        "coverage_incomplete",
+        "freshness_unproven:",
+        "index_quotes_not_fetched",
+        "| partial |",
+        "conflict",
+        "| degraded |",
+        "| missing |",
+    ):
+        assert raw_enum not in audit
+    assert "指数覆盖不完整" in audit
+    assert "指数行情未获取" in audit
+    assert "数据新鲜度未证实（数据冲突）" in audit
+    assert "| Tushare 高频新闻 | 部分可用 |" in audit
+    assert "| 行情数据 | 降级 |" in audit
 
 
 def test_daily_report_archive_keeps_all_report_types_in_trade_day_folder(tmp_path):

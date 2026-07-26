@@ -468,7 +468,8 @@ async def test_qwen_missing_key_preserves_deepseek_route_when_fallback_fails(
         )
 
     error = exc_info.value
-    assert error.provider == "DeepSeek"
+    assert error.provider == ""
+    assert error.attempted_provider == "DeepSeek"
     assert error.requested_provider == "Qwen"
     assert error.fallback_reason == "qwen_api_key_missing"
     assert error.degradation_reason == "cloud_call_failed"
@@ -484,7 +485,7 @@ async def test_ai_role_keeps_failed_qwen_fallback_route_in_runtime_truth(
 
     async def failed_chat(*args, **kwargs):
         raise CloudRouteError(
-            provider="DeepSeek",
+            attempted_provider="DeepSeek",
             requested_provider="Qwen",
             model="deepseek-chat",
             fallback_reason="qwen_api_key_missing",
@@ -502,12 +503,13 @@ async def test_ai_role_keeps_failed_qwen_fallback_route_in_runtime_truth(
         {"role": "裁判", **call},
     ])
 
-    assert call["provider"] == "DeepSeek"
+    assert call["provider"] == ""
+    assert call["attempted_provider"] == "DeepSeek"
     assert call["requested_provider"] == "Qwen"
     assert call["fallback_reason"] == "qwen_api_key_missing"
     assert call["degradation_reason"] == "cloud_call_failed"
     assert runtime["status"] == "degraded"
-    assert runtime["providers"] == ["DeepSeek"]
+    assert runtime["providers"] == []
     assert runtime["degradation_reasons"] == [
         "qwen_api_key_missing",
         "cloud_call_failed",
@@ -576,20 +578,189 @@ async def test_ai_debate_engine_collects_actual_provider_routes(
             ),
         }
 
-    async def fake_validate(content):
-        return {"pass": True, "score": 90, "issues": []}
+    async def fake_validate_with_route(content):
+        return (
+            {"pass": True, "score": 90, "issues": []},
+            {
+                "provider": "DeepSeek",
+                "attempted_provider": "DeepSeek",
+                "requested_provider": "DeepSeek",
+                "model": "validator-model",
+                "status": "success",
+                "fallback_reason": "",
+                "degradation_reason": "",
+                "output_usable": True,
+            },
+        )
 
     monkeypatch.setattr(engine, "_call_role", fake_call_role)
-    monkeypatch.setattr(engine, "validate_output", fake_validate)
+    monkeypatch.setattr(
+        engine,
+        "validate_output_with_route",
+        fake_validate_with_route,
+    )
 
     result = await engine.debate("{}", "空仓", "[]")
     runtime = result["model_runtime_status"]
 
     assert runtime["status"] == expected_status
     assert runtime["providers"] == expected_providers
-    assert len(runtime["calls"]) == 5
+    assert [call["role"] for call in runtime["calls"]] == [
+        "猎手",
+        "账房",
+        "守夜人",
+        "Serenity·研究员",
+        "裁判",
+        "输出校验",
+    ]
     if qwen_fallback:
         assert "qwen_api_key_missing" in runtime["degradation_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_validator_failure_degrades_runtime_and_production_gate(monkeypatch):
+    from app.ai.debate import AIDebateEngine
+    from app.engine.workshop import build_production_gate
+
+    engine = AIDebateEngine()
+
+    async def successful_role(
+        name,
+        prompt,
+        model,
+        num_predict=0,
+        retries=1,
+        timeout=120.0,
+    ):
+        payload = (
+            {
+                "final_decision": "观望",
+                "confidence": 6,
+                "short_term": {},
+                "mid_low_freq": {},
+            }
+            if name == "裁判"
+            else {"analysis": f"{name}观点"}
+        )
+        provider = "Qwen" if model in {"qwen-researcher", "cloud-judge"} else "DeepSeek"
+        return {
+            "content": json.dumps(payload, ensure_ascii=False),
+            "thinking": "",
+            "provider": provider,
+            "attempted_provider": provider,
+            "requested_provider": provider,
+            "model": "test-model",
+            "status": "success",
+            "fallback_reason": "",
+            "degradation_reason": "",
+            "output_usable": True,
+        }
+
+    async def failed_validator(content):
+        return (
+            {
+                "pass": False,
+                "score": 0,
+                "issues": ["validator_call_failed"],
+                "summary": "校验失败，禁止进入生产池",
+            },
+            {
+                "provider": "",
+                "attempted_provider": "DeepSeek",
+                "requested_provider": "DeepSeek",
+                "model": "validator-model",
+                "status": "degraded",
+                "fallback_reason": "",
+                "degradation_reason": "validator_call_failed",
+                "output_usable": False,
+            },
+        )
+
+    monkeypatch.setattr(engine, "_call_role", successful_role)
+    monkeypatch.setattr(
+        engine,
+        "validate_output_with_route",
+        failed_validator,
+    )
+
+    result = await engine.debate("{}", "空仓", "[]")
+    runtime = result["model_runtime_status"]
+    validator_calls = [
+        call for call in runtime["calls"] if call["role"] == "输出校验"
+    ]
+    gate = build_production_gate(result)
+
+    assert len(validator_calls) == 1
+    assert validator_calls[0]["attempted_provider"] == "DeepSeek"
+    assert validator_calls[0]["provider"] == ""
+    assert "validator_call_failed" in runtime["degradation_reasons"]
+    assert runtime["status"] == "degraded"
+    assert gate["allowed"] is False
+    assert "validator_route_degraded" in gate["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_validator_route_supports_successful_fallback_metadata(monkeypatch):
+    from app.ai.cloud_client import cloud
+    from app.ai.debate import AIDebateEngine, build_model_runtime_status
+
+    async def fallback_validator(*args, **kwargs):
+        return {
+            "content": json.dumps(
+                {"pass": True, "score": 9, "issues": []},
+                ensure_ascii=False,
+            ),
+            "provider": "DeepSeek",
+            "requested_provider": "Qwen",
+            "model": "deepseek-chat",
+            "fallback_reason": "qwen_api_key_missing",
+        }
+
+    monkeypatch.setattr(cloud, "chat", fallback_validator)
+
+    quality, route = await AIDebateEngine().validate_output_with_route("{}")
+    runtime = build_model_runtime_status([
+        {"role": "输出校验", **route},
+    ])
+
+    assert quality["pass"] is True
+    assert route["provider"] == "DeepSeek"
+    assert route["attempted_provider"] == "DeepSeek"
+    assert route["output_usable"] is True
+    assert runtime["providers"] == ["DeepSeek"]
+    assert runtime["status"] == "degraded"
+    assert runtime["degradation_reasons"] == ["qwen_api_key_missing"]
+
+
+@pytest.mark.asyncio
+async def test_validator_exception_is_sanitized_from_result_and_logs(
+    monkeypatch,
+    caplog,
+):
+    from app.ai.cloud_client import cloud
+    from app.ai.debate import AIDebateEngine
+
+    secret = "authorization=SECRET&provider_response=PRIVATE"
+
+    async def failed_validator(*args, **kwargs):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(cloud, "chat", failed_validator)
+
+    with caplog.at_level("ERROR"):
+        quality, route = await AIDebateEngine().validate_output_with_route(
+            '{"final_decision":"观望"}'
+        )
+
+    artifact = json.dumps(
+        {"quality": quality, "route": route},
+        ensure_ascii=False,
+    ) + caplog.text
+    assert quality["issues"] == ["validator_call_failed"]
+    assert route["degradation_reason"] == "validator_call_failed"
+    assert "SECRET" not in artifact
+    assert "provider_response" not in artifact
+    assert "authorization=" not in artifact
 
 
 def test_debate_prompts_defer_cash_and_position_limits_to_injected_profile():
