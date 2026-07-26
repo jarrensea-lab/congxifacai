@@ -3,6 +3,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 
+import pytest
+
 from app.services.long_thesis import LongThesisStore, evaluate_thesis_status
 
 
@@ -127,3 +129,40 @@ def test_long_thesis_example_is_store_compatible(tmp_path):
     assert stored["assumptions"]
     assert stored["red_lines"]
     assert stored["valuation_anchor"]["method"]
+
+
+def test_long_thesis_strict_load_treats_missing_file_as_empty_store(tmp_path):
+    store = LongThesisStore(tmp_path / "missing-long-thesis.json")
+
+    strict_load = getattr(store, "load_strict", None)
+
+    assert callable(strict_load)
+    assert strict_load() == {
+        "version": 1,
+        "updated_at": "",
+        "items": {},
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{broken",
+        "[]",
+        '{"version": 1, "items": []}',
+        '{"version": 1, "items": {"002123": []}}',
+        '{"version": 1, "items": {"002123": {"quality_score": 88}}}',
+    ],
+)
+def test_long_thesis_strict_load_rejects_corrupted_store_shapes(
+    tmp_path,
+    content,
+):
+    path = tmp_path / "long_thesis.json"
+    path.write_text(content, encoding="utf-8")
+    store = LongThesisStore(path)
+    strict_load = getattr(store, "load_strict", None)
+
+    assert callable(strict_load)
+    with pytest.raises(RuntimeError, match="long_thesis_store_invalid"):
+        strict_load()

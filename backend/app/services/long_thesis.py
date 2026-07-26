@@ -21,6 +21,14 @@ from app.services.long_horizon_transaction import (
 _LONG_THESIS_PROCESS_LOCK = RLock()
 
 
+class LongThesisStoreInvalid(RuntimeError):
+    """Raised when an existing long-thesis file cannot be trusted."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"long_thesis_store_invalid: {reason}")
+
+
 def default_long_thesis_path() -> Path:
     return Path(
         os.environ.get(
@@ -164,6 +172,34 @@ class LongThesisStore:
             payload["items"] = {}
         return payload
 
+    def _load_strict_unlocked(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"version": 1, "updated_at": "", "items": {}}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise LongThesisStoreInvalid(
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LongThesisStoreInvalid("root_not_object")
+        items = payload.get("items")
+        if not isinstance(items, dict):
+            raise LongThesisStoreInvalid("items_not_object")
+        for raw_symbol, item in items.items():
+            symbol = _clean_symbol(raw_symbol)
+            if not symbol or not isinstance(item, dict):
+                raise LongThesisStoreInvalid("item_not_object")
+            item_symbol = _clean_symbol(item.get("symbol") or item.get("code"))
+            if item_symbol != symbol:
+                raise LongThesisStoreInvalid(
+                    f"item_symbol_mismatch:{symbol}"
+                )
+        normalized = dict(payload)
+        normalized.setdefault("version", 1)
+        normalized.setdefault("updated_at", "")
+        return normalized
+
     def _save_unlocked(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = _now()
         _write_json(self.path, payload)
@@ -171,6 +207,11 @@ class LongThesisStore:
     def load(self) -> dict[str, Any]:
         with self._store_lock(exclusive=False):
             return self._load_unlocked()
+
+    def load_strict(self) -> dict[str, Any]:
+        """Load one validated map; missing is empty, corruption is explicit."""
+        with self._store_lock(exclusive=False):
+            return self._load_strict_unlocked()
 
     def save(self, payload: dict[str, Any]) -> None:
         with writer_transaction_guard(

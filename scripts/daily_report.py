@@ -1724,6 +1724,7 @@ def _render_mid_frequency_strategy(
 def _thesis_status_label(status: str) -> str:
     return {
         "healthy": "论文成立",
+        "forming": "论文形成中/验证未完成",
         "weakened": "边际弱化",
         "broken": "红线触发",
         "stale": "论文过期",
@@ -2063,7 +2064,11 @@ async def build_target_scores_for_report(
     from app.data_sources.akshare_market import AKShareMarketClient
     from app.data_sources.akshare_news import AKShareNewsClient
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
-    from app.services.long_thesis import LongThesisStore
+    from app.services.long_horizon_transaction import writer_transaction_guard
+    from app.services.long_thesis import (
+        LongThesisStore,
+        LongThesisStoreInvalid,
+    )
     from app.services.quant_lifecycle import TargetPoolStore, target_production_eligibility
     from app.services.target_scoring import next_target_status, score_target
     from app.services.target_snapshot import build_target_snapshot
@@ -2120,12 +2125,13 @@ async def build_target_scores_for_report(
     quote_source = FastRealtimeMarketDataSource()
     resolved_market_source = market_source or CachedMarketSource()
     news_source = AKShareNewsClient()
-    scores: list[dict] = []
+    snapshots: dict[str, dict] = {}
+    selected_codes: list[str] = []
     for item in items:
         code = str(item.get("code") or "").strip()
         if not code:
             continue
-        snapshot = await build_target_snapshot(
+        snapshots[code] = await build_target_snapshot(
             code,
             name=item.get("name", code),
             quote_source=quote_source,
@@ -2135,95 +2141,234 @@ async def build_target_scores_for_report(
             sentinel=item.get("sentinel") or {},
             serenity=item.get("serenity") or {},
         )
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-        snapshot["trigger_price"] = next(
-            (
-                value
-                for candidate in (item.get("trigger_price"), evidence.get("trigger_price"))
-                if (value := _positive_float(candidate)) is not None
-            ),
-            None,
+        selected_codes.append(code)
+
+    guard_pairs = [
+        (
+            getattr(candidate, "transaction_lock_path", None),
+            getattr(candidate, "transaction_journal_path", None),
         )
-        snapshot["production_eligibility"] = target_production_eligibility(item)
-        thesis = resolved_long_thesis_store.get(code)
-        score = score_target(
-            snapshot,
-            available_cash=available_cash,
-            total_assets=total_assets,
-            long_thesis=thesis,
-        )
-        score["source_status"] = {
+        for candidate in (store, resolved_long_thesis_store)
+    ]
+    configured_guards = [
+        (Path(lock_path).resolve(), Path(journal_path).resolve())
+        for lock_path, journal_path in guard_pairs
+        if lock_path is not None and journal_path is not None
+    ]
+    if configured_guards:
+        if len(set(configured_guards)) != 1:
+            raise RuntimeError("long_horizon_transaction_guard_mismatch")
+        lock_path, journal_path = configured_guards[0]
+        scoring_guard = writer_transaction_guard(lock_path, journal_path)
+    else:
+        from contextlib import nullcontext
+
+        scoring_guard = nullcontext()
+
+    def source_status_for(snapshot: dict) -> dict:
+        return {
             key: (snapshot.get(key) or {}).get("status")
-            for key in ("quote", "kline", "fund_flow", "northbound", "news", "financial", "sentinel", "serenity")
-        }
-        thesis_current_ids = (
-            thesis.get("current_long_evidence_ids")
-            if isinstance(thesis, dict)
-            else None
-        )
-        current_long_evidence_ids = (
-            thesis_current_ids
-            if isinstance(thesis_current_ids, list)
-            else item.get("current_long_evidence_ids") or []
-        )
-        current_long_evidence_ids = list(dict.fromkeys(
-            str(value).strip()
-            for value in current_long_evidence_ids
-            if str(value).strip()
-        ))
-        score["current_long_evidence_ids"] = current_long_evidence_ids
-        quote = snapshot.get("quote") if isinstance(snapshot.get("quote"), dict) else {}
-        action = str(score.get("action") or "")
-        authorization_valid = (
-            action in {"buy", "add"}
-            and float(score.get("score", 0) or 0) >= 70
-            and not (score.get("missing_data") or [])
-            and all(
-                score["source_status"].get(key) == "ok"
-                for key in ("quote", "kline", "fund_flow", "financial")
+            for key in (
+                "quote",
+                "kline",
+                "fund_flow",
+                "northbound",
+                "news",
+                "financial",
+                "sentinel",
+                "serenity",
             )
+        }
+
+    def invalid_store_score(item: dict, snapshot: dict) -> dict:
+        previous = (
+            item.get("scoring_decision")
+            if isinstance(item.get("scoring_decision"), dict)
+            else {}
         )
-        next_status = next_target_status(
-            str(item.get("status") or "watching"),
-            action,
-            score,
-            authorization_valid=authorization_valid,
-        )
-        store.upsert_target(
-            code=code,
-            name=score.get("name") or item.get("name", code),
-            status=next_status,
-            source="target_scoring",
-            evidence=evidence,
-            evidence_ids=item.get("evidence_ids") or [],
-            current_long_evidence_ids=current_long_evidence_ids,
-            sentinel=item.get("sentinel") or {},
-            serenity=item.get("serenity") or {},
-            scoring_decision={
-                "action": action,
-                "score": score.get("score", 0),
-                "block_reason": score.get("block_reason", ""),
-                "decision_reason": score.get("decision_reason", ""),
-                "missing_data": score.get("missing_data") or [],
-                "playbook": score.get("playbook", "watch"),
-                "source_status": score.get("source_status") or {},
-                "long_quality_score": score.get("long_quality_score", 0),
-                "thesis_status": score.get("thesis_status", ""),
-                "valuation_zone": score.get("valuation_zone", "unknown"),
-                "red_line_status": score.get("red_line_status", ""),
-                "long_horizon_reason": score.get("long_horizon_reason", ""),
-                "combined_decision_reason": score.get(
-                    "combined_decision_reason",
-                    score.get("decision_reason", ""),
+        return {
+            "code": str(item.get("code") or snapshot.get("code") or ""),
+            "name": str(item.get("name") or snapshot.get("name") or ""),
+            "score": previous.get("score", 0),
+            "action": (
+                "research_only"
+                if str(item.get("status") or "") == "research_reference"
+                else "watch"
+            ),
+            "block_reason": "long_thesis_store_invalid",
+            "entry_allowed": False,
+            "decision_reason": (
+                "长期论文存储损坏，本批评分已安全阻断；"
+                "保留上一版长期摘要，修复存储后再评分。"
+            ),
+            "combined_decision_reason": previous.get(
+                "combined_decision_reason",
+                previous.get("decision_reason", ""),
+            ),
+            "missing_data": previous.get("missing_data") or [],
+            "playbook": previous.get("playbook", "watch"),
+            "source_status": source_status_for(snapshot),
+            "long_quality_score": previous.get("long_quality_score", 0),
+            "thesis_status": previous.get("thesis_status", ""),
+            "valuation_zone": previous.get("valuation_zone", "unknown"),
+            "red_line_status": previous.get("red_line_status", ""),
+            "long_horizon_reason": previous.get("long_horizon_reason", ""),
+            "current_long_evidence_ids": list(
+                item.get("current_long_evidence_ids") or []
+            ),
+            "production_eligibility": target_production_eligibility(item),
+        }
+
+    scores: list[dict] = []
+    target_writes: list[dict] = []
+    with scoring_guard:
+        current_payload = store.load()
+        current_items = current_payload.get("items", {})
+        try:
+            thesis_payload = resolved_long_thesis_store.load_strict()
+        except LongThesisStoreInvalid:
+            for code in selected_codes:
+                item = current_items.get(code)
+                if not isinstance(item, dict):
+                    continue
+                scores.append(invalid_store_score(item, snapshots[code]))
+            return sorted(
+                scores,
+                key=lambda row: float(row.get("score", 0) or 0),
+                reverse=True,
+            )
+        thesis_items = thesis_payload.get("items", {})
+
+        for code in selected_codes:
+            item = current_items.get(code)
+            if (
+                not isinstance(item, dict)
+                or item.get("status")
+                in {"removed", "expired", "cooldown_after_loss"}
+            ):
+                continue
+            snapshot = dict(snapshots[code])
+            snapshot["name"] = item.get("name", code)
+            if "sentinel" in item:
+                snapshot["sentinel"] = item.get("sentinel") or {}
+            if "serenity" in item:
+                snapshot["serenity"] = item.get("serenity") or {}
+            evidence = (
+                item.get("evidence")
+                if isinstance(item.get("evidence"), dict)
+                else {}
+            )
+            snapshot["trigger_price"] = next(
+                (
+                    value
+                    for candidate in (
+                        item.get("trigger_price"),
+                        evidence.get("trigger_price"),
+                    )
+                    if (value := _positive_float(candidate)) is not None
                 ),
-                "current_long_evidence_ids": current_long_evidence_ids,
-                "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            current_price=quote.get("price"),
-            available_cash=available_cash,
-            total_assets=total_assets,
-        )
-        scores.append(score)
+                None,
+            )
+            snapshot["production_eligibility"] = (
+                target_production_eligibility(item)
+            )
+            thesis = thesis_items.get(code)
+            score = score_target(
+                snapshot,
+                available_cash=available_cash,
+                total_assets=total_assets,
+                long_thesis=thesis,
+            )
+            score["source_status"] = source_status_for(snapshot)
+            thesis_current_ids = (
+                thesis.get("current_long_evidence_ids")
+                if isinstance(thesis, dict)
+                else None
+            )
+            current_long_evidence_ids = (
+                thesis_current_ids
+                if isinstance(thesis_current_ids, list)
+                else item.get("current_long_evidence_ids") or []
+            )
+            current_long_evidence_ids = list(dict.fromkeys(
+                str(value).strip()
+                for value in current_long_evidence_ids
+                if str(value).strip()
+            ))
+            score["current_long_evidence_ids"] = current_long_evidence_ids
+            quote = (
+                snapshot.get("quote")
+                if isinstance(snapshot.get("quote"), dict)
+                else {}
+            )
+            action = str(score.get("action") or "")
+            authorization_valid = (
+                action in {"buy", "add"}
+                and float(score.get("score", 0) or 0) >= 70
+                and not (score.get("missing_data") or [])
+                and all(
+                    score["source_status"].get(key) == "ok"
+                    for key in ("quote", "kline", "fund_flow", "financial")
+                )
+            )
+            next_status = next_target_status(
+                str(item.get("status") or "watching"),
+                action,
+                score,
+                authorization_valid=authorization_valid,
+            )
+            target_writes.append(dict(
+                code=code,
+                name=score.get("name") or item.get("name", code),
+                status=next_status,
+                source="target_scoring",
+                evidence=evidence,
+                evidence_ids=item.get("evidence_ids") or [],
+                current_long_evidence_ids=current_long_evidence_ids,
+                sentinel=item.get("sentinel") or {},
+                serenity=item.get("serenity") or {},
+                scoring_decision={
+                    "action": action,
+                    "score": score.get("score", 0),
+                    "block_reason": score.get("block_reason", ""),
+                    "decision_reason": score.get("decision_reason", ""),
+                    "missing_data": score.get("missing_data") or [],
+                    "playbook": score.get("playbook", "watch"),
+                    "source_status": score.get("source_status") or {},
+                    "long_quality_score": score.get(
+                        "long_quality_score",
+                        0,
+                    ),
+                    "thesis_status": score.get("thesis_status", ""),
+                    "valuation_zone": score.get(
+                        "valuation_zone",
+                        "unknown",
+                    ),
+                    "red_line_status": score.get("red_line_status", ""),
+                    "long_horizon_reason": score.get(
+                        "long_horizon_reason",
+                        "",
+                    ),
+                    "combined_decision_reason": score.get(
+                        "combined_decision_reason",
+                        score.get("decision_reason", ""),
+                    ),
+                    "current_long_evidence_ids": current_long_evidence_ids,
+                    "evaluated_at": datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                },
+                current_price=quote.get("price"),
+                available_cash=available_cash,
+                total_assets=total_assets,
+            ))
+            scores.append(score)
+        batch_upsert = getattr(store, "upsert_targets", None)
+        if callable(batch_upsert):
+            batch_upsert(target_writes, payload=current_payload)
+        else:
+            for target_write in target_writes:
+                store.upsert_target(**target_write)
     return sorted(scores, key=lambda row: float(row.get("score", 0) or 0), reverse=True)
 
 

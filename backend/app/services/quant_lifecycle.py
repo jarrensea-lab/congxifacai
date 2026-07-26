@@ -545,10 +545,70 @@ class TargetPoolStore(CandidatePoolStore):
         available_cash: float = 0,
         total_assets: float = 0,
     ) -> bool:
+        payload = self.load()
+        written = self._upsert_target_in_payload(
+            payload,
+            code=code,
+            name=name,
+            status=status,
+            source=source,
+            evidence_ids=evidence_ids,
+            current_long_evidence_ids=current_long_evidence_ids,
+            evidence=evidence,
+            sentinel=sentinel,
+            serenity=serenity,
+            production_approval=production_approval,
+            scoring_decision=scoring_decision,
+            current_price=current_price,
+            available_cash=available_cash,
+            total_assets=total_assets,
+        )
+        if written:
+            self.save(payload)
+        return written
+
+    @_locked_store_mutation
+    def upsert_targets(
+        self,
+        targets: list[dict[str, Any]],
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
+        """Apply a target batch to one preloaded map and persist it once."""
+        working = payload if isinstance(payload, dict) else self.load()
+        written = 0
+        for target in targets:
+            if isinstance(target, dict) and self._upsert_target_in_payload(
+                working,
+                **target,
+            ):
+                written += 1
+        if written:
+            self.save(working)
+        return written
+
+    def _upsert_target_in_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        code: str,
+        name: str,
+        status: str = "candidate",
+        source: str = "manual",
+        evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+        sentinel: dict[str, Any] | None = None,
+        serenity: dict[str, Any] | None = None,
+        production_approval: dict[str, Any] | None = None,
+        scoring_decision: dict[str, Any] | None = None,
+        current_price: float | None = None,
+        available_cash: float = 0,
+        total_assets: float = 0,
+    ) -> bool:
         clean = _clean_code(code)
         if not clean:
             return False
-        payload = self.load()
         items = payload.setdefault("items", {})
         existing = items.get(clean, {})
         existing_evidence = existing.get("evidence") if isinstance(existing.get("evidence"), dict) else {}
@@ -629,7 +689,6 @@ class TargetPoolStore(CandidatePoolStore):
         item.setdefault("created_at", _now())
         item.setdefault("decision_history", [])
         items[clean] = item
-        self.save(payload)
         return True
 
 

@@ -1735,6 +1735,60 @@ def test_target_scoring_can_explicitly_remove_long_horizon_target(tmp_path):
     assert store.get("002123")["status"] == "removed"
 
 
+def test_target_pool_batch_upsert_reuses_preloaded_map_without_reloading(
+    monkeypatch,
+    tmp_path,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="批量评分一",
+        status="watching",
+        source="manual",
+    )
+    store.upsert_target(
+        code="000001",
+        name="批量评分二",
+        status="watching",
+        source="manual",
+    )
+    payload = store.load()
+    load_calls = 0
+    original_load = store.load
+
+    def counting_load():
+        nonlocal load_calls
+        load_calls += 1
+        return original_load()
+
+    monkeypatch.setattr(store, "load", counting_load)
+    batch_upsert = getattr(store, "upsert_targets", None)
+
+    assert callable(batch_upsert)
+    assert batch_upsert(
+        [
+            {
+                "code": "002123",
+                "name": "批量评分一",
+                "status": "watching",
+                "source": "target_scoring",
+                "scoring_decision": full_score_decision(action="watch"),
+            },
+            {
+                "code": "000001",
+                "name": "批量评分二",
+                "status": "watching",
+                "source": "target_scoring",
+                "scoring_decision": full_score_decision(action="watch"),
+            },
+        ],
+        payload=payload,
+    ) == 2
+    assert load_calls == 0
+    assert original_load()["items"]["002123"]["source"] == "target_scoring"
+    assert original_load()["items"]["000001"]["source"] == "target_scoring"
+
+
 def test_target_pool_cooldown_after_loss_is_durable_and_not_scan_active(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
     store.upsert_target(

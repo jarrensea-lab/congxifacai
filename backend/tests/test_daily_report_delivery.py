@@ -1,7 +1,9 @@
 """Daily report delivery and Obsidian archive regression tests."""
+import asyncio
 import json
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from threading import Barrier, Event, Thread
 
 import pytest
 
@@ -9,6 +11,68 @@ import pytest
 class _EmptyLongThesisStore:
     def get(self, symbol):
         return None
+
+    def load_strict(self):
+        return {"version": 1, "updated_at": "", "items": {}}
+
+
+class _OfflineScoreSource:
+    async def fetch_fund_flow_individual(self):
+        return []
+
+    async def fetch_hsgt_flow(self):
+        return []
+
+
+def _complete_score_snapshot(code, name, *, price=3.2):
+    return {
+        "code": code,
+        "name": name,
+        "quote": {
+            "status": "ok",
+            "price": price,
+            "change_pct": 4.2,
+            "amount_wan": 18000,
+            "turnover_pct": 8.0,
+            "vol_ratio": 2.6,
+        },
+        "kline": {
+            "status": "ok",
+            "bars": [
+                {
+                    "open": price * 0.95,
+                    "close": price * 0.98,
+                    "high": price,
+                    "low": price * 0.9,
+                }
+                for _ in range(20)
+            ],
+        },
+        "fund_flow": {"status": "ok", "net": "净流入"},
+        "financial": {"status": "ok", "revenue_yoy_pct": 12.0},
+        "news": {"status": "ok", "items": [{"title": "订单增长"}]},
+        "sentinel": {"status": "ok", "evidence_ids": ["ev_test"]},
+        "serenity": {"status": "ok", "score": 65},
+    }
+
+
+def _patch_score_dependencies(monkeypatch, target_store, snapshot_builder):
+    monkeypatch.setattr(
+        "app.services.quant_lifecycle.TargetPoolStore",
+        lambda: target_store,
+    )
+    monkeypatch.setattr(
+        "app.data_sources.realtime_market_data.FastRealtimeMarketDataSource",
+        _OfflineScoreSource,
+    )
+    monkeypatch.setattr(
+        "app.data_sources.akshare_news.AKShareNewsClient",
+        _OfflineScoreSource,
+    )
+    monkeypatch.setattr(
+        "app.services.target_snapshot.build_target_snapshot",
+        snapshot_builder,
+    )
 
 
 def test_save_report_to_obsidian_writes_report_index_and_status(tmp_path):
@@ -1303,6 +1367,21 @@ def test_build_next_day_strategy_sections_renders_long_horizon_summary():
                     "red_line_status": "triggered",
                     "combined_decision_reason": "中长期 thesis 红线触发。",
                 },
+                {
+                    "code": "000001",
+                    "name": "形成中测试",
+                    "action": "watch",
+                    "score": 40,
+                    "entry_price": 10.0,
+                    "lot_value": 1000,
+                    "block_reason": "price_not_triggered",
+                    "decision_reason": "等待财务验证。",
+                    "long_quality_score": 72,
+                    "thesis_status": "forming",
+                    "valuation_zone": "unknown",
+                    "red_line_status": "clear",
+                    "combined_decision_reason": "论文验证材料未完整。",
+                },
             ],
         },
         roles={},
@@ -1314,6 +1393,9 @@ def test_build_next_day_strategy_sections_renders_long_horizon_summary():
     assert "论文成立" in sections
     assert "积累区" in sections
     assert "红线触发" in sections
+    assert "论文形成中/验证未完成" in sections
+    assert "形成中测试(000001)" in sections
+    assert "未建论文" not in sections
     first_screen = sections[:sections.index("## 四、中长线关注标的池")]
     assert "accumulation_zone" not in first_screen
 
@@ -2087,6 +2169,419 @@ async def test_build_target_scores_default_long_thesis_store_uses_env_path(
 
     assert received_theses[0]["symbol"] == "000001"
     assert received_theses[0]["quality_score"] == 77
+
+
+@pytest.mark.asyncio
+async def test_build_target_scores_fails_closed_when_long_thesis_store_is_corrupted(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from scripts.daily_report import build_target_scores_for_report
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store.upsert_target(
+        code="002123",
+        name="长期摘要保护",
+        status="watching",
+        source="manual",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        scoring_decision={
+            "action": "watch",
+            "score": 68,
+            "long_quality_score": 82,
+            "thesis_status": "healthy",
+            "valuation_zone": "fair_zone",
+            "red_line_status": "clear",
+            "long_horizon_reason": "last_valid_summary",
+            "combined_decision_reason": "保留最后有效长期摘要。",
+            "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        },
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    before = target_store.path.read_bytes()
+    thesis_path = tmp_path / "long_thesis.json"
+    thesis_path.write_text("{broken", encoding="utf-8")
+    thesis_store = LongThesisStore(
+        thesis_path,
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+
+    async def fake_snapshot(code, **kwargs):
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+
+    assert scores[0]["action"] == "watch"
+    assert scores[0]["block_reason"] == "long_thesis_store_invalid"
+    assert scores[0]["entry_allowed"] is False
+    assert scores[0]["thesis_status"] == "healthy"
+    assert scores[0]["long_quality_score"] == 82
+    assert scores[0]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v1"
+    ]
+    assert target_store.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_build_target_scores_reloads_latest_target_and_thesis_after_snapshots(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_horizon_transaction import LongHorizonBatchTransaction
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from scripts.daily_report import build_target_scores_for_report
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store = LongThesisStore(
+        tmp_path / "long_thesis.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    thesis_store.upsert({
+        "symbol": "002123",
+        "name": "旧版本",
+        "quality_score": 88,
+        "thesis_status": "healthy",
+        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "status": "clear"}],
+    })
+    target_store.upsert_target(
+        code="002123",
+        name="旧版本",
+        status="long_watch",
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    transaction = LongHorizonBatchTransaction(
+        journal_path,
+        [
+            ("long_thesis", thesis_store.path),
+            ("target_pool", target_store.path),
+        ],
+        lock_path=lock_path,
+    )
+    snapshot_started = Event()
+    materializer_finished = Event()
+    errors = []
+
+    def materialize_broken_v2():
+        try:
+            assert snapshot_started.wait(timeout=5)
+            with transaction.locked():
+                transaction.begin()
+                thesis_store.upsert({
+                    "symbol": "002123",
+                    "name": "最新版本",
+                    "quality_score": 92,
+                    "thesis_status": "broken",
+                    "current_long_evidence_ids": [
+                        "long-thesis:002123:v2",
+                        "long-red-line:002123:v2",
+                    ],
+                    "red_lines": [{
+                        "id": "margin",
+                        "status": "triggered",
+                        "condition": "毛利率红线触发",
+                    }],
+                })
+                target_store.upsert_target(
+                    code="002123",
+                    name="最新版本",
+                    status="long_watch",
+                    source="long_horizon",
+                    current_long_evidence_ids=[
+                        "long-thesis:002123:v2",
+                        "long-red-line:002123:v2",
+                    ],
+                )
+                transaction.commit()
+        except Exception as exc:  # pragma: no cover - surfaced below.
+            errors.append(exc)
+        finally:
+            materializer_finished.set()
+
+    worker = Thread(target=materialize_broken_v2)
+    worker.start()
+
+    async def fake_snapshot(code, **kwargs):
+        snapshot_started.set()
+        assert await asyncio.to_thread(materializer_finished.wait, 5)
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+    worker.join(timeout=5)
+
+    assert errors == []
+    assert not worker.is_alive()
+    assert scores[0]["name"] == "最新版本"
+    assert scores[0]["action"] != "buy"
+    assert scores[0]["block_reason"] == "long_thesis_broken"
+    assert scores[0]["thesis_status"] == "broken"
+    assert scores[0]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2",
+        "long-red-line:002123:v2",
+    ]
+    current = target_store.get("002123")
+    assert current["name"] == "最新版本"
+    assert current["status"] == "thesis_review"
+    assert current["current_long_evidence_ids"] == scores[0][
+        "current_long_evidence_ids"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exclusive_materializer_waits_for_daily_scoring_guard(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_horizon_transaction import LongHorizonBatchTransaction
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from app.services.target_scoring import score_target as real_score_target
+    from scripts.daily_report import build_target_scores_for_report
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store = LongThesisStore(
+        tmp_path / "long_thesis.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    thesis_store.upsert({
+        "symbol": "002123",
+        "name": "一致性测试",
+        "quality_score": 88,
+        "thesis_status": "healthy",
+        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "status": "clear"}],
+    })
+    target_store.upsert_target(
+        code="002123",
+        name="一致性测试",
+        status="long_watch",
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    transaction = LongHorizonBatchTransaction(
+        journal_path,
+        [
+            ("long_thesis", thesis_store.path),
+            ("target_pool", target_store.path),
+        ],
+        lock_path=lock_path,
+    )
+    rendezvous = Barrier(2)
+    exclusive_acquired = Event()
+    materializer_finished = Event()
+    acquired_during_score = []
+    errors = []
+
+    def materialize_v2():
+        try:
+            rendezvous.wait(timeout=5)
+            with transaction.locked():
+                exclusive_acquired.set()
+                transaction.begin()
+                thesis_store.upsert({
+                    "symbol": "002123",
+                    "name": "一致性测试",
+                    "quality_score": 0,
+                    "thesis_status": "broken",
+                    "current_long_evidence_ids": ["long-thesis:002123:v2"],
+                    "red_lines": [{
+                        "id": "margin",
+                        "status": "triggered",
+                        "condition": "更新后红线",
+                    }],
+                })
+                target_store.upsert_target(
+                    code="002123",
+                    name="一致性测试",
+                    status="thesis_review",
+                    source="long_horizon",
+                    current_long_evidence_ids=["long-thesis:002123:v2"],
+                )
+                transaction.commit()
+        except Exception as exc:  # pragma: no cover - surfaced below.
+            errors.append(exc)
+        finally:
+            materializer_finished.set()
+
+    def synchronized_score(snapshot, **kwargs):
+        rendezvous.wait(timeout=5)
+        acquired_during_score.append(exclusive_acquired.wait(timeout=0.5))
+        return real_score_target(snapshot, **kwargs)
+
+    worker = Thread(target=materialize_v2)
+    worker.start()
+
+    async def fake_snapshot(code, **kwargs):
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+    monkeypatch.setattr(
+        "app.services.target_scoring.score_target",
+        synchronized_score,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+    assert await asyncio.to_thread(materializer_finished.wait, 5)
+    worker.join(timeout=5)
+
+    assert errors == []
+    assert not worker.is_alive()
+    assert acquired_during_score == [False]
+    assert scores[0]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v1"
+    ]
+    current = target_store.get("002123")
+    assert current["status"] == "thesis_review"
+    assert current["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_build_target_scores_loads_each_store_map_once_for_twelve_codes(
+    monkeypatch,
+):
+    from scripts.daily_report import build_target_scores_for_report
+
+    class CountingTargetStore:
+        def __init__(self):
+            self.load_calls = 0
+            self.writes = []
+            self.payload = {
+                "items": {
+                    f"{index:06d}": {
+                        "code": f"{index:06d}",
+                        "name": f"标的{index}",
+                        "status": "watching",
+                        "source": "manual",
+                    }
+                    for index in range(1, 13)
+                }
+            }
+
+        def load(self):
+            self.load_calls += 1
+            return self.payload
+
+        def upsert_target(self, **kwargs):
+            self.writes.append(kwargs)
+            return True
+
+    class CountingLongThesisStore:
+        def __init__(self):
+            self.strict_load_calls = 0
+            self.get_calls = 0
+
+        def load_strict(self):
+            self.strict_load_calls += 1
+            return {"version": 1, "updated_at": "", "items": {}}
+
+        def get(self, symbol):
+            self.get_calls += 1
+            return None
+
+    target_store = CountingTargetStore()
+    thesis_store = CountingLongThesisStore()
+
+    async def fake_snapshot(code, **kwargs):
+        return {"code": code, "name": kwargs["name"], "quote": {"price": 3.2}}
+
+    def fake_score(snapshot, **kwargs):
+        return {
+            "code": snapshot["code"],
+            "name": snapshot["name"],
+            "score": 50,
+            "action": "watch",
+        }
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+    monkeypatch.setattr("app.services.target_scoring.score_target", fake_score)
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=12,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+
+    assert len(scores) == 12
+    assert target_store.load_calls == 2
+    assert thesis_store.strict_load_calls == 1
+    assert thesis_store.get_calls == 0
 
 
 def test_build_feishu_summary_keeps_full_report_local_hint():
