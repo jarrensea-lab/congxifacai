@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 from app.data_sources.offline_market_data import (
     OfflineMinuteDataSource,
+    classify_offline_history_error,
     validate_offline_kline_response,
 )
 from app.utils.logger import logger
@@ -127,11 +128,25 @@ async def _fetch_kline(stock_code: str, period_days: int):
                 )
             else:
                 return bars
-        elif kline.get("status") != "error":
+        elif kline.get("status") == "error":
+            if (
+                classify_offline_history_error(kline)
+                == "offline_history_invalid"
+            ):
+                logger.warning(
+                    "Offline kline failed an integrity or security check"
+                )
+                return []
+        else:
             logger.warning("Offline kline returned an unknown status")
             return []
-    except (OSError, ValueError) as e:
+    except FileNotFoundError as e:
         logger.debug(f"Offline kline for backtest unavailable: {e}")
+    except (OSError, ValueError):
+        logger.warning(
+            "Offline kline registry configuration failed validation"
+        )
+        return []
 
     # 尝试 Tushare
     try:

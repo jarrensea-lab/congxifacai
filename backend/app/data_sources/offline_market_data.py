@@ -53,6 +53,18 @@ RETURNED_BAR_FIELDS = (
     "volume",
     "amount",
 )
+OFFLINE_HISTORY_UNAVAILABLE_REASONS = frozenset(
+    {
+        "source_unavailable",
+        "registry_missing",
+        "registry_disabled",
+        "archive_not_found",
+        "stock_data_not_found",
+        "adjustment_factor_file_not_found",
+        "adjustment_factor_not_found",
+        "missing_adjustment_factor",
+    }
+)
 
 
 class OfflineArchiveDataError(ValueError):
@@ -670,6 +682,19 @@ def validate_offline_kline_response(
             return invalid
         validated.append(bar)
     return validated, None
+
+
+def classify_offline_history_error(response: Any) -> str:
+    """Classify an offline error without trusting arbitrary reason text."""
+    if not isinstance(response, dict) or response.get("status") != "error":
+        return "offline_history_invalid"
+    reason = response.get("reason")
+    if (
+        isinstance(reason, str)
+        and reason in OFFLINE_HISTORY_UNAVAILABLE_REASONS
+    ):
+        return "offline_history_unavailable"
+    return "offline_history_invalid"
 
 
 def _read_member_rows(

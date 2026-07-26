@@ -19,6 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
 from app.data_sources.offline_market_data import (
     OfflineMinuteDataSource,
+    classify_offline_history_error,
     validate_offline_kline_response,
 )
 from app.data_sources.tushare_client import TushareDataSource
@@ -263,11 +264,15 @@ async def backfill_due_predictions(
     ledger = PredictionLedger(args.output_root)
     predictions = ledger.due_predictions(as_of=as_of, limit=args.limit)
     source = quote_source or FastRealtimeMarketDataSource()
+    offline_initialization_invalid = False
     if offline_source is None and quote_source is None:
         try:
             offline_source = OfflineMinuteDataSource.from_default_registry()
+        except FileNotFoundError:
+            offline_source = None
         except (OSError, ValueError):
             offline_source = None
+            offline_initialization_invalid = True
     by_code: dict[str, list[dict]] = {}
     for prediction in predictions:
         by_code.setdefault(str(prediction.get("code") or ""), []).append(prediction)
@@ -310,6 +315,23 @@ async def backfill_due_predictions(
                     **evaluate_prediction_record(prediction, bars=[], as_of=as_of),
                     "status": "unavailable",
                     "reason": "kline_history_overflow",
+                }
+                for prediction in code_predictions
+            )
+            continue
+        if offline_initialization_invalid:
+            code_errors.append(
+                {"code": code, "reason": "offline_history_invalid"}
+            )
+            outcomes.extend(
+                {
+                    **evaluate_prediction_record(
+                        prediction,
+                        bars=[],
+                        as_of=as_of,
+                    ),
+                    "status": "unavailable",
+                    "reason": "offline_history_invalid",
                 }
                 for prediction in code_predictions
             )
@@ -382,7 +404,31 @@ async def backfill_due_predictions(
                         kline = {**kline, "bars": validated_bars}
                         offline_history_code_count += 1
                 elif kline.get("status") == "error":
-                    kline = {}
+                    if (
+                        classify_offline_history_error(kline)
+                        == "offline_history_unavailable"
+                    ):
+                        kline = {}
+                    else:
+                        code_errors.append(
+                            {
+                                "code": code,
+                                "reason": "offline_history_invalid",
+                            }
+                        )
+                        outcomes.extend(
+                            {
+                                **evaluate_prediction_record(
+                                    prediction,
+                                    bars=[],
+                                    as_of=as_of,
+                                ),
+                                "status": "unavailable",
+                                "reason": "offline_history_invalid",
+                            }
+                            for prediction in code_predictions
+                        )
+                        continue
                 else:
                     code_errors.append(
                         {"code": code, "reason": "offline_history_invalid"}

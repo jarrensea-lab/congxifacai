@@ -1090,6 +1090,62 @@ def test_offline_response_validator_enforces_data_cutoff(data_cutoff, as_of):
     assert error == "offline_history_invalid"
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "source_unavailable",
+        "registry_missing",
+        "registry_disabled",
+        "archive_not_found",
+        "stock_data_not_found",
+        "adjustment_factor_file_not_found",
+        "adjustment_factor_not_found",
+        "missing_adjustment_factor",
+    ],
+)
+def test_offline_error_classifier_allows_only_unavailable_history(reason):
+    assert (
+        offline_market_data.classify_offline_history_error(
+            {"status": "error", "reason": reason}
+        )
+        == "offline_history_unavailable"
+    )
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "conflicting_overlap_timestamp",
+        "duplicate_timestamp",
+        "non_monotonic_timestamp",
+        "invalid_numeric_row",
+        "archive_read_failed",
+        "archive_member_ambiguous",
+        "archive_member_unsafe",
+        "archive_member_encrypted",
+        "archive_member_non_regular",
+        "archive_member_too_large",
+        "archive_member_compression_ratio_exceeded",
+        "archive_row_limit_exceeded",
+        "adjustment_factor_code_invalid",
+        "adjustment_factor_code_mismatch",
+        "invalid_adjustment_factor_date",
+        "duplicate_adjustment_factor_date",
+        "invalid_adjustment_factor",
+        "adjusted_price_not_finite",
+    ],
+)
+def test_offline_error_classifier_rejects_integrity_and_security_failures(
+    reason,
+):
+    assert (
+        offline_market_data.classify_offline_history_error(
+            {"status": "error", "reason": reason}
+        )
+        == "offline_history_invalid"
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("stock_code", "member", "row_code", "market_dir"),

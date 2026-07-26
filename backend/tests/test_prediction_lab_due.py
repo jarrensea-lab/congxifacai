@@ -370,6 +370,158 @@ async def test_backfill_falls_back_after_explicit_offline_error(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_backfill_falls_back_when_optional_registry_is_missing(
+    tmp_path,
+    monkeypatch,
+):
+    ledger = PredictionLedger(tmp_path)
+    ledger.append_predictions(
+        _records(code="000001", prediction_date="2026-06-01", horizons=(1,))
+    )
+    provider_calls = []
+
+    class PrimaryQuoteSource:
+        async def fetch_kline(self, code, period, count):
+            provider_calls.append((code, period, count))
+            return {
+                "status": "ok",
+                "bars": [
+                    {"date": "2026-06-01", "close": 10},
+                    {"date": "2026-06-02", "close": 11},
+                ],
+            }
+
+    def missing_registry():
+        raise FileNotFoundError("optional registry missing")
+
+    monkeypatch.setattr(
+        run_prediction_lab,
+        "FastRealtimeMarketDataSource",
+        PrimaryQuoteSource,
+    )
+    monkeypatch.setattr(
+        run_prediction_lab.OfflineMinuteDataSource,
+        "from_default_registry",
+        missing_registry,
+    )
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+        )
+    )
+
+    assert provider_calls == [("000001", "day", 55)]
+    assert result["verified_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_fails_closed_when_registry_configuration_is_invalid(
+    tmp_path,
+    monkeypatch,
+):
+    ledger = PredictionLedger(tmp_path)
+    ledger.append_predictions(
+        _records(code="000001", prediction_date="2026-06-01", horizons=(1,))
+    )
+    provider_calls = []
+
+    class PrimaryQuoteSource:
+        async def fetch_kline(self, code, period, count):
+            provider_calls.append((code, period, count))
+            return {"status": "ok", "bars": []}
+
+    def invalid_registry():
+        raise ValueError("registry_json_invalid")
+
+    monkeypatch.setattr(
+        run_prediction_lab,
+        "FastRealtimeMarketDataSource",
+        PrimaryQuoteSource,
+    )
+    monkeypatch.setattr(
+        run_prediction_lab.OfflineMinuteDataSource,
+        "from_default_registry",
+        invalid_registry,
+    )
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+        )
+    )
+
+    assert provider_calls == []
+    assert result["code_errors"] == [
+        {"code": "000001", "reason": "offline_history_invalid"}
+    ]
+    assert result["verified_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "conflicting_overlap_timestamp",
+        "duplicate_timestamp",
+        "non_monotonic_timestamp",
+        "invalid_numeric_row",
+        "archive_read_failed",
+        "archive_member_unsafe",
+        "archive_member_encrypted",
+        "invalid_adjustment_factor",
+    ],
+)
+async def test_backfill_fails_closed_for_offline_integrity_errors(
+    tmp_path,
+    reason,
+):
+    ledger = PredictionLedger(tmp_path)
+    ledger.append_predictions(
+        _records(code="000001", prediction_date="2026-06-01", horizons=(1,))
+    )
+    provider_calls = []
+
+    class PrimaryQuoteSource:
+        async def fetch_kline(self, code, period, count):
+            provider_calls.append((code, period, count))
+            return {
+                "status": "ok",
+                "bars": [
+                    {"date": "2026-06-01", "close": 10},
+                    {"date": "2026-06-02", "close": 11},
+                ],
+            }
+
+    class OfflineHistorySource:
+        async def fetch_kline(self, *_args, **_kwargs):
+            return {"status": "error", "reason": reason, "bars": []}
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+        ),
+        quote_source=PrimaryQuoteSource(),
+        offline_source=OfflineHistorySource(),
+    )
+
+    assert provider_calls == []
+    assert result["code_errors"] == [
+        {"code": "000001", "reason": "offline_history_invalid"}
+    ]
+    assert result["verified_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_backfill_rejects_nonempty_malformed_offline_success(tmp_path):
     ledger = PredictionLedger(tmp_path)
     ledger.append_predictions(

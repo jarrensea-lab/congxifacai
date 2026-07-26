@@ -227,6 +227,120 @@ async def test_backtest_falls_back_after_explicit_offline_error(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_backtest_falls_back_when_optional_registry_is_missing(
+    monkeypatch,
+):
+    provider_bars = [{"date": str(index), "close": 10.0} for index in range(30)]
+
+    class MissingRegistryFactory:
+        @classmethod
+        def from_default_registry(cls):
+            raise FileNotFoundError("optional registry missing")
+
+    class FakeTushare:
+        def is_available(self):
+            return True
+
+        async def fetch_kline(self, *_args, **_kwargs):
+            return {"status": "ok", "bars": provider_bars}
+
+    monkeypatch.setattr(
+        backtest,
+        "OfflineMinuteDataSource",
+        MissingRegistryFactory,
+    )
+    monkeypatch.setattr(tushare_client, "TushareDataSource", FakeTushare)
+
+    result = await backtest._fetch_kline("000725", 30)
+
+    assert result == provider_bars
+
+
+@pytest.mark.asyncio
+async def test_backtest_fails_closed_when_registry_configuration_is_invalid(
+    monkeypatch,
+):
+    provider_calls = []
+
+    class InvalidRegistryFactory:
+        @classmethod
+        def from_default_registry(cls):
+            raise ValueError("registry_json_invalid")
+
+    class FakeTushare:
+        def is_available(self):
+            return True
+
+        async def fetch_kline(self, *_args, **_kwargs):
+            provider_calls.append("tushare")
+            return {"status": "ok", "bars": [{"close": 1}] * 30}
+
+    monkeypatch.setattr(
+        backtest,
+        "OfflineMinuteDataSource",
+        InvalidRegistryFactory,
+    )
+    monkeypatch.setattr(tushare_client, "TushareDataSource", FakeTushare)
+
+    result = await backtest._fetch_kline("000725", 30)
+
+    assert result == []
+    assert provider_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "conflicting_overlap_timestamp",
+        "duplicate_timestamp",
+        "non_monotonic_timestamp",
+        "invalid_numeric_row",
+        "archive_read_failed",
+        "archive_member_unsafe",
+        "archive_member_encrypted",
+        "invalid_adjustment_factor",
+    ],
+)
+async def test_backtest_fails_closed_for_offline_integrity_errors(
+    monkeypatch,
+    reason,
+):
+    provider_calls = []
+
+    class FakeOfflineSource:
+        async def fetch_kline(self, *_args, **_kwargs):
+            return {"status": "error", "reason": reason, "bars": []}
+
+    class FakeOfflineFactory:
+        @classmethod
+        def from_default_registry(cls):
+            return FakeOfflineSource()
+
+    class FakeTushare:
+        def is_available(self):
+            return True
+
+        async def fetch_kline(self, *_args, **_kwargs):
+            provider_calls.append("tushare")
+            return {"status": "ok", "bars": [{"close": 1}] * 30}
+
+    class FakeTencent:
+        async def fetch_kline(self, *_args, **_kwargs):
+            provider_calls.append("tencent")
+            return {"status": "ok", "bars": [{"close": 1}] * 30}
+
+    monkeypatch.setattr(backtest, "OfflineMinuteDataSource", FakeOfflineFactory)
+    monkeypatch.setattr(tushare_client, "TushareDataSource", FakeTushare)
+    monkeypatch.setattr(tencent_client, "TencentDataSource", FakeTencent)
+
+    result = await backtest._fetch_kline("000725", 30)
+
+    assert result == []
+    assert provider_calls == []
+
+
+@pytest.mark.asyncio
 async def test_backtest_rejects_nonempty_malformed_offline_success(monkeypatch):
     provider_calls = []
     bars = [
