@@ -439,6 +439,34 @@ def test_run_sentinel_news_job_persists_audit_package_after_materialization_fail
 
 
 @pytest.mark.parametrize(
+    ("result", "mode", "expected_code"),
+    [
+        ({}, "news", 1),
+        ({"mode": "news"}, None, 1),
+        (None, "news", 1),
+        ([], "news", 1),
+        ({"long_horizon_summary": None}, "news", 1),
+        ({"long_horizon_summary": {"status": "unknown"}}, "news", 1),
+        ({"news": {}}, "all", 1),
+        ({"news": []}, "all", 1),
+        ({}, "review", 0),
+        ({"mode": "review"}, None, 0),
+        ({"long_horizon_summary": {"status": "success"}}, "news", 0),
+        ({"long_horizon_summary": {"status": "partial"}}, "news", 2),
+        ({"long_horizon_summary": {"status": "degraded"}}, "news", 2),
+    ],
+)
+def test_sentinel_result_exit_code_is_mode_aware(
+    result,
+    mode,
+    expected_code,
+):
+    import scripts.run_sentinel as runner
+
+    assert runner._sentinel_result_exit_code(result, mode=mode) == expected_code
+
+
+@pytest.mark.parametrize(
     ("summary_status", "expected_code"),
     [
         ("success", 0),
@@ -478,6 +506,40 @@ def test_run_sentinel_main_returns_materialization_exit_code(
     )
 
     assert runner.main() == expected_code
+
+
+@pytest.mark.parametrize(
+    ("mode", "result"),
+    [
+        ("news", {"mode": "news"}),
+        ("all", {"news": {}, "review": {"mode": "review"}}),
+    ],
+)
+def test_run_sentinel_main_fails_closed_when_news_summary_is_missing(
+    monkeypatch,
+    tmp_path,
+    mode,
+    result,
+):
+    import scripts.run_sentinel as runner
+
+    monkeypatch.setattr(runner, "run_news_job", lambda *args, **kwargs: result)
+    monkeypatch.setattr(runner, "run_all", lambda *args, **kwargs: result)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_sentinel.py",
+            "--date",
+            "2026-07-27",
+            "--mode",
+            mode,
+            "--output-root",
+            str(tmp_path),
+        ],
+    )
+
+    assert runner.main() == 1
 
 
 def test_run_sentinel_all_recursively_prioritizes_failure():

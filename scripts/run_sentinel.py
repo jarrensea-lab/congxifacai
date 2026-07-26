@@ -227,17 +227,46 @@ def run_all(report_date: str, output_root: str | Path = DEFAULT_OUTPUT_ROOT) -> 
     }
 
 
-def _sentinel_result_exit_code(result: dict[str, Any]) -> int:
-    """Map nested long-horizon materialization truth to the CLI contract."""
+def _sentinel_result_exit_code(result: Any, *, mode: str | None = None) -> int:
+    """Map mode-aware long-horizon materialization truth to the CLI contract."""
+    resolved_mode = str(mode or "").strip().lower()
+    if not resolved_mode and isinstance(result, dict):
+        declared_mode = str(result.get("mode") or "").strip().lower()
+        if declared_mode:
+            resolved_mode = declared_mode
+        elif "news" in result:
+            resolved_mode = "all"
+        elif "long_horizon_summary" in result:
+            resolved_mode = "news"
+
+    if resolved_mode == "review":
+        return 0
+    if resolved_mode == "news":
+        news_result = result
+    elif resolved_mode == "all":
+        if not isinstance(result, dict):
+            return 1
+        news_result = result.get("news")
+    else:
+        return 1
+
+    if not isinstance(news_result, dict):
+        return 1
+    if not isinstance(news_result.get("long_horizon_summary"), dict):
+        return 1
+
     statuses: list[str] = []
 
     def collect(value: Any) -> None:
         if isinstance(value, dict):
-            summary = value.get("long_horizon_summary")
-            if isinstance(summary, dict):
-                statuses.append(
-                    str(summary.get("status") or "unknown").strip().lower()
-                )
+            if "long_horizon_summary" in value:
+                summary = value["long_horizon_summary"]
+                if isinstance(summary, dict):
+                    statuses.append(
+                        str(summary.get("status") or "unknown").strip().lower()
+                    )
+                else:
+                    statuses.append("unknown")
             for key, nested in value.items():
                 if key != "long_horizon_summary":
                     collect(nested)
@@ -247,7 +276,7 @@ def _sentinel_result_exit_code(result: dict[str, Any]) -> int:
 
     collect(result)
     if not statuses:
-        return 0
+        return 1
     if any(status not in {"success", "partial", "degraded"} for status in statuses):
         return 1
     if any(status in {"partial", "degraded"} for status in statuses):
@@ -269,7 +298,7 @@ def main() -> int:
     else:
         result = run_all(args.date, output_root=args.output_root)
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
-    return _sentinel_result_exit_code(result)
+    return _sentinel_result_exit_code(result, mode=args.mode)
 
 
 if __name__ == "__main__":
