@@ -389,7 +389,7 @@ async def build_recommendation_review(
     if resolved_ledger_path is None and portfolio_path is not None:
         resolved_ledger_path = str(Path(portfolio_path).parent / "execution_ledger.jsonl")
     ledger = ExecutionLedger(resolved_ledger_path)
-    _sync_portfolio_execution_events(portfolio, ledger)
+    sync_diagnostics = _sync_portfolio_execution_events(portfolio, ledger)
     attribution = ledger.join_attribution(
         portfolio_trade_events=portfolio_trade_events,
     )
@@ -454,7 +454,23 @@ async def build_recommendation_review(
     avg_score = round(sum(row["behavior_score"] for row in reviewed) / executed_count, 1) if executed_count else 0.0
     attributed_count = sum(row["attribution"]["status"] == "attributed" for row in reviewed)
     problem_flags = sorted({flag for row in reviewed for flag in row["flags"]})
-    return {
+    attribution_history_invalid = (
+        not attribution.get("ok")
+        and attribution.get("error") == "execution_ledger_history_invalid"
+    ) or "execution_ledger_history_invalid" in sync_diagnostics
+    complete_chain_count = sum(
+        item.get("status") in {"attributed", "pending"}
+        for item in attribution.get("chains", [])
+    )
+    if attribution_history_invalid:
+        system_gap = "execution_ledger_history_invalid"
+    elif executed_count == 0:
+        system_gap = "no_executed_samples"
+    elif complete_chain_count == 0:
+        system_gap = "execution_chain_missing"
+    else:
+        system_gap = ""
+    review = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "executed": {
             "count": executed_count,
@@ -475,8 +491,11 @@ async def build_recommendation_review(
         },
         "items": reviewed,
         "strategy_attribution": attribution.get("strategy_metrics") or _empty_review("")["strategy_attribution"],
-        "system_gap": "sentinel_advice_performance_has_no_executed_samples",
+        "system_gap": system_gap,
     }
+    if attribution_history_invalid:
+        review["diagnostics"] = ["execution_ledger_history_invalid"]
+    return review
 
 
 def render_recommendation_review_markdown(review: dict[str, Any]) -> str:
@@ -487,8 +506,14 @@ def render_recommendation_review_markdown(review: dict[str, Any]) -> str:
     elif review.get("system_gap") == "portfolio_invalid":
         diagnostics = ", ".join(review.get("diagnostics") or [])
         gap_conclusion = f"- 持仓文件结构无效，已拒绝计算：{diagnostics or '未知结构错误'}。"
+    elif review.get("system_gap") == "execution_ledger_history_invalid":
+        gap_conclusion = "- 执行账本历史无效，策略归因已失败关闭；持仓行为指标仍单独展示。"
+    elif review.get("system_gap") == "no_executed_samples":
+        gap_conclusion = "- 当前没有真实执行样本，暂不能计算策略归因。"
+    elif review.get("system_gap") == "execution_chain_missing":
+        gap_conclusion = "- 已有真实执行，但推荐、授权决策与成交链路不完整，不能归因到策略。"
     else:
-        gap_conclusion = "- 项目原有 Sentinel advice_performance 未记录本轮真实执行样本，导致推荐行为没有进入绩效闭环。"
+        gap_conclusion = "- 至少一笔真实执行具备完整归因链，策略绩效仅统计完整链样本。"
     lines = [
         f"# 推荐执行复盘评分 - {review.get('generated_at', '')[:10]}",
         "",

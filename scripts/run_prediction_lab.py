@@ -16,6 +16,7 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
+from app.data_sources.offline_market_data import OfflineMinuteDataSource
 from app.data_sources.tushare_client import TushareDataSource
 from app.services.prediction_lab import (
     PredictionLedger,
@@ -248,12 +249,18 @@ async def backfill_due_predictions(
     args: argparse.Namespace,
     *,
     quote_source: FastRealtimeMarketDataSource | None = None,
+    offline_source=None,
 ) -> dict:
     """Evaluate every unfinished prediction while reusing one K-line fetch per code."""
     as_of = args.as_of or _today()
     ledger = PredictionLedger(args.output_root)
     predictions = ledger.due_predictions(as_of=as_of, limit=args.limit)
     source = quote_source or FastRealtimeMarketDataSource()
+    if offline_source is None and quote_source is None:
+        try:
+            offline_source = OfflineMinuteDataSource.from_default_registry()
+        except (OSError, ValueError):
+            offline_source = None
     by_code: dict[str, list[dict]] = {}
     for prediction in predictions:
         by_code.setdefault(str(prediction.get("code") or ""), []).append(prediction)
@@ -262,6 +269,7 @@ async def backfill_due_predictions(
     bars_by_code: dict[str, list[dict]] = {}
     code_errors: list[dict] = []
     history_overflow_count = 0
+    offline_history_code_count = 0
     for code, code_predictions in by_code.items():
         prediction_dates = [
             date.fromisoformat(str(item.get("prediction_date"))[:10])
@@ -298,7 +306,65 @@ async def backfill_due_predictions(
             )
             continue
         try:
-            kline = await source.fetch_kline(code, "day", count=required_count)
+            kline = {}
+            if offline_source is not None:
+                try:
+                    kline = await offline_source.fetch_kline(
+                        code,
+                        "day",
+                        count=required_count,
+                        adjustment="qfq",
+                        as_of=as_of,
+                    )
+                except (OSError, ValueError):
+                    kline = {"status": "error", "reason": "source_error"}
+                if kline.get("status") == "ok":
+                    if not isinstance(kline.get("bars"), list) or not kline["bars"]:
+                        code_errors.append(
+                            {
+                                "code": code,
+                                "reason": "offline_history_invalid",
+                            }
+                        )
+                        outcomes.extend(
+                            {
+                                **evaluate_prediction_record(
+                                    prediction,
+                                    bars=[],
+                                    as_of=as_of,
+                                ),
+                                "status": "unavailable",
+                                "reason": "offline_history_invalid",
+                            }
+                            for prediction in code_predictions
+                        )
+                        continue
+                    offline_history_code_count += 1
+                elif kline.get("status") == "error":
+                    kline = {}
+                else:
+                    code_errors.append(
+                        {"code": code, "reason": "offline_history_invalid"}
+                    )
+                    outcomes.extend(
+                        {
+                            **evaluate_prediction_record(
+                                prediction,
+                                bars=[],
+                                as_of=as_of,
+                            ),
+                            "status": "unavailable",
+                            "reason": "offline_history_invalid",
+                        }
+                        for prediction in code_predictions
+                    )
+                    continue
+            if not kline:
+                kline = await source.fetch_kline(
+                    code,
+                    "day",
+                    count=required_count,
+                )
             bars = kline.get("bars") or []
             bars_by_code[code] = bars
             outcomes.extend(
@@ -346,6 +412,7 @@ async def backfill_due_predictions(
         "code_count": len(by_code),
         "code_error_count": len(code_errors),
         "history_overflow_count": history_overflow_count,
+        "offline_history_code_count": offline_history_code_count,
         "code_errors": code_errors,
         "evaluated_count": len(outcomes),
         "verified_count": sum(item.get("status") == "verified" for item in outcomes),

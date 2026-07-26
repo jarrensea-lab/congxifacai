@@ -173,6 +173,134 @@ async def test_backfill_requests_enough_history_for_prediction_older_than_forty_
 
 
 @pytest.mark.asyncio
+async def test_backfill_uses_registered_offline_history_without_replacing_benchmarks(tmp_path):
+    ledger = PredictionLedger(tmp_path)
+    ledger.append_predictions(
+        _records(code="000001", prediction_date="2026-06-01", horizons=(1,))
+    )
+
+    class PrimaryQuoteSource:
+        async def fetch_kline(self, code, period, count):
+            raise AssertionError("stock history should use the offline shadow source")
+
+    class OfflineHistorySource:
+        def __init__(self):
+            self.calls = []
+
+        async def fetch_kline(self, code, period, count, **kwargs):
+            self.calls.append((code, period, count, kwargs))
+            return {
+                "status": "ok",
+                "bars": [
+                    {"date": f"2026-06-{day:02d}", "close": 10 + day / 10}
+                    for day in range(1, 10)
+                ],
+            }
+
+    offline = OfflineHistorySource()
+    args = argparse.Namespace(
+        output_root=str(tmp_path),
+        as_of="2026-07-15",
+        limit=None,
+        kline_count=40,
+    )
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        args,
+        quote_source=PrimaryQuoteSource(),
+        offline_source=offline,
+    )
+
+    assert result["verified_count"] == 1
+    assert offline.calls == [
+        (
+            "000001",
+            "day",
+            55,
+            {"adjustment": "qfq", "as_of": "2026-07-15"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_backfill_does_not_fallback_for_malformed_offline_success(tmp_path):
+    ledger = PredictionLedger(tmp_path)
+    ledger.append_predictions(
+        _records(code="000001", prediction_date="2026-06-01", horizons=(1,))
+    )
+    provider_calls = []
+
+    class PrimaryQuoteSource:
+        async def fetch_kline(self, code, period, count):
+            provider_calls.append((code, period, count))
+            return {"status": "ok", "bars": [{"date": "2026-06-01", "close": 10}]}
+
+    class OfflineHistorySource:
+        async def fetch_kline(self, *_args, **_kwargs):
+            return {"status": "ok", "bars": []}
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+        ),
+        quote_source=PrimaryQuoteSource(),
+        offline_source=OfflineHistorySource(),
+    )
+
+    assert provider_calls == []
+    assert result["code_errors"] == [
+        {"code": "000001", "reason": "offline_history_invalid"}
+    ]
+    assert result["verified_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_falls_back_after_explicit_offline_error(tmp_path):
+    ledger = PredictionLedger(tmp_path)
+    ledger.append_predictions(
+        _records(code="000001", prediction_date="2026-06-01", horizons=(1,))
+    )
+    provider_calls = []
+
+    class PrimaryQuoteSource:
+        async def fetch_kline(self, code, period, count):
+            provider_calls.append((code, period, count))
+            return {
+                "status": "ok",
+                "bars": [
+                    {"date": f"2026-06-{day:02d}", "close": 10 + day / 10}
+                    for day in range(1, 10)
+                ],
+            }
+
+    class OfflineHistorySource:
+        async def fetch_kline(self, *_args, **_kwargs):
+            return {
+                "status": "error",
+                "reason": "source_unavailable",
+                "bars": [],
+            }
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+        ),
+        quote_source=PrimaryQuoteSource(),
+        offline_source=OfflineHistorySource(),
+    )
+
+    assert provider_calls == [("000001", "day", 55)]
+    assert result["verified_count"] == 1
+    assert result["offline_history_code_count"] == 0
+
+
+@pytest.mark.asyncio
 async def test_backfill_caps_provider_history_and_emits_named_overflow(tmp_path):
     ledger = PredictionLedger(tmp_path)
     ledger.append_predictions(

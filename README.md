@@ -218,6 +218,15 @@ CONGXI_YITAOJIN_WRITE_ENABLED=false
 - **东方财富** — 行业板块/资金流向/龙虎榜
 - **AKShare** — 新闻情绪/市场指标
 - **a-stock-data** — A 股全栈数据工具包
+- **本地离线分钟档案** — 通过 `data/external_market_data_sources.json`
+  登记外部 ZIP 和 Tushare 复权因子，按股票懒读取，不复制或解压整套数据。
+  该来源强制为 `shadow`，仅供回测、预测补样和策略实验，不能替代实时行情。
+
+本地登记文件默认不进入 Git。可从
+`data/examples/external_market_data_sources.example.json` 复制后填写绝对路径，
+也可用 `CONGXI_EXTERNAL_MARKET_DATA_REGISTRY` 指向其他登记文件。历史回测在登记
+文件有效时优先读取离线数据并按日计算前复权；数据缺失、ZIP 损坏或复权因子不完整
+时会失败关闭，并只在离线源明确返回错误时回退到 Tushare/腾讯。
 
 ### 风险控制（8 道防线）
 

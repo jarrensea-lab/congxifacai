@@ -8,6 +8,8 @@ V6 新增: 为每支持仓股和推荐股提供历史回测指标，包括胜率
     # result: {total_trades, win_rate_pct, avg_profit_pct, ...}
 """
 from typing import Dict, Any
+
+from app.data_sources.offline_market_data import OfflineMinuteDataSource
 from app.utils.logger import logger
 
 
@@ -71,7 +73,30 @@ async def run_backtest(
 
 
 async def _fetch_kline(stock_code: str, period_days: int):
-    """获取历史K线 — 优先 Tushare, 备选腾讯"""
+    """获取历史K线 — 注册的离线档案优先，随后 Tushare、腾讯。
+
+    离线档案固定为 shadow-only，只影响历史回测数据，不替代实时行情。
+    """
+    try:
+        offline = OfflineMinuteDataSource.from_default_registry()
+        kline = await offline.fetch_kline(
+            stock_code,
+            "day",
+            count=period_days,
+            adjustment="qfq",
+        )
+        bars = kline.get("bars", [])
+        if kline.get("status") == "ok":
+            if isinstance(bars, list) and len(bars) >= 20:
+                return bars
+            logger.warning("Offline kline returned malformed or partial success")
+            return []
+        if kline.get("status") != "error":
+            logger.warning("Offline kline returned an unknown status")
+            return []
+    except (OSError, ValueError) as e:
+        logger.debug(f"Offline kline for backtest unavailable: {e}")
+
     # 尝试 Tushare
     try:
         from app.data_sources.tushare_client import TushareDataSource

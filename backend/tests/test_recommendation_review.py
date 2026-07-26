@@ -8,6 +8,14 @@ from app.services.recommendation_review import (
 )
 
 
+class _NoMarketData:
+    async def fetch_batch(self, codes):
+        return {}
+
+    async def fetch_kline(self, code, period, count):
+        return {"bars": []}
+
+
 @pytest.mark.asyncio
 async def test_recommendation_review_handles_missing_portfolio(tmp_path):
     review = await build_recommendation_review(portfolio_path=str(tmp_path / "missing.json"))
@@ -18,6 +26,122 @@ async def test_recommendation_review_handles_missing_portfolio(tmp_path):
 
     markdown = render_recommendation_review_markdown(review)
     assert "未找到本地持仓文件" in markdown
+
+
+@pytest.mark.asyncio
+async def test_recommendation_review_names_no_executed_samples_truthfully(tmp_path):
+    portfolio_path = tmp_path / "portfolio.json"
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "positions": [],
+                "closed_positions": [],
+                "trade_events": [],
+                "available_cash": 2000.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review = await build_recommendation_review(
+        portfolio_path=str(portfolio_path),
+        quote_source=_NoMarketData(),
+    )
+
+    assert review["executed"]["count"] == 0
+    assert review["system_gap"] == "no_executed_samples"
+    assert review["strategy_attribution"]["closed_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_recommendation_review_names_missing_chain_when_execution_exists(tmp_path):
+    portfolio_path = tmp_path / "portfolio.json"
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "positions": [
+                    {
+                        "code": "002131",
+                        "name": "利欧股份",
+                        "shares": 100,
+                        "avg_cost": 4.0,
+                        "current_price": 4.1,
+                        "trade_history": [{"date": "2026-07-20", "type": "buy"}],
+                    }
+                ],
+                "closed_positions": [],
+                "trade_events": [],
+                "available_cash": 1000.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review = await build_recommendation_review(
+        portfolio_path=str(portfolio_path),
+        quote_source=_NoMarketData(),
+    )
+
+    assert review["executed"]["count"] == 1
+    assert review["executed"]["attributed_count"] == 0
+    assert review["system_gap"] == "execution_chain_missing"
+    assert review["executed"]["metric_scope"] == (
+        "portfolio_behavior_not_strategy_attribution"
+    )
+
+
+@pytest.mark.asyncio
+async def test_recommendation_review_fails_closed_on_invalid_execution_history(tmp_path):
+    portfolio_path = tmp_path / "portfolio.json"
+    portfolio_path.write_text(
+        json.dumps(
+            {
+                "positions": [
+                    {
+                        "code": "002131",
+                        "name": "利欧股份",
+                        "shares": 100,
+                        "avg_cost": 4.0,
+                        "current_price": 4.1,
+                        "trade_history": [
+                            {
+                                "date": "2026-07-20",
+                                "type": "buy",
+                                "fill_id": "fill-1",
+                                "signal_id": "signal-1",
+                                "recommendation_id": "rec-1",
+                            }
+                        ],
+                    }
+                ],
+                "closed_positions": [],
+                "trade_events": [
+                    {
+                        "fill_id": "fill-1",
+                        "code": "002131",
+                        "signal_id": "signal-1",
+                        "recommendation_id": "rec-1",
+                    }
+                ],
+                "available_cash": 1000.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    ledger_path = tmp_path / "execution.jsonl"
+    ledger_path.write_text("{broken-json\n", encoding="utf-8")
+
+    review = await build_recommendation_review(
+        portfolio_path=str(portfolio_path),
+        execution_ledger_path=str(ledger_path),
+        quote_source=_NoMarketData(),
+    )
+
+    assert review["executed"]["count"] == 1
+    assert review["system_gap"] == "execution_ledger_history_invalid"
+    assert review["strategy_attribution"]["closed_count"] == 0
+    assert review["diagnostics"] == ["execution_ledger_history_invalid"]
+    assert "broken-json" not in json.dumps(review, ensure_ascii=False)
 
 
 @pytest.mark.asyncio
@@ -131,6 +255,7 @@ async def test_recommendation_review_separates_portfolio_behavior_from_strategy_
     assert by_code["000100"]["attribution"]["status"] == "attributed"
     assert review["strategy_attribution"]["closed_count"] == 1
     assert review["strategy_attribution"]["total_pnl"] == 20.0
+    assert review["system_gap"] == ""
 
 
 @pytest.mark.asyncio
