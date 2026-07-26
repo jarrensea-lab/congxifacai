@@ -57,6 +57,7 @@ from app.services.market_data_health import (
 from app.services.notification_gate import NotificationGate, build_alert_digest
 from app.services.sentinel_input_gate import (
     inject_active_sentinel_evidence,
+    load_recent_sentinel_package,
     sentinel_audit_only_message,
 )
 from app.services.visible_decision_gate import (
@@ -318,6 +319,18 @@ def _apply_premarket_sentinel_input(
         package,
         report_date,
         market_data,
+    )
+
+
+def _load_premarket_sentinel_package(
+    report_date: str,
+    *,
+    output_root=None,
+):
+    """Load a backend premarket package through the shared lookback policy."""
+    return load_recent_sentinel_package(
+        report_date,
+        output_root=output_root,
     )
 
 
@@ -663,12 +676,13 @@ async def _run_premarket_with_status():
         logger.info("=== 旺财V7 盘前任务启动 ===")
         market_data = await _fetch_market_data()
         try:
-            from app.ai.sentinel_research import load_research_package
-
-            sentinel_package = load_research_package(str(date.today()))
+            sentinel_report_date = str(date.today())
+            sentinel_package = _load_premarket_sentinel_package(
+                sentinel_report_date
+            )
             sentinel_decision = _apply_premarket_sentinel_input(
                 sentinel_package,
-                str(date.today()),
+                sentinel_report_date,
                 market_data,
             )
             if sentinel_decision["active"] is True:

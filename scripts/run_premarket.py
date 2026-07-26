@@ -13,6 +13,7 @@ os.environ["DOTENV_PATH"] = os.path.join(PROJECT_ROOT, ".env.local")
 from app.services.market_data_health import fetch_market_index_snapshot
 from app.services.sentinel_input_gate import (
     inject_active_sentinel_evidence,
+    load_recent_sentinel_package,
     sentinel_audit_only_message,
 )
 
@@ -49,6 +50,18 @@ def apply_premarket_sentinel_input(
         package,
         report_date,
         market_data,
+    )
+
+
+def load_premarket_sentinel_package(
+    report_date: str,
+    *,
+    output_root=None,
+):
+    """Load a legacy premarket package through the shared lookback policy."""
+    return load_recent_sentinel_package(
+        report_date,
+        output_root=output_root,
     )
 
 
@@ -111,13 +124,16 @@ async def main():
 
     try:
         from datetime import date
-        from app.ai.sentinel_research import load_research_package
 
         sentinel_root = os.path.join(os.path.dirname(__file__), "..", "data", "sentinel")
-        sentinel_package = load_research_package(str(date.today()), output_root=sentinel_root)
+        sentinel_report_date = str(date.today())
+        sentinel_package = load_premarket_sentinel_package(
+            sentinel_report_date,
+            output_root=sentinel_root,
+        )
         sentinel_decision = apply_premarket_sentinel_input(
             sentinel_package,
-            str(date.today()),
+            sentinel_report_date,
             market_data,
         )
         if sentinel_decision["active"] is True:

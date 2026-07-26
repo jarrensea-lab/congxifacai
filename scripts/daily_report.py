@@ -41,6 +41,7 @@ from app.services.market_data_health import (
 from app.services.sentinel_input_gate import (
     classify_sentinel_package as _sentinel_package_freshness,
     inject_active_sentinel_evidence as _inject_active_sentinel_evidence,
+    load_recent_sentinel_package as _load_recent_sentinel_package,
     sentinel_audit_only_message as _sentinel_audit_only_message,
     sentinel_package_age_days as _sentinel_package_age_days,
 )
@@ -313,27 +314,11 @@ def build_final_action_summary(
 
 
 def load_sentinel_research_package(report_date: str) -> dict | None:
-    """Load Sentinel research package for report_date, falling back to the latest available package."""
-    try:
-        from app.ai.sentinel_research import load_research_package
-
-        package = load_research_package(report_date, output_root=SENTINEL_OUTPUT_ROOT)
-        if package:
-            return package
-        package_dir = SENTINEL_OUTPUT_ROOT / "research_packages"
-        if not package_dir.exists():
-            return None
-        for path in sorted(package_dir.glob("*.json"), reverse=True):
-            fallback = load_research_package(path.stem, output_root=SENTINEL_OUTPUT_ROOT)
-            if fallback:
-                fallback = dict(fallback)
-                fallback["fallback_used"] = True
-                fallback["requested_date"] = report_date
-                fallback["fallback_reason"] = "requested_date_package_missing"
-                return fallback
-        return None
-    except Exception:
-        return None
+    """Load the nearest Sentinel package within the shared active window."""
+    return _load_recent_sentinel_package(
+        report_date,
+        output_root=SENTINEL_OUTPUT_ROOT,
+    )
 
 
 def _role_excerpt(role_data: dict) -> str:

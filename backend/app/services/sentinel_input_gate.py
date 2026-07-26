@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, MutableMapping
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 
@@ -22,6 +22,59 @@ def _parse_iso_date(value: Any) -> date | None:
         return datetime.strptime(text, "%Y-%m-%d").date()
     except ValueError:
         return None
+
+
+def load_recent_sentinel_package(
+    report_date: Any,
+    *,
+    output_root: Any = None,
+    package_loader: Callable[..., Any] | None = None,
+) -> Any:
+    """Load the first package file found for report day, day-1, or day-2."""
+    report_day = _parse_iso_date(report_date)
+    if report_day is None:
+        return None
+    if package_loader is None:
+        from app.ai.sentinel_research import load_research_package
+
+        package_loader = load_research_package
+
+    requested_date = report_day.isoformat()
+    for offset_days in range(SENTINEL_ACTIVE_MAX_AGE_DAYS + 1):
+        package_file_date = (
+            report_day - timedelta(days=offset_days)
+        ).isoformat()
+        try:
+            if output_root is None:
+                package = package_loader(package_file_date)
+            else:
+                package = package_loader(
+                    package_file_date,
+                    output_root=output_root,
+                )
+        except Exception:
+            return {
+                "date": None,
+                "package_file_date": package_file_date,
+                "requested_date": requested_date,
+                "fallback_used": offset_days > 0,
+                "fallback_reason": "package_load_failed",
+                "package_load_status": "invalid",
+            }
+        if package is None:
+            continue
+        if not isinstance(package, Mapping):
+            return package
+        result = dict(package)
+        result["package_file_date"] = package_file_date
+        result["requested_date"] = requested_date
+        result["fallback_used"] = offset_days > 0
+        if offset_days:
+            result["fallback_reason"] = "requested_date_package_missing"
+        else:
+            result.pop("fallback_reason", None)
+        return result
+    return None
 
 
 def sentinel_package_age_days(
