@@ -41,7 +41,7 @@
 
 ## 验证基线
 
-- 当前后端完整基线：`1102 passed`（2026-07-26）。
+- 当前后端完整基线：`1104 passed`（2026-07-26）。
 - 后端测试、Ruff 和 `compileall` 必须在修改交易、预警、报告、账户或调度逻辑后通过。
 - 真实报告验证必须使用 `CONGXI_PORTFOLIO_PATH`、`CONGXI_CANDIDATE_POOL_PATH`、`CONGXI_REPORT_ARCHIVE_DIR` 临时副本。
 - 易淘金验收必须由用户在场，先只读、再 dry-run、最后才允许受控普通自选写入；任何阶段都不包含交易权限。

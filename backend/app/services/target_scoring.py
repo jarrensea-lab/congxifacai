@@ -115,7 +115,7 @@ def score_long_quality(snapshot: dict[str, Any], thesis: dict[str, Any] | None) 
         thesis_status = evaluated_status
     else:
         thesis_status = declared_status or evaluated_status
-    if thesis_status == "broken":
+    if thesis_status in {"broken", "unknown"}:
         quality = 0
     elif thesis_status == "stale":
         quality = min(raw_quality, 40)
@@ -125,7 +125,9 @@ def score_long_quality(snapshot: dict[str, Any], thesis: dict[str, Any] | None) 
         quality = raw_quality
     verification_status = str(thesis.get("verification_status") or "")
     missing_verification = thesis.get("missing_verification")
-    if thesis_status == "forming" or verification_status == "incomplete":
+    if thesis_status == "unknown":
+        reason = "thesis_status_unknown"
+    elif thesis_status == "forming" or verification_status == "incomplete":
         missing = (
             [str(value) for value in missing_verification if str(value)]
             if isinstance(missing_verification, list)

@@ -22,9 +22,11 @@ def test_long_thesis_empty_state_and_unknown_are_distinct_in_code_and_docs():
     assert empty["thesis_status"] == ""
     unknown = score_long_quality(
         {"quote": {}},
-        {"thesis_status": "unknown"},
+        {"thesis_status": "unknown", "quality_score": 88},
     )
     assert unknown["thesis_status"] == "unknown"
+    assert unknown["long_quality_score"] == 0
+    assert unknown["long_horizon_reason"] == "thesis_status_unknown"
     assert _thesis_status_label(empty["thesis_status"]) == "未建论文"
     assert _thesis_status_label("unknown") == "论文状态未知"
     assert _thesis_status_label("") != _thesis_status_label("unknown")

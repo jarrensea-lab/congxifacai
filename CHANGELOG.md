@@ -7,7 +7,7 @@
 - ✅ **次日主报告默认渲染完成迁移**：默认动作优先渲染已委托给 `backend/app/report_engine/templates/next_day.py`；`scripts/daily_report.py` 仍保留 `CONGXI_REPORT_LEGACY_SECTIONS=1` 控制的 legacy 大模板/兼容渲染，默认路径完成不代表 legacy 已拆分去重。
 - ✅ **调度服务独立**：新增 `backend/app/services/scheduler_service.py`，集中登记 15 个 APScheduler 作业；`backend/app/main.py` 只注入处理函数并启动一次统一服务，启动后继续清理遗留 `daily_report` 作业。
 - ✅ **关键晚间顺序固定**：Sentinel research 为周一至周五和周日 20:00，主报告为周一至周五和周日 20:30，易淘金晚间同步为周一至周五 20:45，Sentinel review 为每日 21:00；Bot 保持每 30 秒轮询。
-- ✅ **中线/长线空状态与六态分离**：未建论文空状态中，空 `thesis_status == ""` 是正常无 thesis，报告显示“未建论文”；六个显式状态为 `unknown`、`forming`、`healthy`、`stale`、`weakened`、`broken`。`unknown` 表示已有上下文但状态无法可靠判定，不能与空状态合并；全部属于研究和风险语义，不等于交易授权。
+- ✅ **中线/长线空状态与六态分离**：未建论文空状态中，空 `thesis_status == ""` 是正常无 thesis，报告显示“未建论文”；六个显式状态为 `unknown`、`forming`、`healthy`、`stale`、`weakened`、`broken`。`unknown` 表示已有上下文但状态无法可靠判定，评分时 `long_quality_score=0` 并记录 `thesis_status_unknown`，不提供长期加分但也不单独阻断 tactical buy；全部属于研究和风险语义，不等于交易授权。
 - ✅ **Serenity 研究物化但不授权交易**：Sentinel 研究任务在持久化研究包前，将 Serenity 结果物化到 Long Thesis、Evidence Ledger 和 Target Pool 的研究来源字段；输出保持 `research_only`，不会直接发出买卖指令。
 
 ### 数据、模型与券商边界
@@ -22,7 +22,8 @@
 
 - `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests/test_scheduler_service.py backend/tests/test_yitaojin_scheduler.py backend/tests/test_sentinel_research.py backend/tests/test_runtime_regressions.py backend/tests/test_prediction_lab_due.py -q`：`123 passed`。
 - 中长期状态、模型生产门和默认/legacy 报告路径的代码—文档契约定向验证：`256 passed`。
-- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests -q`：`1102 passed`。
+- `unknown` 长期分、tactical buy 与中长期物化/报告链路定向验证：`184 passed`。
+- `PYTHONPATH=.:backend .venv/bin/python -m pytest backend/tests -q`：`1104 passed`。
 
 ## v8.2.0-dev (2026-07-10) — Prediction Ledger + Scrapling Realtime Kline：预测账本与实时 K 线闭环
 

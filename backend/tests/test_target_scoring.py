@@ -219,6 +219,55 @@ def test_score_target_carries_long_thesis_quality_without_overriding_trade_trigg
     assert long_quality["valuation_zone"] == "accumulation_zone"
 
 
+def test_unknown_long_thesis_cannot_lift_target_over_buy_threshold():
+    snapshot = _base_snapshot(code="002123", price=3.2)
+    snapshot["serenity"] = {"status": "ok", "score": 0}
+    unknown_thesis = {
+        "symbol": "002123",
+        "quality_score": 88,
+        "thesis_status": "unknown",
+    }
+
+    long_quality = score_long_quality(snapshot, unknown_thesis)
+    result = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+        long_thesis=unknown_thesis,
+    )
+
+    assert long_quality["thesis_status"] == "unknown"
+    assert long_quality["long_quality_score"] == 0
+    assert long_quality["long_horizon_reason"] == "thesis_status_unknown"
+    assert result["score"] < 70
+    assert result["action"] == "watch"
+    assert result["block_reason"] == "price_not_triggered"
+
+
+def test_unknown_long_thesis_does_not_block_independently_qualified_tactical_buy():
+    snapshot = _base_snapshot(code="002123", price=3.2)
+    snapshot["serenity"] = {"status": "ok", "score": 65}
+    unknown_thesis = {
+        "symbol": "002123",
+        "quality_score": 88,
+        "thesis_status": "unknown",
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+        long_thesis=unknown_thesis,
+    )
+
+    assert result["thesis_status"] == "unknown"
+    assert result["long_quality_score"] == 0
+    assert result["long_horizon_reason"] == "thesis_status_unknown"
+    assert result["score"] >= 70
+    assert result["action"] == "buy"
+    assert result["block_reason"] == ""
+
+
 def test_score_target_blocks_trade_when_long_thesis_red_line_is_triggered():
     long_thesis = {
         "symbol": "002123",
