@@ -21,12 +21,28 @@ class RuntimeDatabasePaths:
     scheduler: str
 
 
-def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
-    """Resolve mutable SQLite files onto the local home disk by default."""
-    state_dir = Path(
+@dataclass(frozen=True)
+class RuntimeYitaojinPaths:
+    bridge: Path
+    account_snapshot: Path
+    account_fingerprint_salt: Path
+    account_audit: Path
+    watchlist_state: Path
+    watchlist_audit: Path
+    quote_snapshot: Path
+
+
+def resolve_runtime_state_dir() -> Path:
+    """Return the local mutable state root without creating it."""
+    return Path(
         os.getenv("CONGXI_STATE_DIR")
         or "~/Library/Application Support/congxicai-v7"
     ).expanduser()
+
+
+def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
+    """Resolve mutable SQLite files onto the local home disk by default."""
+    state_dir = resolve_runtime_state_dir()
     business = Path(
         os.getenv("CONGXI_DATABASE_PATH") or state_dir / "stock_data.db"
     ).expanduser()
@@ -34,6 +50,46 @@ def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
         os.getenv("CONGXI_SCHEDULER_DATABASE_PATH") or state_dir / "scheduler_jobs.db"
     ).expanduser()
     return RuntimeDatabasePaths(business=str(business), scheduler=str(scheduler))
+
+
+def resolve_runtime_yitaojin_paths() -> RuntimeYitaojinPaths:
+    """Resolve broker-integration artifacts onto the local state disk."""
+    state_dir = resolve_runtime_state_dir()
+    integration_dir = state_dir / "yitaojin"
+
+    def resolve(name: str, default: Path) -> Path:
+        return Path(os.getenv(name) or default).expanduser()
+
+    return RuntimeYitaojinPaths(
+        bridge=resolve(
+            "CONGXI_YITAOJIN_BRIDGE_PATH",
+            state_dir / "bin" / "yitaojin-bridge",
+        ),
+        account_snapshot=resolve(
+            "CONGXI_YITAOJIN_ACCOUNT_SNAPSHOT_PATH",
+            integration_dir / "account_snapshot.json",
+        ),
+        account_fingerprint_salt=resolve(
+            "CONGXI_YITAOJIN_ACCOUNT_FINGERPRINT_SALT_PATH",
+            integration_dir / "account_fingerprint_salt",
+        ),
+        account_audit=resolve(
+            "CONGXI_YITAOJIN_ACCOUNT_AUDIT_PATH",
+            integration_dir / "account_sync_audit.jsonl",
+        ),
+        watchlist_state=resolve(
+            "CONGXI_YITAOJIN_WATCHLIST_STATE_PATH",
+            integration_dir / "watchlist_state.json",
+        ),
+        watchlist_audit=resolve(
+            "CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH",
+            integration_dir / "watchlist_sync_audit.jsonl",
+        ),
+        quote_snapshot=resolve(
+            "CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH",
+            integration_dir / "quote_snapshot.json",
+        ),
+    )
 
 
 _runtime_database_paths = resolve_runtime_database_paths()
