@@ -5,6 +5,7 @@ import pytest
 
 from app.services.quant_lifecycle import (
     CandidatePoolStore,
+    LONG_HORIZON_STATUSES,
     PositionWatchStore,
     TargetPoolStore,
     evaluate_candidate_pool,
@@ -1636,13 +1637,7 @@ def test_target_pool_long_horizon_states_are_not_intraday_scan_active(tmp_path):
 
 @pytest.mark.parametrize(
     "long_status",
-    [
-        "long_research",
-        "long_watch",
-        "accumulation_zone",
-        "tactical_watch",
-        "thesis_review",
-    ],
+    sorted(LONG_HORIZON_STATUSES),
 )
 @pytest.mark.parametrize("requested_status", ["watching", "research_reference"])
 def test_target_scoring_cannot_downgrade_long_horizon_status(
@@ -1691,13 +1686,7 @@ def test_target_scoring_cannot_downgrade_long_horizon_status(
 
 @pytest.mark.parametrize(
     "long_status",
-    [
-        "long_research",
-        "long_watch",
-        "accumulation_zone",
-        "tactical_watch",
-        "thesis_review",
-    ],
+    sorted(LONG_HORIZON_STATUSES),
 )
 def test_target_scoring_cannot_promote_long_horizon_without_production_approval(
     tmp_path,

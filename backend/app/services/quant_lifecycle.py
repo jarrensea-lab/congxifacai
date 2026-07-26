@@ -592,14 +592,7 @@ class TargetPoolStore(CandidatePoolStore):
             normalized_status = "research_reference"
         if (
             source == "target_scoring"
-            and existing.get("status")
-            in {
-                "long_research",
-                "long_watch",
-                "accumulation_zone",
-                "tactical_watch",
-                "thesis_review",
-            }
+            and existing.get("status") in LONG_HORIZON_STATUSES
             and normalized_status in {"watching", "research_reference"}
         ):
             normalized_status = str(existing["status"])
