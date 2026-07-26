@@ -96,6 +96,17 @@ def _compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "chain_position": candidate.get("chain_position", ""),
         "verify_next": candidate.get("verify_next", ""),
         "research_priority": candidate.get("research_priority", ""),
+        "long_assumptions": candidate.get("long_assumptions", []),
+        "red_lines": candidate.get("red_lines", []),
+        "valuation_questions": candidate.get("valuation_questions", []),
+        "quarterly_verification_tasks": candidate.get(
+            "quarterly_verification_tasks", []
+        ),
+        "bottleneck_duration": candidate.get("bottleneck_duration", ""),
+        "bottleneck_map": candidate.get("bottleneck_map", {}),
+        "financial_evidence": candidate.get("financial_evidence", {}),
+        "quote_evidence": candidate.get("quote_evidence", {}),
+        "boundary": "research_only",
     }
 
 
@@ -111,6 +122,8 @@ def build_serenity_deep_dives(
     limit: int = 3,
     available_cash: float = 0,
     total_assets: float = 0,
+    quote_fetcher=None,
+    financial_fetcher=None,
     pipeline_runner=None,
 ) -> list[dict[str, Any]]:
     """Build Serenity bottleneck deep dives as Sentinel research-only inputs."""
@@ -124,26 +137,32 @@ def build_serenity_deep_dives(
     seen: set[str] = set()
     for item in top_themes:
         theme = str(item.get("name") or "").strip()
-        if not theme or theme in seen:
+        if not theme:
             continue
-        seen.add(theme)
         try:
             pipeline = pipeline_runner(
                 theme,
                 report_date=report_date,
                 available_cash=available_cash,
                 total_assets=total_assets,
+                quote_fetcher=quote_fetcher,
+                financial_fetcher=financial_fetcher,
                 context="Sentinel 一周实验：热点主题进入 Serenity 产业链瓶颈深挖，作为研究输入。",
             )
+            normalized_theme = str(pipeline.get("normalized_theme") or theme).strip()
+            candidates = pipeline.get("top_candidates") or []
+            if not candidates or normalized_theme in seen:
+                continue
+            seen.add(normalized_theme)
             dives.append({
                 "module": "serenity_bottleneck_deep_dive",
                 "theme": theme,
                 "theme_event_count": item.get("count", 0),
-                "normalized_theme": pipeline.get("normalized_theme", theme),
+                "normalized_theme": normalized_theme,
                 "chokepoints": (pipeline.get("chokepoints") or [])[:5],
                 "top_candidates": [
                     _compact_candidate(candidate)
-                    for candidate in (pipeline.get("top_candidates") or [])[:5]
+                    for candidate in candidates[:5]
                 ],
                 "verification_tasks": (pipeline.get("verification_tasks") or [])[:8],
                 "learning_report_markdown": build_serenity_research_report(pipeline),
@@ -157,14 +176,8 @@ def build_serenity_deep_dives(
                     "note": "保留 Serenity 深度研究能力，但不单独产出选股报告或交易指令。",
                 },
             })
-        except Exception as exc:
-            dives.append({
-                "module": "serenity_bottleneck_deep_dive",
-                "theme": theme,
-                "theme_event_count": item.get("count", 0),
-                "boundary": "research_only",
-                "error": str(exc),
-            })
+        except Exception:
+            continue
         if len(dives) >= limit:
             break
     return dives

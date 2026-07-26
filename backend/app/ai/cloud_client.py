@@ -1,7 +1,38 @@
 """云端模型客户端 — DeepSeek (默认) + Qwen (可选)"""
 import httpx
 import json
+import logging
 from app.config import CLOUD_MODELS, settings
+
+
+class CloudRouteError(RuntimeError):
+    """Sanitized model-route failure with no provider response payload."""
+
+    def __init__(
+        self,
+        *,
+        attempted_provider: str,
+        requested_provider: str,
+        model: str,
+        fallback_reason: str,
+        degradation_reason: str,
+    ):
+        super().__init__("cloud model route failed")
+        self.provider = ""
+        self.attempted_provider = attempted_provider
+        self.requested_provider = requested_provider
+        self.model = model
+        self.fallback_reason = fallback_reason
+        self.degradation_reason = degradation_reason
+
+
+def _raise_api_error(provider: str, status_code: int) -> None:
+    logging.getLogger("cong-xi-fa-cai").warning(
+        "%s API HTTP %s",
+        provider,
+        status_code,
+    )
+    raise RuntimeError(f"{provider} API {status_code}")
 
 
 class CloudClient:
@@ -27,7 +58,26 @@ class CloudClient:
             model_name = CLOUD_MODELS.get(fallback_key)
             if not model_name:
                 raise ValueError(f"No fallback for {model_key}")
-            return await self._call_deepseek(model_name, messages, fallback_key, **kwargs)
+            try:
+                result = await self._call_deepseek(
+                    model_name,
+                    messages,
+                    fallback_key,
+                    **kwargs,
+                )
+            except Exception:
+                raise CloudRouteError(
+                    attempted_provider="DeepSeek",
+                    requested_provider="Qwen",
+                    model=model_name,
+                    fallback_reason="qwen_api_key_missing",
+                    degradation_reason="cloud_call_failed",
+                ) from None
+            return {
+                **result,
+                "requested_provider": "Qwen",
+                "fallback_reason": "qwen_api_key_missing",
+            }
 
         model_name = CLOUD_MODELS.get(model_key)
         if not model_name:
@@ -54,14 +104,13 @@ class CloudClient:
             headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
         )
         if resp.status_code != 200:
-            app_logger = __import__('logging').getLogger('cong-xi-fa-cai')
-            app_logger.warning(f"DeepSeek API {resp.status_code}: {resp.text[:200]}")
-            return {"content": json.dumps({"error": f"DeepSeek API {resp.status_code}"}, ensure_ascii=False), "model": model_name, "usage": {}}
+            _raise_api_error("DeepSeek", resp.status_code)
         data = resp.json()
         return {
             "content": data["choices"][0]["message"]["content"],
             "model": data.get("model", model_name),
             "usage": data.get("usage", {}),
+            "provider": "DeepSeek",
         }
 
     async def _call_qwen(self, model_name: str, messages: list[dict], **kwargs) -> dict:
@@ -79,14 +128,13 @@ class CloudClient:
             headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
         )
         if resp.status_code != 200:
-            app_logger = __import__('logging').getLogger('cong-xi-fa-cai')
-            app_logger.warning(f"Qwen API {resp.status_code}: {resp.text[:200]}")
-            return {"content": json.dumps({"error": f"Qwen API {resp.status_code}"}, ensure_ascii=False), "model": model_name, "usage": {}}
+            _raise_api_error("Qwen", resp.status_code)
         data = resp.json()
         return {
             "content": data["choices"][0]["message"]["content"],
             "model": data.get("model", model_name),
             "usage": data.get("usage", {}),
+            "provider": "Qwen",
         }
 
     async def analyze_research_report(self, report_text: str) -> dict:

@@ -1,8 +1,15 @@
 """腾讯财经 — 实时行情 (PE/PB/市值/换手率/涨跌停) + K线 + 搜索"""
 import httpx
 import re
+from datetime import datetime, time, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from app.data_sources.base import BaseDataSource
+from app.utils.market_instruments import resolve_tencent_market_instrument
+from app.utils.trading_calendar import is_trading_day, prev_trading_day
+
+
+CHINA_TZ = timezone(timedelta(hours=8))
+MAX_FRESH_QUOTE_AGE_SECONDS = 15 * 60
 
 
 class TencentDataSource(BaseDataSource):
@@ -12,26 +19,56 @@ class TencentDataSource(BaseDataSource):
         super().__init__("tencent")
 
     def _resolve_code(self, code: str) -> str:
-        """股票代码转腾讯格式: sh600000 / sz000001 / bj8xxxxx
-        已带前缀的代码直接返回 (如 sh000001 上证指数, sz399001 深证成指)
-        """
-        if code.startswith(("sh", "sz", "bj")):
-            return code
-        code = code.replace("sh", "").replace("sz", "").replace("bj", "")
-        if code.startswith(("6", "9")):
-            return f"sh{code}"
-        elif code.startswith("8"):
-            return f"bj{code}"
-        else:
-            return f"sz{code}"
+        """股票代码转腾讯格式: sh600000 / sz000001 / bj920001。"""
+        return resolve_tencent_market_instrument(code)
 
-    def _parse_one(self, line: str, raw_code: str) -> Optional[Dict[str, Any]]:
+    def _parse_one(
+        self,
+        line: str,
+        raw_code: str,
+        *,
+        captured_at: datetime | None = None,
+    ) -> Optional[Dict[str, Any]]:
         """解析单行腾讯行情数据"""
         if not line.strip() or "=" not in line or '"' not in line:
             return None
         vals = line.split('"')[1].split("~")
         if len(vals) < 53:
             return None
+        captured_at = captured_at or datetime.now(CHINA_TZ)
+        if captured_at.tzinfo is None:
+            captured_at = captured_at.replace(tzinfo=CHINA_TZ)
+        else:
+            captured_at = captured_at.astimezone(CHINA_TZ)
+        quote_time = None
+        raw_quote_time = vals[30].strip() if len(vals) > 30 else ""
+        if raw_quote_time:
+            try:
+                quote_time = datetime.strptime(raw_quote_time, "%Y%m%d%H%M%S").replace(tzinfo=CHINA_TZ)
+            except ValueError:
+                quote_time = None
+        freshness = "unknown"
+        if quote_time is not None:
+            age_seconds = (captured_at - quote_time).total_seconds()
+            if -60 <= age_seconds <= MAX_FRESH_QUOTE_AGE_SECONDS:
+                freshness = "fresh"
+            else:
+                captured_date = captured_at.date()
+                latest_completed_session = (
+                    captured_date
+                    if is_trading_day(captured_date) and captured_at.time() >= time(15, 0)
+                    else prev_trading_day(captured_date)
+                )
+                if (
+                    age_seconds > MAX_FRESH_QUOTE_AGE_SECONDS
+                    and quote_time.date() == latest_completed_session
+                    and quote_time.time() >= time(15, 0)
+                ):
+                    freshness = "valid_close"
+                elif age_seconds > MAX_FRESH_QUOTE_AGE_SECONDS:
+                    freshness = "stale"
+                else:
+                    freshness = "conflict"
         return {
             "code": raw_code,
             "name": vals[1],
@@ -54,6 +91,10 @@ class TencentDataSource(BaseDataSource):
             "vol_ratio": float(vals[49]) if vals[49] else 0,
             "pe_static": float(vals[52]) if vals[52] else 0,
             "source": "tencent",
+            "quote_timestamp": quote_time.isoformat() if quote_time else None,
+            "trading_date": quote_time.date().isoformat() if quote_time else None,
+            "captured_at": captured_at.isoformat(),
+            "freshness": freshness,
         }
 
     async def fetch(self, stock_code: str) -> Optional[Dict[str, Any]]:

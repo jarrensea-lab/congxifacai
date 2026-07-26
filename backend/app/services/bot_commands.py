@@ -1,17 +1,31 @@
 """机器人指令处理 — 接收飞书 Bot 消息，解析持仓/交易指令并更新数据库"""
 import re
 import json
+import hashlib
+import uuid
+from contextlib import nullcontext
 from datetime import datetime, date
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Optional, Dict, Any
 from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models import SimAccount, Position, TradeLog
 from app.trading_engine.position import PositionManager
-from app.services.portfolio_store import apply_trade_to_user_portfolio
+from app.services.portfolio_store import (
+    apply_trade_to_user_portfolio,
+    default_portfolio_path,
+    portfolio_transaction_lock,
+    restore_user_portfolio_if_unchanged,
+)
 from app.utils.logger import logger
 
 
-def process_message(text: str) -> Dict[str, Any]:
+def process_message(
+    text: str,
+    *,
+    source_event_id: str | None = None,
+    source: str = "bot_command",
+) -> Dict[str, Any]:
     """解析用户消息，执行持仓/交易操作
 
     支持的指令格式:
@@ -21,19 +35,47 @@ def process_message(text: str) -> Dict[str, Any]:
     4. 清仓: "清仓XXXX(名称)"
     """
     db = SessionLocal()
-    try:
-        result = _process(db, text)
-        db.commit()
-        return result
-    except Exception as e:
-        db.rollback()
-        logger.error(f"指令处理失败: {e}", exc_info=True)
-        return {"ok": False, "error": str(e), "action": "error"}
-    finally:
-        db.close()
+    portfolio_rollback = None
+    is_trade = bool(re.search(r"买入|卖出|清仓", text))
+    transaction_boundary = portfolio_transaction_lock() if is_trade else nullcontext()
+    with transaction_boundary:
+        try:
+            result = _process(
+                db,
+                text,
+                source_event_id=source_event_id,
+                source=source,
+            )
+            portfolio_rollback = result.pop("_portfolio_rollback", None)
+            db.commit()
+            return result
+        except Exception as e:
+            db.rollback()
+            if portfolio_rollback:
+                try:
+                    restore_result = restore_user_portfolio_if_unchanged(
+                        portfolio_rollback["path"],
+                        expected_fingerprint=portfolio_rollback["after_fingerprint"],
+                        replacement=portfolio_rollback["portfolio_before"],
+                    )
+                    if not restore_result.get("ok"):
+                        e = RuntimeError(f"{e}; portfolio rollback conflict")
+                except Exception as restore_error:
+                    logger.critical(f"回滚持仓审计文件失败: {restore_error}", exc_info=True)
+                    e = RuntimeError(f"{e}; portfolio rollback failed: {restore_error}")
+            logger.error(f"指令处理失败: {e}", exc_info=True)
+            return {"ok": False, "error": str(e), "action": "error"}
+        finally:
+            db.close()
 
 
-def _process(db: Session, text: str) -> Dict[str, Any]:
+def _process(
+    db: Session,
+    text: str,
+    *,
+    source_event_id: str | None = None,
+    source: str = "bot_command",
+) -> Dict[str, Any]:
     text = text.strip()
 
     # 模式1: 全量持仓更新 "目前总资产XXXX，可用现金XXXX，[日期]，[交易描述]"
@@ -56,7 +98,15 @@ def _process(db: Session, text: str) -> Dict[str, Any]:
             name = pos.stock_name if pos else code
         qty = int(buy_match.group(3))
         cost = float(buy_match.group(4))
-        return _execute_buy(db, code, name, qty, cost)
+        return _execute_buy(
+            db,
+            code,
+            name,
+            qty,
+            cost,
+            source_event_id=source_event_id,
+            source=source,
+        )
 
     # 模式3: 卖出 "卖出XXXX(名称) XX股，价格X.XXX"
     sell_match = re.search(r'卖出\s*(\d{6})\s*[（(]([^）)]+)[）)]?\s*(\d+)\s*股[,，]\s*价格\s*(\d+\.?\d*)', text)
@@ -65,14 +115,28 @@ def _process(db: Session, text: str) -> Dict[str, Any]:
         name = sell_match.group(2).strip()
         qty = int(sell_match.group(3))
         price = float(sell_match.group(4))
-        return _execute_sell(db, code, name, qty, price)
+        return _execute_sell(
+            db,
+            code,
+            name,
+            qty,
+            price,
+            source_event_id=source_event_id,
+            source=source,
+        )
 
     # 模式4: 清仓
     clear_match = re.search(r'清仓\s*(\d{6})\s*[（(]?([^）)]*)[）)]?', text)
     if clear_match:
         code = clear_match.group(1)
         name = clear_match.group(2).strip()
-        return _execute_clear(db, code, name)
+        return _execute_clear(
+            db,
+            code,
+            name,
+            source_event_id=source_event_id,
+            source=source,
+        )
 
         # 模式5: 持仓查询/更新
     if re.search(r'持仓', text):
@@ -187,9 +251,75 @@ def _update_account(db: Session, total: float, cash: float) -> Dict[str, Any]:
     }
 
 
-def _execute_buy(db: Session, code: str, name: str, qty: int, cost: float) -> Dict[str, Any]:
-    cost_fen = int(cost * 100)
-    amount_fen = cost_fen * qty
+def _bot_fill_id(
+    *,
+    source_event_id: str | None,
+    source: str,
+) -> str:
+    if not source_event_id:
+        return f"bot-{uuid.uuid4().hex}"
+    payload = json.dumps(
+        [source, source_event_id],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+    return f"bot-event-{digest}"
+
+
+def _apply_portfolio_fill_or_raise(
+    portfolio_path: str,
+    *args: Any,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    result = apply_trade_to_user_portfolio(portfolio_path, *args, **kwargs)
+    if not result.get("ok"):
+        raise RuntimeError(result.get("error", "portfolio write failed"))
+    return result
+
+
+def _price_and_amount_fen(price: float, quantity: int) -> tuple[int, int]:
+    price_decimal = Decimal(str(price))
+    price_fen = int(
+        (price_decimal * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    )
+    amount_fen = int(
+        (price_decimal * quantity * 100).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    return price_fen, amount_fen
+
+
+def _fee_fen(fees: float | int | None) -> int:
+    if fees is None:
+        return 0
+    return int(
+        (Decimal(str(fees)) * 100).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+
+def _execute_buy(
+    db: Session,
+    code: str,
+    name: str,
+    qty: int,
+    cost: float,
+    *,
+    source_event_id: str | None = None,
+    source: str = "bot_command",
+) -> Dict[str, Any]:
+    fill_id = _bot_fill_id(
+        source_event_id=source_event_id,
+        source=source,
+    )
+    portfolio_path = default_portfolio_path()
+    traded_at = datetime.now()
+    cost_fen, amount_fen = _price_and_amount_fen(cost, qty)
 
     pos = PositionManager.get_or_create(db, code, name)
     today_str = date.today().isoformat()
@@ -224,26 +354,100 @@ def _execute_buy(db: Session, code: str, name: str, qty: int, cost: float) -> Di
         order_id=0, stock_code=code, stock_name=name,
         direction='buy', price=cost_fen, quantity=qty,
         amount=amount_fen, fee=0,
-        strategy_name='manual', traded_at=datetime.now()
+        strategy_name='manual', traded_at=traded_at
     )
     db.add(log)
 
     logger.info(f"机器人指令-BUY: {name}({code}) {qty}股 @¥{cost:.3f} 金额¥{amount_fen/100:.2f}")
-    apply_trade_to_user_portfolio(None, "buy", code, name, qty, cost)
-    return {"ok": True, "action": "buy", "code": code, "name": name, "qty": qty, "cost": cost}
+    portfolio_result = _apply_portfolio_fill_or_raise(
+        portfolio_path,
+        "buy",
+        code,
+        name,
+        qty,
+        cost,
+        fill_id=fill_id,
+        source=source,
+        source_event_id=source_event_id,
+        occurred_at=traded_at.astimezone().isoformat(timespec="seconds"),
+        fees=None,
+    )
+    if portfolio_result.get("duplicate"):
+        db.rollback()
+        return {
+            "ok": True,
+            "duplicate": True,
+            "action": "buy",
+            "code": code,
+            "name": name,
+            "qty": qty,
+            "cost": cost,
+            "fill": portfolio_result.get("fill"),
+        }
+    return {
+        "ok": True,
+        "action": "buy",
+        "code": code,
+        "name": name,
+        "qty": qty,
+        "cost": cost,
+        "duplicate": portfolio_result.get("duplicate", False),
+        "fill": portfolio_result.get("fill"),
+        "_portfolio_rollback": {
+            "path": portfolio_path,
+            "portfolio_before": portfolio_result["_portfolio_before"],
+            "after_fingerprint": portfolio_result["portfolio_fingerprint"],
+        },
+    }
 
 
-def _execute_sell(db: Session, code: str, name: str, qty: int, price: float) -> Dict[str, Any]:
-    price_fen = int(price * 100)
+def _execute_sell(
+    db: Session,
+    code: str,
+    name: str,
+    qty: int,
+    price: float,
+    *,
+    source_event_id: str | None = None,
+    source: str = "bot_command",
+    fees: float | int | None = None,
+) -> Dict[str, Any]:
+    fill_id = _bot_fill_id(
+        source_event_id=source_event_id,
+        source=source,
+    )
+    portfolio_path = default_portfolio_path()
+    traded_at = datetime.now()
+    price_fen, requested_amount_fen = _price_and_amount_fen(price, qty)
     pos = db.query(Position).filter(Position.stock_code == code).first()
     if not pos or pos.quantity <= 0:
         return {"ok": False, "error": f"{code} 无持仓"}
 
-    sell_qty = min(qty, pos.quantity)
-    amount_fen = price_fen * sell_qty
-    pnl_fen = (price_fen - pos.avg_cost) * sell_qty
+    if qty > pos.quantity:
+        return {
+            "ok": False,
+            "error": f"requested shares {qty} exceeds held shares {pos.quantity}",
+        }
+    sell_qty = qty
+    amount_fen = requested_amount_fen
+    fee_fen = _fee_fen(fees)
+    pre_sell_quantity = pos.quantity
+    remaining_cost_before_sell = int(pos.total_buy_amount or 0)
+    if sell_qty == pre_sell_quantity:
+        allocated_cost_fen = remaining_cost_before_sell
+    else:
+        allocated_cost_fen = int(
+            (
+                Decimal(remaining_cost_before_sell)
+                * Decimal(sell_qty)
+                / Decimal(pre_sell_quantity)
+            ).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+        )
+    pnl_fen = amount_fen - allocated_cost_fen - fee_fen
 
     pos.quantity -= sell_qty
+    pos.total_buy_amount = remaining_cost_before_sell - allocated_cost_fen
+    pos.total_buy_qty = pos.quantity
     pos.realized_pnl = (pos.realized_pnl or 0) + pnl_fen
     pos.market_price = price_fen
     pos.market_value = pos.quantity * price_fen
@@ -255,37 +459,98 @@ def _execute_sell(db: Session, code: str, name: str, qty: int, price: float) -> 
         pos.total_buy_qty = 0
         pos.today_bought_qty = 0
     else:
-        pos.unrealized_pnl = pos.market_value - (pos.avg_cost * pos.quantity)
+        pos.avg_cost = int(
+            (Decimal(pos.total_buy_amount) / Decimal(pos.quantity)).quantize(
+                Decimal("1"),
+                rounding=ROUND_HALF_UP,
+            )
+        )
+        pos.unrealized_pnl = pos.market_value - pos.total_buy_amount
 
     pos.updated_at = datetime.now()
 
     # 增加现金
     acc = db.query(SimAccount).first()
     if acc:
-        acc.cash += amount_fen
+        acc.cash += amount_fen - fee_fen
         acc.updated_at = datetime.now()
 
     log = TradeLog(
         order_id=0, stock_code=code, stock_name=name,
         direction='sell', price=price_fen, quantity=-sell_qty,
-        amount=amount_fen, fee=0,
-        pnl=pnl_fen, strategy_name='manual', traded_at=datetime.now()
+        amount=amount_fen, fee=fee_fen,
+        pnl=pnl_fen, strategy_name='manual', traded_at=traded_at
     )
     db.add(log)
 
     logger.info(f"机器人指令-SELL: {name}({code}) {sell_qty}股 @¥{price:.2f} PnL=¥{pnl_fen/100:.2f}")
-    apply_trade_to_user_portfolio(None, "sell", code, name, sell_qty, price)
-    return {"ok": True, "action": "sell", "code": code, "name": name, "qty": sell_qty, "price": price, "pnl": round(pnl_fen/100, 2)}
+    portfolio_result = _apply_portfolio_fill_or_raise(
+        portfolio_path,
+        "sell",
+        code,
+        name,
+        sell_qty,
+        price,
+        fill_id=fill_id,
+        source=source,
+        source_event_id=source_event_id,
+        occurred_at=traded_at.astimezone().isoformat(timespec="seconds"),
+        fees=fees,
+    )
+    if portfolio_result.get("duplicate"):
+        db.rollback()
+        return {
+            "ok": True,
+            "duplicate": True,
+            "action": "sell",
+            "code": code,
+            "name": name,
+            "qty": portfolio_result.get("fill", {}).get("shares", sell_qty),
+            "price": portfolio_result.get("fill", {}).get("price", price),
+            "pnl": None,
+            "fill": portfolio_result.get("fill"),
+        }
+    return {
+        "ok": True,
+        "action": "sell",
+        "code": code,
+        "name": name,
+        "qty": sell_qty,
+        "price": price,
+        "pnl": round(pnl_fen/100, 2),
+        "duplicate": portfolio_result.get("duplicate", False),
+        "fill": portfolio_result.get("fill"),
+        "_portfolio_rollback": {
+            "path": portfolio_path,
+            "portfolio_before": portfolio_result["_portfolio_before"],
+            "after_fingerprint": portfolio_result["portfolio_fingerprint"],
+        },
+    }
 
 
-def _execute_clear(db: Session, code: str, name: str) -> Dict[str, Any]:
+def _execute_clear(
+    db: Session,
+    code: str,
+    name: str,
+    *,
+    source_event_id: str | None = None,
+    source: str = "bot_command",
+) -> Dict[str, Any]:
     pos = db.query(Position).filter(Position.stock_code == code).first()
     if not pos or pos.quantity <= 0:
         return {"ok": False, "error": f"{code} 无持仓"}
 
     qty = pos.quantity
     price = pos.market_price or pos.avg_cost
-    return _execute_sell(db, code, name or pos.stock_name, qty, price / 100)
+    return _execute_sell(
+        db,
+        code,
+        name or pos.stock_name,
+        qty,
+        price / 100,
+        source_event_id=source_event_id,
+        source=source,
+    )
 
 
 def check_and_process_new_messages() -> Optional[Dict]:
@@ -340,7 +605,11 @@ def check_and_process_new_messages() -> Optional[Dict]:
                 pass
             continue
 
-        result = process_message(text)
+        result = process_message(
+            text,
+            source_event_id=msg_id,
+            source="feishu_bridge",
+        )
 
         # 回复确认
         if result.get("ok"):

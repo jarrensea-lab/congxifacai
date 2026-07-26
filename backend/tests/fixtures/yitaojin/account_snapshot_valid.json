@@ -1,0 +1,30 @@
+{
+  "capturedAt": "2026-07-26T09:30:05+08:00",
+  "accountFingerprint": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "totalAssets": "4100.00",
+  "availableCash": "1000.00",
+  "frozenCash": "100.00",
+  "emptyPositionsConfirmed": false,
+  "positions": [
+    {
+      "code": "000001",
+      "name": "测试股份A",
+      "shares": 100,
+      "availableShares": 100,
+      "averageCost": "9.00",
+      "currentPrice": "10.00",
+      "marketValue": "1000.00",
+      "unrealizedPnl": "100.00"
+    },
+    {
+      "code": "300001",
+      "name": "测试股份B",
+      "shares": 100,
+      "availableShares": 0,
+      "averageCost": "19.00",
+      "currentPrice": "20.00",
+      "marketValue": "2000.00",
+      "unrealizedPnl": "100.00"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
-"""FastAPI 主应用 — V7: DeepSeek云端AI + 飞书全通道 + 定时调度"""
+"""FastAPI 主应用 — 多源研究、风控、报告与受控券商桥接。"""
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -10,7 +11,6 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.database import init_db, SessionLocal
@@ -40,17 +40,31 @@ from app.services.quant_lifecycle import (
     evaluate_position_watch,
     normalize_alert_level,
 )
-from app.services.evidence_ledger import (
-    build_sentinel_evidence_context,
-    upsert_sentinel_evidence_to_target_pool,
-)
 from app.services.schedule_policy import (
     schedule_reason,
     should_run_main_report,
     should_run_premarket_calibration,
 )
+from app.services.scheduler_service import (
+    SchedulerJobHandlers,
+    start_scheduler_service,
+)
 from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
+from app.services.market_data_health import (
+    EXPECTED_MARKET_INDEX_CODES,
+    aggregate_market_quote_truth,
+)
 from app.services.notification_gate import NotificationGate, build_alert_digest
+from app.services.sentinel_input_gate import (
+    inject_active_sentinel_evidence,
+    load_recent_sentinel_package,
+    sentinel_audit_only_message,
+)
+from app.services.visible_decision_gate import (
+    build_runtime_blocked_gate,
+    filter_alerts_by_visible_decision_gate,
+    load_runtime_visible_decision_gate,
+)
 
 # 报告引擎
 from app.report_engine.engine import report_engine
@@ -82,7 +96,7 @@ class FeishuNotifier:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("恭喜发财 V7 应用启动中...")
+    logger.info("恭喜发财 v8.2.0-dev 应用启动中...")
     init_db()
     logger.info("数据库初始化完成")
 
@@ -95,77 +109,25 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("飞书 Webhook 已配置")
 
-    # ============================================================
-    # V7.5-dev 定时任务注册（盈利策略管线 feature 分支）
-    # ============================================================
-    scheduler.add_job(
-        _run_premarket_with_status,
-        CronTrigger(hour=8, minute=50, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='premarket', name='盘前短策略校准', replace_existing=True,
-        misfire_grace_time=3600,  # 错过1小时内自动补跑
+    start_scheduler_service(
+        scheduler,
+        SchedulerJobHandlers(
+            premarket=_run_premarket_with_status,
+            midday=_run_midday_with_status,
+            afternoon=_run_afternoon_with_status,
+            intraday_alert_scan=_run_intraday_alert_scan_with_status,
+            review=_run_review_with_status,
+            prediction_lab=_run_prediction_lab_with_status,
+            sentinel_research=_run_sentinel_research_with_status,
+            main_report=_run_daily_report_with_status,
+            sentinel_review=_run_sentinel_review_with_status,
+            bot_poll=_poll_bot_messages,
+            yitaojin_morning=_run_yitaojin_morning_with_status,
+            yitaojin_quotes=_run_yitaojin_quotes_with_status,
+            yitaojin_evening=_run_yitaojin_evening_with_status,
+        ),
+        logger=logger,
     )
-    scheduler.add_job(
-        _run_midday_with_status,
-        CronTrigger(hour=11, minute=35, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='midday', name='午盘快速分析', replace_existing=True,
-        misfire_grace_time=2700,  # 错过45分钟内自动补跑
-    )
-    scheduler.add_job(
-        _run_afternoon_with_status,
-        CronTrigger(hour=14, minute=0, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='afternoon', name='午后风险检查', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_intraday_alert_scan_with_status,
-        CronTrigger(hour='9-11,13-14', minute='*/5', day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='intraday_alert_scan', name='盘中事件触发扫描', replace_existing=True,
-        misfire_grace_time=120,
-    )
-    scheduler.add_job(
-        _run_review_with_status,
-        CronTrigger(hour=15, minute=5, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='review', name='收盘复盘', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_prediction_lab_with_status,
-        CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='prediction_lab', name='预测账本采集与到期评估', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_daily_report_with_status,
-        CronTrigger(hour=20, minute=30, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='main_report', name='次日投资策略主报告', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_daily_report_with_status,
-        CronTrigger(hour=20, minute=30, day_of_week='sun', timezone='Asia/Shanghai'),
-        id='sunday_main_report', name='周日晚次日投资策略主报告', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_sentinel_review_with_status,
-        CronTrigger(hour=21, minute=0, timezone='Asia/Shanghai'),
-        id='sentinel_review', name='Sentinel绩效回看与归档', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _poll_bot_messages,
-        'interval', seconds=30,
-        id='bot_poll', name='飞书Bot消息轮询', replace_existing=True,
-    )
-
-    scheduler.start()
-    for stale_job_id in ("daily_report",):
-        try:
-            scheduler.remove_job(stale_job_id)
-            logger.info(f"已清理旧调度任务: {stale_job_id}")
-        except Exception:
-            pass
-    logger.info("旺财V7.5-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中5分钟事件扫描 + 预测账本 + 盘中/收盘 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -180,10 +142,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
-    description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
+    description="A 股研究、风控、报告与受控券商桥接系统",
     version="8.2.0-dev",
     lifespan=lifespan,
 )
+
+
+@app.get("/api/integrations/yitaojin/status")
+async def get_yitaojin_runtime_status():
+    """Expose sanitized broker integration health without account material."""
+    from app.config import resolve_runtime_yitaojin_paths
+    from app.integrations.yitaojin.runtime import load_yitaojin_runtime_status
+
+    paths = resolve_runtime_yitaojin_paths()
+    return load_yitaojin_runtime_status(paths.runtime_status)
 
 # ============================================================
 # 共享实例初始化
@@ -239,9 +211,11 @@ generation_status = {
 
 def _get_holdings_data(db: Session) -> dict:
     """从 Position 表获取持仓数据，用于分析引擎和规划引擎。"""
+    portfolio_sync_failed = False
     try:
         sync_db_from_user_portfolio(db)
     except Exception as e:
+        portfolio_sync_failed = True
         logger.warning(f"用户持仓JSON同步到数据库失败，继续使用数据库现状: {e}")
 
     positions = db.query(Position).filter(Position.quantity > 0).all()
@@ -269,6 +243,7 @@ def _get_holdings_data(db: Session) -> dict:
         "total_cost": round(total_cost, 2),
         "available_cash": round(available_cash, 2),
         "total_assets": round(total_assets, 2),
+        "portfolio_sync_failed": portfolio_sync_failed,
     }
 
 strategy.init_strategy_router(debate_engine, feishu, tencent_client, market_client, news_client,
@@ -284,21 +259,41 @@ app.include_router(strategy.router)
 
 async def _fetch_market_data() -> dict:
     """通过 DataRouter 拉取市场数据（多源容错）"""
-    indices = {}
-    for code in ["sh000001", "sz399001", "sz399006"]:
+    expected_codes = list(EXPECTED_MARKET_INDEX_CODES)
+    aggregation_time = datetime.now().astimezone()
+    primary_quotes = {}
+    for code in expected_codes:
         try:
-            result = await data_router.fetch(code)
-            if result and result.get("price"):
-                indices[code] = {"price": result["price"], "change_pct": result.get("change_pct", 0)}
+            primary_quotes[code] = await data_router.fetch(code)
         except Exception:
-            continue
-    if not indices:
+            primary_quotes[code] = None
+    aggregate = aggregate_market_quote_truth(
+        primary_quotes,
+        expected_codes,
+        default_provider="data_router",
+        now=aggregation_time,
+    )
+    if not aggregate["quotes"]:
         try:
-            batch = await tencent_client.fetch_batch(["sh000001", "sz399001"])
-            for k, v in batch.items():
-                indices[k] = {"price": v.get("price", 0), "change_pct": v.get("change_pct", 0)}
+            fallback_quotes = await tencent_client.fetch_batch(expected_codes)
         except Exception:
-            indices = {"sh000001": {"price": 3350, "change_pct": 0}, "sz399001": {"price": 10800, "change_pct": 0}}
+            fallback_quotes = {}
+        aggregate = aggregate_market_quote_truth(
+            fallback_quotes,
+            expected_codes,
+            default_provider="data_router+tencent",
+            now=aggregation_time,
+        )
+
+    verified_quotes = aggregate["quotes"]
+    indices = {
+        code: {
+            "price": quote["price"],
+            "change_pct": quote.get("change_pct", 0),
+        }
+        for code, quote in verified_quotes.items()
+    }
+    market_source_status = aggregate["market_source_status"]
 
     db = SessionLocal()
     try:
@@ -309,7 +304,34 @@ async def _fetch_market_data() -> dict:
     return {"indices": indices, "sectors": [], "holdings": hd["holdings"],
             "holdings_str": hd["holdings_str"], "news": [],
             "available_cash": hd.get("available_cash", 0),
-            "total_assets": hd.get("total_assets", 0)}
+            "total_assets": hd.get("total_assets", 0),
+            "portfolio_sync_failed": hd.get("portfolio_sync_failed", False),
+            "market_source_status": market_source_status}
+
+
+def _apply_premarket_sentinel_input(
+    package: dict | None,
+    report_date: str,
+    market_data: dict,
+) -> dict[str, object]:
+    """Apply the shared Sentinel gate at the backend premarket entry."""
+    return inject_active_sentinel_evidence(
+        package,
+        report_date,
+        market_data,
+    )
+
+
+def _load_premarket_sentinel_package(
+    report_date: str,
+    *,
+    output_root=None,
+):
+    """Load a backend premarket package through the shared lookback policy."""
+    return load_recent_sentinel_package(
+        report_date,
+        output_root=output_root,
+    )
 
 
 def _decision_recommendations(decision: dict) -> list[dict]:
@@ -352,6 +374,17 @@ def persist_premarket_recommendations(
 notification_gate = NotificationGate()
 
 
+def _filter_candidate_alerts_by_visible_gate(
+    alerts: list[dict],
+    *,
+    today: date | None = None,
+    gate_path: str | Path | None = None,
+    entry_gate: dict | None = None,
+) -> list[dict]:
+    gate = entry_gate or load_runtime_visible_decision_gate(path=gate_path, today=today)
+    return filter_alerts_by_visible_decision_gate(alerts, gate)
+
+
 def _format_lifecycle_alerts(alerts: list[dict]) -> str:
     return build_alert_digest(alerts, title="候选池/持仓生命周期提醒")
 
@@ -372,7 +405,15 @@ async def _scan_candidate_pool_and_push(
     available_cash: float,
     total_assets: float = 0,
     positions: dict[str, dict] | None = None,
+    entry_gate: dict | None = None,
 ) -> dict:
+    effective_entry_gate = entry_gate or load_runtime_visible_decision_gate()
+    effective_entry_gate, quote_validations = (
+        _runtime_quote_gate_and_validations(
+            effective_entry_gate,
+            positions=positions,
+        )
+    )
     try:
         result = await evaluate_candidate_pool(
             CandidatePoolStore(),
@@ -380,21 +421,110 @@ async def _scan_candidate_pool_and_push(
             available_cash=float(available_cash or 0),
             total_assets=float(total_assets or 0),
             positions=positions,
+            entry_gate=effective_entry_gate,
+            quote_validations=quote_validations,
         )
     except Exception as exc:
         logger.warning(f"{stage}候选池扫描失败: {exc}")
         return {"scanned": 0, "alerts": [], "error": str(exc)}
 
     alerts = result.get("alerts", [])
-    deliverable_alerts = notification_gate.filter_alerts(alerts, stage=stage)
+    gate_eligible_alerts = _filter_candidate_alerts_by_visible_gate(
+        alerts,
+        entry_gate=effective_entry_gate,
+    )
+    deliverable_alerts = notification_gate.filter_alerts(gate_eligible_alerts, stage=stage)
     if deliverable_alerts:
         title = f"旺财V7.5 候选池提醒 - {stage}"
         _feishu_webhook_push(title, _format_lifecycle_alerts(deliverable_alerts))
     logger.info(
         f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} "
-        f"alerts={len(alerts)} delivered={len(deliverable_alerts)}"
+        f"alerts={len(alerts)} gate_eligible={len(gate_eligible_alerts)} "
+        f"delivered={len(deliverable_alerts)}"
     )
-    return result
+    return {
+        **result,
+        "alerts": gate_eligible_alerts,
+        "raw_alert_count": len(alerts),
+        "visible_gate_blocked_count": len(alerts) - len(gate_eligible_alerts),
+    }
+
+
+def _runtime_quote_gate_and_validations(
+    entry_gate: dict,
+    *,
+    positions: dict[str, dict] | None,
+    quote_summary: dict | None = None,
+) -> tuple[dict, dict | None]:
+    """Use live per-code quotes while preserving every non-quote decision veto."""
+    if quote_summary is None:
+        try:
+            from app.config import resolve_runtime_yitaojin_paths
+            from app.integrations.yitaojin.quotes import (
+                load_quote_validation_summary,
+            )
+
+            paths = resolve_runtime_yitaojin_paths()
+            try:
+                raw = json.loads(
+                    paths.quote_snapshot.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+            requested_codes = (
+                {
+                    str(code)
+                    for code in raw.get("requested_codes", [])
+                    if isinstance(code, str)
+                }
+                if isinstance(raw, dict)
+                else set()
+            )
+            held_codes = set(positions or {})
+            quote_summary = load_quote_validation_summary(
+                paths.quote_snapshot,
+                critical_codes=requested_codes - held_codes,
+            )
+        except Exception:
+            quote_summary = {
+                "enabled": (
+                    os.getenv("CONGXI_YITAOJIN_ENABLED", "")
+                    .strip()
+                    .lower()
+                    == "true"
+                ),
+                "status": "unavailable",
+                "validations": {},
+                "reasons": ["quote_snapshot_unavailable"],
+            }
+    current_reasons = list(entry_gate.get("reasons") or [])
+    quote_enabled = (
+        isinstance(quote_summary, dict)
+        and quote_summary.get("enabled") is True
+    )
+    if not quote_enabled and "quote_validation_blocked" not in current_reasons:
+        return entry_gate, None
+
+    runtime_gate = dict(entry_gate)
+    reasons = [
+        reason
+        for reason in current_reasons
+        if reason != "quote_validation_blocked"
+    ]
+    runtime_gate["reasons"] = reasons
+    runtime_gate["entry_allowed"] = not reasons
+    runtime_gate["state"] = "allowed" if not reasons else "blocked"
+    if not quote_enabled:
+        if isinstance(quote_summary, dict):
+            runtime_gate["quote_validation"] = dict(quote_summary)
+        return runtime_gate, None
+
+    runtime_gate["quote_validation"] = dict(quote_summary)
+    validations = quote_summary.get("validations")
+    return (
+        runtime_gate,
+        dict(validations) if isinstance(validations, dict) else {},
+    )
 
 
 def _in_intraday_alert_window(now: datetime | None = None) -> bool:
@@ -418,14 +548,19 @@ async def _run_intraday_alert_scan_with_status():
         return
     gs["running"] = True
     gs["started_at"] = str(datetime.now())
+    yitaojin_quote_task = asyncio.create_task(
+        _run_yitaojin_quotes_with_status("intraday_quotes")
+    )
     try:
         logger.info("--- 盘中事件触发扫描 ---")
         db = SessionLocal()
         try:
+            candidate_entry_gate = None
             try:
                 sync_db_from_user_portfolio(db)
             except Exception as exc:
                 logger.warning(f"盘中事件扫描持仓同步失败，继续使用数据库现状: {exc}")
+                candidate_entry_gate = build_runtime_blocked_gate("portfolio_sync_failed")
             positions = db.query(Position).filter(Position.quantity > 0).all()
             codes = [p.stock_code for p in positions if p.stock_code]
             position_quotes = await TencentDataSource().fetch_batch(codes) if codes else {}
@@ -447,6 +582,13 @@ async def _run_intraday_alert_scan_with_status():
             if deliverable_watch_alerts:
                 _feishu_webhook_push("旺财V7.5 盘中持仓触发", _format_lifecycle_alerts(deliverable_watch_alerts))
 
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(yitaojin_quote_task),
+                    timeout=50,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("盘中易淘金行情校验超时，候选入场将失败关闭")
             acc = db.query(SimAccount).first()
             cash, total_assets = _account_cash_and_total(acc)
             lifecycle_result = await _scan_candidate_pool_and_push(
@@ -454,6 +596,7 @@ async def _run_intraday_alert_scan_with_status():
                 cash,
                 total_assets,
                 positions=_positions_map(positions),
+                entry_gate=candidate_entry_gate,
             )
             logger.info(
                 "盘中事件扫描完成: "
@@ -533,22 +676,39 @@ async def _run_premarket_with_status():
         logger.info("=== 旺财V7 盘前任务启动 ===")
         market_data = await _fetch_market_data()
         try:
-            from app.ai.sentinel_research import load_research_package
-
-            sentinel_package = load_research_package(str(date.today()))
-            if sentinel_package:
-                market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
-                ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+            sentinel_report_date = str(date.today())
+            sentinel_package = _load_premarket_sentinel_package(
+                sentinel_report_date
+            )
+            sentinel_decision = _apply_premarket_sentinel_input(
+                sentinel_package,
+                sentinel_report_date,
+                market_data,
+            )
+            if sentinel_decision["active"] is True:
+                ingest_result = sentinel_decision.get("ingest_result") or {}
                 logger.info(
                     "Sentinel evidence 已进入盘前输入: "
                     f"evidence={ingest_result.get('evidence_count', 0)} "
                     f"targets={ingest_result.get('upserted_targets', 0)}"
                 )
+            elif sentinel_package:
+                logger.warning(
+                    "Sentinel evidence 仅归档: "
+                    f"{sentinel_audit_only_message(sentinel_decision)}"
+                )
         except Exception as exc:
             logger.warning(f"Sentinel evidence 盘前接入失败，降级继续: {exc}")
-        sh = market_data["indices"].get("sh000001", {}).get("price", 3350)
-        sz = market_data["indices"].get("sz399001", {}).get("price", 10800)
-        logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")
+        sh = market_data["indices"].get("sh000001", {}).get("price")
+        sz = market_data["indices"].get("sz399001", {}).get("price")
+        market_status = market_data.get("market_source_status", {}).get("status")
+        if market_status == "ok" and sh and sz:
+            logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")
+        else:
+            logger.warning(
+                f"盘前指数不完整或不可用({market_status or 'failed'})，"
+                "禁止使用固定占位值"
+            )
 
         report = await run_analysis(market_data)
         logger.info("分析完成，启动AI辩论...")
@@ -637,10 +797,14 @@ async def _run_midday_with_status():
 
         holdings = market_data.get("holdings", [])
         if not holdings:
+            candidate_entry_gate = None
+            if market_data.get("portfolio_sync_failed"):
+                candidate_entry_gate = build_runtime_blocked_gate("portfolio_sync_failed")
             lifecycle_result = await _scan_candidate_pool_and_push(
                 "午盘",
                 market_data.get("available_cash", 0),
                 market_data.get("total_assets", market_data.get("total_value", 0)),
+                entry_gate=candidate_entry_gate,
             )
             alert_count = len(lifecycle_result.get("alerts", []))
             tip = "候选池已触发提醒，请按飞书卡片人工复核。" if alert_count else "候选池暂无可执行触发，继续观察。"
@@ -703,6 +867,12 @@ async def _run_afternoon_with_status():
         logger.info("--- 午后风险检查(MonitorService) ---")
         db = SessionLocal()
         try:
+            candidate_entry_gate = None
+            try:
+                sync_db_from_user_portfolio(db)
+            except Exception as exc:
+                logger.warning(f"午后风险检查持仓同步失败，继续使用数据库现状: {exc}")
+                candidate_entry_gate = build_runtime_blocked_gate("portfolio_sync_failed")
             positions = db.query(Position).filter(Position.quantity > 0).all()
             today_str = str(date.today())
 
@@ -711,7 +881,12 @@ async def _run_afternoon_with_status():
                 logger.info("空仓：推送精简午后检查")
                 acc = db.query(SimAccount).first()
                 cash, total_assets = _account_cash_and_total(acc)
-                lifecycle_result = await _scan_candidate_pool_and_push("午后", cash, total_assets)
+                lifecycle_result = await _scan_candidate_pool_and_push(
+                    "午后",
+                    cash,
+                    total_assets,
+                    entry_gate=candidate_entry_gate,
+                )
                 lifecycle_alerts = lifecycle_result.get("alerts", [])
                 await report_engine.push_afternoon_risk(
                     date=today_str,
@@ -795,6 +970,7 @@ async def _run_afternoon_with_status():
                 cash,
                 total_assets,
                 positions=_positions_map(positions),
+                entry_gate=candidate_entry_gate,
             )
             lifecycle_alerts = lifecycle_result.get("alerts", [])
 
@@ -867,7 +1043,7 @@ async def _run_review_with_status():
         try:
             db_review = SessionLocal()
             try:
-                DebateTracker.fill_pending(db_review)
+                await DebateTracker.fill_pending(db_review)
             finally:
                 db_review.close()
         except Exception as e:
@@ -898,6 +1074,99 @@ async def _run_daily_report_with_status():
         logger.error(f"次日投资策略主报告异常: {e}", exc_info=True)
 
 
+async def _run_yitaojin_task_with_status(task: str) -> dict:
+    """Run one isolated broker task; failures never abort reports or risk scans."""
+    try:
+        from app.integrations.yitaojin.runtime import run_yitaojin_task
+
+        result = await run_yitaojin_task(task)
+        state = result.get("state", "unknown")
+        if state == "failed":
+            logger.warning(
+                "易淘金任务失败: "
+                f"task={task} reason={result.get('last_failure_reason', 'unknown')}"
+            )
+        else:
+            logger.info(f"易淘金任务完成: task={task} state={state}")
+        return result
+    except Exception as exc:
+        logger.error(
+            f"易淘金任务包装器异常: task={task} type={exc.__class__.__name__}",
+            exc_info=True,
+        )
+        return {
+            "enabled": bool(getattr(settings, "CONGXI_YITAOJIN_ENABLED", False)),
+            "state": "failed",
+            "task": task,
+            "last_failure_reason": exc.__class__.__name__,
+        }
+
+
+async def _run_yitaojin_morning_with_status():
+    return await _run_yitaojin_task_with_status("morning")
+
+
+async def _run_yitaojin_evening_with_status():
+    return await _run_yitaojin_task_with_status("evening")
+
+
+async def _run_yitaojin_quotes_with_status(task: str = "priority_quotes"):
+    return await _run_yitaojin_task_with_status(task)
+
+
+async def _run_sentinel_research_with_status():
+    """Build the current Sentinel research package and Serenity deep dives."""
+    try:
+        import subprocess
+        import sys
+        from app.config import PROJECT_ROOT
+
+        project_root = f"{PROJECT_ROOT}/.."
+        script_path = f"{project_root}/scripts/run_sentinel.py"
+        report_date = str(date.today())
+        logger.info("=== Sentinel研究包与Serenity深挖启动 ===")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [sys.executable, script_path, "--date", report_date, "--mode", "news"],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            timeout=180,
+        )
+        detail = (result.stderr or result.stdout or "")[:800]
+        if result.returncode == 0:
+            logger.info(
+                f"Sentinel研究包与Serenity深挖完成: {result.stdout[:800]}"
+            )
+            return {
+                "state": "completed",
+                "returncode": 0,
+                "detail": detail,
+            }
+        if result.returncode == 2:
+            logger.warning(
+                f"Sentinel研究包与Serenity深挖降级: {detail}"
+            )
+            return {
+                "state": "degraded",
+                "returncode": 2,
+                "detail": detail,
+            }
+        logger.error(f"Sentinel研究包与Serenity深挖失败: {detail}")
+        return {
+            "state": "failed",
+            "returncode": result.returncode,
+            "detail": detail,
+        }
+    except Exception as e:
+        logger.error(f"Sentinel研究包与Serenity深挖异常: {e}", exc_info=True)
+        return {
+            "state": "failed",
+            "returncode": 1,
+            "detail": e.__class__.__name__,
+        }
+
+
 async def _run_sentinel_review_with_status():
     """Sentinel role-performance review and archive job."""
     try:
@@ -926,7 +1195,7 @@ async def _run_sentinel_review_with_status():
 
 
 async def _run_prediction_lab_with_status():
-    """Collect prediction samples and evaluate recently due horizons."""
+    """Collect prediction samples, then backfill the derived due queue once."""
     if not is_trading_day():
         return
     try:
@@ -962,30 +1231,26 @@ async def _run_prediction_lab_with_status():
         else:
             logger.info(f"预测账本采集完成: {collect.stdout[:800]}")
 
-        for offset in range(1, 11):
-            prediction_date = str(today - timedelta(days=offset))
-            result = await asyncio.to_thread(
-                subprocess.run,
-                [
-                    sys.executable,
-                    script_path,
-                    "evaluate",
-                    "--date",
-                    prediction_date,
-                    "--as-of",
-                    report_date,
-                    "--limit",
-                    "600",
-                ],
-                cwd=project_root,
-                text=True,
-                capture_output=True,
-                timeout=300,
-            )
-            if result.returncode == 0:
-                logger.info(f"预测账本到期评估完成 {prediction_date}: {result.stdout[:500]}")
-            else:
-                logger.debug(f"预测账本到期评估跳过 {prediction_date}: {result.stderr[:300]}")
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [
+                sys.executable,
+                script_path,
+                "backfill",
+                "--as-of",
+                report_date,
+                "--limit",
+                "600",
+            ],
+            cwd=project_root,
+            text=True,
+            capture_output=True,
+            timeout=300,
+        )
+        if result.returncode == 0:
+            logger.info(f"预测账本 due queue 补跑完成: {result.stdout[:500]}")
+        else:
+            logger.warning(f"预测账本 due queue 补跑失败: {result.stderr[:500]}")
     except Exception as e:
         logger.error(f"预测账本任务异常: {e}", exc_info=True)
 

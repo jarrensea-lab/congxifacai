@@ -5,11 +5,14 @@ from time import monotonic
 from typing import Any
 
 from app.data_sources.base import BaseDataSource
+from app.utils.a_share_codes import (
+    a_share_exchange,
+    normalize_a_share_code,
+)
 
 
 def _market_prefix(code: str) -> str:
-    clean = str(code or "").replace("sh", "").replace("sz", "").replace("bj", "")
-    return "1" if clean.startswith(("6", "9")) else "0"
+    return "1" if a_share_exchange(code) == "SH" else "0"
 
 
 def _klt(period: str) -> str:
@@ -72,8 +75,9 @@ class ScraplingRealtimeKlineSource(BaseDataSource):
         return await self.fetch_kline(stock_code, period="1", count=5)
 
     async def fetch_kline(self, stock_code: str, period: str = "1", count: int = 120) -> dict[str, Any]:
-        clean = str(stock_code or "").replace("sh", "").replace("sz", "").replace("bj", "")
-        if not clean:
+        try:
+            clean = normalize_a_share_code(stock_code)
+        except ValueError:
             return {"code": stock_code, "period": period, "bars": [], "source": self.name}
         now = monotonic()
         if self._circuit_open_until > now:

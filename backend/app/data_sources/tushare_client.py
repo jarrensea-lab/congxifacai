@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 import tushare as ts
 from app.data_sources.base import BaseDataSource
+from app.utils.a_share_codes import ts_code
 from app.utils.logger import logger
 
 
@@ -231,10 +232,4 @@ class TushareDataSource(BaseDataSource):
 
     def _to_ts_code(self, code: str) -> str:
         """转成 Tushare 格式: 000001 → 000001.SZ, 600000 → 600000.SH"""
-        code = code.replace("sh", "").replace("sz", "").replace("bj", "")
-        if code.startswith(("6", "9")):
-            return f"{code}.SH"
-        elif code.startswith("8"):
-            return f"{code}.BJ"
-        else:
-            return f"{code}.SZ"
+        return ts_code(code)

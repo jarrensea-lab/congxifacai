@@ -69,6 +69,12 @@ frontend/dist/
 # Test cache
 .pytest_cache/
 
+# Swift Package Manager build artifacts
+.build/
+
+# Local isolated feature worktrees
+.worktrees/
+
 # Tmp charts
 /tmp/恭喜发财_charts/
 

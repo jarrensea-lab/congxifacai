@@ -8,6 +8,7 @@ from app.models import AIStrategy, StrategyInstance, ReviewLog, RiskAlert
 from app.engine.lifecycle import StrategyLifecycle
 from app.engine.analysis import run_analysis
 from app.engine.workshop import run_debate, ask_role, RISK_LEVELS
+from app.services.market_data_health import fetch_market_index_snapshot
 from app.utils.logger import logger
 
 # 从主应用注入的共享实例
@@ -149,12 +150,15 @@ async def trigger_analysis():
     try:
         instance = lifecycle.create_instance()
         hd = _get_holdings_data_fn(lifecycle.db)
+        market_snapshot = await fetch_market_index_snapshot()
         market_data = {
-            "indices": {"shanghai": 3350.0, "shenzhen": 10800.0},
+            **market_snapshot,
             "sectors": [],
             "holdings": hd["holdings"],
             "holdings_str": hd["holdings_str"],
             "news": [],
+            "available_cash": hd.get("available_cash", 0),
+            "total_assets": hd.get("total_assets", 0),
         }
         logger.info(f"手动分析: {len(hd['holdings'])} 支持仓, 可用资金 ¥{hd['available_cash']:.2f}")
         report = await run_analysis(market_data)

@@ -1,10 +1,12 @@
 """AKShare 市场数据源 — 资金流向 + 行业板块 + 龙虎榜 + 沪深港通"""
 import asyncio
 import os
+import time
 from datetime import datetime, timedelta
 from typing import List, Optional
 
 AKSHARE_CALL_TIMEOUT_SECONDS = float(os.getenv("CONGXI_AKSHARE_TIMEOUT_SECONDS", "120"))
+AKSHARE_CACHE_TTL_SECONDS = float(os.getenv("CONGXI_AKSHARE_CACHE_TTL_SECONDS", "300"))
 
 
 def _normalize_stock_code(value) -> str:
@@ -29,6 +31,20 @@ class AKShareMarketClient:
     - stock_zh_index_spot_sina: 主要指数行情
     """
 
+    def __init__(self):
+        self._fund_flow_individual_cache: Optional[list] = None
+        self._fund_flow_individual_cached_at: float | None = None
+        self._hsgt_flow_cache: Optional[list] = None
+        self._hsgt_flow_cached_at: float | None = None
+
+    @staticmethod
+    def _cache_valid(cached_at: float | None) -> bool:
+        return (
+            cached_at is not None
+            and AKSHARE_CACHE_TTL_SECONDS > 0
+            and time.monotonic() - cached_at < AKSHARE_CACHE_TTL_SECONDS
+        )
+
     async def _call_async(self, fn, *args, **kwargs):
         try:
             return await asyncio.wait_for(
@@ -42,6 +58,10 @@ class AKShareMarketClient:
 
     async def fetch_fund_flow_individual(self) -> Optional[list]:
         """获取全市场个股资金流向 (同花顺)"""
+        if self._fund_flow_individual_cache is not None and self._cache_valid(
+            self._fund_flow_individual_cached_at
+        ):
+            return self._fund_flow_individual_cache
         try:
             import akshare as ak
             df = await self._call_async(ak.stock_fund_flow_individual, '即时')
@@ -54,6 +74,8 @@ class AKShareMarketClient:
                 inflow = str(row.get('流入资金', ''))
                 outflow = str(row.get('流出资金', ''))
                 net = str(row.get('净额', ''))
+                latest_price = str(row.get('最新价', ''))
+                amount = str(row.get('成交额', ''))
                 change_pct = str(row.get('涨跌幅', ''))
                 turnover = str(row.get('换手率', ''))
                 if not code or code == 'nan':
@@ -61,8 +83,11 @@ class AKShareMarketClient:
                 results.append({
                     'code': code, 'name': name, 'inflow': inflow,
                     'outflow': outflow, 'net': net, 'change_pct': change_pct,
-                    'turnover': turnover,
+                    'turnover': turnover, 'latest_price': latest_price,
+                    'amount': amount,
                 })
+            self._fund_flow_individual_cache = results
+            self._fund_flow_individual_cached_at = time.monotonic()
             return results
         except Exception:
             return None
@@ -183,6 +208,8 @@ class AKShareMarketClient:
 
     async def fetch_hsgt_flow(self) -> Optional[list]:
         """获取沪深港通资金流向"""
+        if self._hsgt_flow_cache is not None and self._cache_valid(self._hsgt_flow_cached_at):
+            return self._hsgt_flow_cache
         try:
             import akshare as ak
             df = await self._call_async(ak.stock_hsgt_fund_flow_summary_em)
@@ -198,6 +225,8 @@ class AKShareMarketClient:
                     'net': str(row.get('成交净买额', '')),
                     'balance': str(row.get('当日资金余额', '')),
                 })
+            self._hsgt_flow_cache = results
+            self._hsgt_flow_cached_at = time.monotonic()
             return results
         except Exception:
             return None

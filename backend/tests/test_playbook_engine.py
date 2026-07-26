@@ -1,12 +1,22 @@
+import pytest
+
 from app.services.playbook_engine import select_playbook
+
+
+def twenty_structural_bars(*, high=4.2, low=3.6):
+    return [
+        {"open": 3.8, "close": 3.9, "high": high, "low": low}
+        for _ in range(20)
+    ]
 
 
 def test_select_playbook_prefers_breakout_when_volume_confirms():
     result = select_playbook(
         {
-            "quote": {"price": 3.2, "change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000},
-            "kline": {"bars": []},
+            "quote": {"price": 4.2, "change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000},
+            "kline": {"bars": twenty_structural_bars()},
             "fund_flow": {"net": "净流入"},
+            "trigger_price": 4.0,
         }
     )
 
@@ -15,9 +25,82 @@ def test_select_playbook_prefers_breakout_when_volume_confirms():
     assert result["score_bonus"] == 0
 
 
+def test_breakout_requires_price_to_reach_historical_resistance():
+    result = select_playbook(
+        {
+            "quote": {"price": 3.97, "change_pct": 3.39, "vol_ratio": 3.33, "amount_wan": 32688},
+            "kline": {"bars": twenty_structural_bars(high=4.2, low=3.6)},
+            "trigger_price": 3.8,
+        }
+    )
+
+    assert result["triggered"] is False
+    assert result["block_reason"] == "breakout_resistance_not_crossed"
+    assert "达到或越过" in result["next_signal"]
+
+
+@pytest.mark.parametrize("bars", [[{} for _ in range(20)], [None for _ in range(20)]])
+def test_breakout_fails_closed_without_twenty_valid_ohlc_bars(bars):
+    result = select_playbook(
+        {
+            "quote": {"price": 4.2, "change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000},
+            "kline": {"bars": bars},
+            "trigger_price": 4.0,
+        }
+    )
+
+    assert result["triggered"] is False
+    assert result["block_reason"] == "breakout_kline_insufficient"
+
+
+@pytest.mark.parametrize("trigger_price", [None, 0, "0", "invalid"])
+def test_breakout_fails_closed_without_valid_positive_trigger(trigger_price):
+    result = select_playbook(
+        {
+            "quote": {"price": 4.2, "change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000},
+            "kline": {"bars": twenty_structural_bars()},
+            "trigger_price": trigger_price,
+        }
+    )
+
+    assert result["triggered"] is False
+    assert result["block_reason"] == "breakout_trigger_invalid"
+
+
+def test_breakout_fails_closed_without_twenty_bars():
+    result = select_playbook(
+        {
+            "quote": {"price": 3.97, "change_pct": 3.39, "vol_ratio": 3.33, "amount_wan": 32688},
+            "kline": {"bars": []},
+            "trigger_price": 4.52,
+        }
+    )
+
+    assert result["triggered"] is False
+    assert result["block_reason"] == "breakout_kline_insufficient"
+
+
+def test_breakout_fails_closed_below_configured_trigger():
+    result = select_playbook(
+        {
+            "quote": {"price": 3.97, "change_pct": 3.39, "vol_ratio": 3.33, "amount_wan": 32688},
+            "kline": {"bars": twenty_structural_bars()},
+            "trigger_price": 4.52,
+        }
+    )
+
+    assert result["triggered"] is False
+    assert result["block_reason"] == "breakout_trigger_not_crossed"
+
+
 def test_select_playbook_blocks_high_position_breakout_until_pullback():
     bars = [
-        {"close": 6.0 + idx * 0.04, "high": 6.05 + idx * 0.04, "low": 5.95 + idx * 0.04}
+        {
+            "open": 6.0 + idx * 0.05,
+            "close": 6.0 + idx * 0.05,
+            "high": 6.05 + idx * 0.05,
+            "low": 5.95 + idx * 0.05,
+        }
         for idx in range(20)
     ]
 
@@ -26,6 +109,7 @@ def test_select_playbook_blocks_high_position_breakout_until_pullback():
             "quote": {"price": 6.82, "change_pct": 4.2, "vol_ratio": 2.6, "amount_wan": 18000},
             "kline": {"bars": bars},
             "fund_flow": {"net": "净流入"},
+            "trigger_price": 6.8,
         }
     )
 
