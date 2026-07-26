@@ -51,6 +51,12 @@ def test_long_thesis_empty_state_and_unknown_are_distinct_in_code_and_docs():
         assert "`unknown` 表示已有上下文但状态无法可靠判定" in document
         assert "不等于交易授权" in document
         assert "`unknown` 表示无 thesis" not in document
+        assert "必须按失败关闭处理" not in document
+
+    readme = _read("README.md")
+    assert "`unknown` 不提供长期加分或交易授权" in readme
+    assert "不会单独阻断已通过全部独立短线硬门的 tactical buy" in readme
+    assert "长期状态中只有 `broken` 会直接阻断买入" in readme
 
 
 def test_production_gate_allows_usable_fallback_and_blocks_unusable_outputs():
