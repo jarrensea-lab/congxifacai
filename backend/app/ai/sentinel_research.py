@@ -96,6 +96,17 @@ def _compact_candidate(candidate: dict[str, Any]) -> dict[str, Any]:
         "chain_position": candidate.get("chain_position", ""),
         "verify_next": candidate.get("verify_next", ""),
         "research_priority": candidate.get("research_priority", ""),
+        "long_assumptions": candidate.get("long_assumptions", []),
+        "red_lines": candidate.get("red_lines", []),
+        "valuation_questions": candidate.get("valuation_questions", []),
+        "quarterly_verification_tasks": candidate.get(
+            "quarterly_verification_tasks", []
+        ),
+        "bottleneck_duration": candidate.get("bottleneck_duration", ""),
+        "bottleneck_map": candidate.get("bottleneck_map", {}),
+        "financial_evidence": candidate.get("financial_evidence", {}),
+        "quote_evidence": candidate.get("quote_evidence", {}),
+        "boundary": "research_only",
     }
 
 
@@ -111,6 +122,8 @@ def build_serenity_deep_dives(
     limit: int = 3,
     available_cash: float = 0,
     total_assets: float = 0,
+    quote_fetcher=None,
+    financial_fetcher=None,
     pipeline_runner=None,
 ) -> list[dict[str, Any]]:
     """Build Serenity bottleneck deep dives as Sentinel research-only inputs."""
@@ -132,6 +145,8 @@ def build_serenity_deep_dives(
                 report_date=report_date,
                 available_cash=available_cash,
                 total_assets=total_assets,
+                quote_fetcher=quote_fetcher,
+                financial_fetcher=financial_fetcher,
                 context="Sentinel 一周实验：热点主题进入 Serenity 产业链瓶颈深挖，作为研究输入。",
             )
             normalized_theme = str(pipeline.get("normalized_theme") or theme).strip()

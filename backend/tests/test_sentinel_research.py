@@ -120,6 +120,71 @@ def test_serenity_deep_dives_are_research_only_inputs():
     assert "不生成交易指令" in markdown
 
 
+def test_serenity_deep_dives_keep_long_fields_and_forward_verification_fetchers():
+    quote_fetcher = object()
+    financial_fetcher = object()
+    captured = {}
+    full_candidate = {
+        "name": "测试材料",
+        "code": "300001",
+        "score": 78,
+        "chokepoint": "高纯材料良率",
+        "chain_position": "上游材料",
+        "verify_next": "核验财报",
+        "research_priority": "high",
+        "long_assumptions": [{"id": "a1", "claim": "需求持续", "status": "intact"}],
+        "red_lines": [{"id": "r1", "condition": "替代技术突破", "status": "clear"}],
+        "valuation_questions": ["估值是否透支？"],
+        "quarterly_verification_tasks": ["复核订单兑现"],
+        "bottleneck_duration": "1-3年",
+        "bottleneck_map": {"chokepoint": "高纯材料良率", "substitution_risk": "待跟踪"},
+        "financial_evidence": {"fact": "财务有效", "metrics": {"revenue_yoy_pct": 20}},
+        "quote_evidence": {"fact": "行情有效", "metrics": {"price": 12.3}},
+    }
+
+    def fake_pipeline(theme, **kwargs):
+        captured.update(kwargs)
+        return {
+            "theme": theme,
+            "normalized_theme": theme,
+            "chokepoints": [],
+            "top_candidates": [full_candidate],
+            "verification_tasks": [],
+            "quote_status": {"status": "success"},
+            "financial_status": {"status": "success"},
+            "account_constraint": "研究输入，不执行交易",
+        }
+
+    dives = build_serenity_deep_dives(
+        [{"name": "AI半导体", "count": 2}],
+        report_date="2026-07-26",
+        available_cash=1234.56,
+        total_assets=4567.89,
+        quote_fetcher=quote_fetcher,
+        financial_fetcher=financial_fetcher,
+        pipeline_runner=fake_pipeline,
+    )
+
+    compact = dives[0]["top_candidates"][0]
+    for field in (
+        "long_assumptions",
+        "red_lines",
+        "valuation_questions",
+        "quarterly_verification_tasks",
+        "bottleneck_duration",
+        "bottleneck_map",
+        "financial_evidence",
+        "quote_evidence",
+    ):
+        assert compact[field] == full_candidate[field]
+    assert compact["boundary"] == "research_only"
+    assert dives[0]["boundary"] == "research_only"
+    assert captured["available_cash"] == 1234.56
+    assert captured["total_assets"] == 4567.89
+    assert captured["quote_fetcher"] is quote_fetcher
+    assert captured["financial_fetcher"] is financial_fetcher
+
+
 def test_serenity_deep_dives_skip_empty_themes_and_continue_to_supported_theme():
     def fake_pipeline(theme, **kwargs):
         candidates = []
@@ -270,6 +335,21 @@ def test_run_sentinel_news_job_writes_news_events_and_package(monkeypatch, tmp_p
         }],
     )
     monkeypatch.setattr(runner, "SERENITY_LEARNING_ARCHIVE_DIR", str(tmp_path / "learning"))
+    monkeypatch.setattr(
+        runner,
+        "materialize_serenity_long_horizon",
+        lambda package, report_date: {
+            "status": "success",
+            "thesis_count": 0,
+            "evidence_count": 0,
+            "target_count": 0,
+            "forming_count": 0,
+            "verified_count": 0,
+            "diagnostics": [],
+        },
+        raising=False,
+    )
+    monkeypatch.setenv("CONGXI_PORTFOLIO_PATH", str(tmp_path / "missing-portfolio.json"))
 
     result = runner.run_news_job("2026-06-28", output_root=tmp_path)
 
@@ -281,6 +361,107 @@ def test_run_sentinel_news_job_writes_news_events_and_package(monkeypatch, tmp_p
     assert package["serenity_deep_dives"][0]["theme"] == "AI半导体"
     assert "learning_report_path" in package["serenity_deep_dives"][0]
     assert not package["serenity_deep_dives"][0].get("learning_report_markdown")
+
+
+def test_run_sentinel_news_job_wires_account_fetchers_and_materializes_before_package(
+    monkeypatch,
+    tmp_path,
+):
+    import scripts.run_sentinel as runner
+
+    order = []
+    captured = {}
+    portfolio_path = tmp_path / "portfolio.json"
+    portfolio_path.write_text(
+        json.dumps({"available_cash": 2100.5, "total_assets": 5980.25}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONGXI_PORTFOLIO_PATH", str(portfolio_path))
+    monkeypatch.setattr(
+        runner,
+        "import_default_tushare_news_events",
+        lambda report_date: _sample_events(),
+    )
+
+    class FakeTencent:
+        async def fetch_batch(self, codes):
+            return {code: {"code": code, "price": 10.0} for code in codes}
+
+    tencent = FakeTencent()
+
+    async def fake_financial_fetcher(codes):
+        return {
+            code: {"code": code, "status": "success", "revenue_yoy_pct": 12.0}
+            for code in codes
+        }
+
+    monkeypatch.setattr(runner, "TencentDataSource", lambda: tencent, raising=False)
+    monkeypatch.setattr(
+        runner,
+        "fetch_financial_evidence",
+        fake_financial_fetcher,
+        raising=False,
+    )
+
+    def fake_build(top_themes, **kwargs):
+        order.append("build")
+        captured["build_kwargs"] = kwargs
+        return [{
+            "theme": "AI半导体",
+            "learning_report_markdown": "# report\n",
+            "top_candidates": [],
+            "boundary": "research_only",
+        }]
+
+    def fake_persist_reports(dives, **kwargs):
+        order.append("persist_reports")
+        return [{
+            **dives[0],
+            "learning_report_markdown": "",
+            "learning_report_path": str(tmp_path / "learning.md"),
+        }]
+
+    def fake_materialize(package, report_date):
+        order.append("materialize")
+        assert package["serenity_deep_dives"][0]["learning_report_path"].endswith(
+            "learning.md"
+        )
+        return {
+            "status": "success",
+            "thesis_count": 1,
+            "evidence_count": 3,
+            "target_count": 1,
+            "forming_count": 0,
+            "verified_count": 1,
+            "diagnostics": [],
+        }
+
+    def fake_persist_package(package, **kwargs):
+        order.append("persist_package")
+        captured["package"] = package
+        return {"research_package": "package.json", "research_report": "package.md"}
+
+    monkeypatch.setattr(runner, "build_serenity_deep_dives", fake_build)
+    monkeypatch.setattr(runner, "persist_serenity_deep_dive_reports", fake_persist_reports)
+    monkeypatch.setattr(
+        runner,
+        "materialize_serenity_long_horizon",
+        fake_materialize,
+        raising=False,
+    )
+    monkeypatch.setattr(runner, "persist_research_package", fake_persist_package)
+
+    result = runner.run_news_job("2026-07-26", output_root=tmp_path)
+
+    kwargs = captured["build_kwargs"]
+    assert kwargs["available_cash"] == 2100.5
+    assert kwargs["total_assets"] == 5980.25
+    assert kwargs["quote_fetcher"].__self__ is tencent
+    assert kwargs["financial_fetcher"] is fake_financial_fetcher
+    assert order == ["build", "persist_reports", "materialize", "persist_package"]
+    assert result["account_status"]["status"] == "loaded"
+    assert result["long_horizon_summary"]["verified_count"] == 1
+    assert captured["package"]["long_horizon_summary"]["status"] == "success"
 
 
 def test_run_sentinel_review_job_handles_empty_outcomes(tmp_path):
