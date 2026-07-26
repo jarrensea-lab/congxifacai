@@ -101,6 +101,47 @@ def test_build_next_day_strategy_sections_include_required_blocks():
     assert "数据覆盖与评分审计" in sections
 
 
+def test_first_screen_explicitly_marks_yitaojin_quotes_not_enabled():
+    from scripts.daily_report import (
+        _project_status_section,
+        get_strategy_profile,
+    )
+
+    first_screen = "\n".join(
+        _project_status_section(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=2,
+            final_view="等待确认",
+            confidence=5,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            sentinel_package=None,
+            profile=get_strategy_profile(),
+            budget_blocked_count=0,
+            visible_decision_gate={
+                "entry_allowed": True,
+                "state": "allowed",
+                "reasons": [],
+                "quote_validation": {
+                    "enabled": False,
+                    "status": "not_enabled",
+                    "as_of": None,
+                    "validations": {},
+                    "reasons": ["quote_validation_not_enabled"],
+                },
+            },
+        )
+    )
+
+    assert "易淘金行情校验：未启用" in first_screen
+    assert "quote_status=not_enabled" in first_screen
+    assert "未声称已完成易淘金核价" in first_screen
+
+
 def test_build_next_day_strategy_sections_is_concise_enough_for_feishu():
     from scripts.daily_report import build_feishu_summary, build_next_day_strategy_sections
 

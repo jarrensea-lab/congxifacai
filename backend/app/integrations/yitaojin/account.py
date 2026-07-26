@@ -239,10 +239,27 @@ class YitaojinAccountService:
                 for item in portfolio.get("positions", [])
                 if isinstance(item, dict) and item.get("code")
             }
+            raw_pending_positions = portfolio.get(
+                "broker_missing_positions_pending"
+            )
+            if not isinstance(raw_pending_positions, list):
+                raw_pending_positions = []
+            pending_positions = {
+                str(item.get("code") or ""): item
+                for item in raw_pending_positions
+                if isinstance(item, dict) and item.get("code")
+            }
             reconciled = []
             for broker_position in snapshot.positions:
-                current = deepcopy(existing.get(broker_position.code, {}))
+                current = deepcopy(
+                    existing.get(broker_position.code)
+                    or pending_positions.get(broker_position.code)
+                    or {}
+                )
                 is_new = not current
+                current.pop("broker_missing_since", None)
+                current.pop("broker_missing_last_seen", None)
+                current.pop("realized_pnl_status", None)
                 current.update(
                     {
                         "code": broker_position.code,
@@ -267,7 +284,24 @@ class YitaojinAccountService:
                     )
                 reconciled.append(current)
 
-            removed_codes = sorted(existing.keys() - {p.code for p in snapshot.positions})
+            current_codes = {position.code for position in snapshot.positions}
+            removed_codes = sorted(existing.keys() - current_codes)
+            pending_archive = {
+                code: deepcopy(item)
+                for code, item in pending_positions.items()
+                if code not in current_codes
+            }
+            for code in removed_codes:
+                archived = deepcopy(existing[code])
+                archived.setdefault(
+                    "broker_missing_since",
+                    snapshot.captured_at.isoformat(),
+                )
+                archived["broker_missing_last_seen"] = (
+                    snapshot.captured_at.isoformat()
+                )
+                archived["realized_pnl_status"] = "pending_attribution"
+                pending_archive[code] = archived
             events = portfolio.setdefault("recent_account_events", [])
             if not isinstance(events, list):
                 events = []
@@ -281,10 +315,14 @@ class YitaojinAccountService:
                         "realized_pnl_status": "pending_attribution",
                     }
                 )
-            if removed_codes:
-                pending = set(portfolio.get("realized_pnl_pending_codes") or [])
-                pending.update(removed_codes)
-                portfolio["realized_pnl_pending_codes"] = sorted(pending)
+            pending = set(portfolio.get("realized_pnl_pending_codes") or [])
+            pending.update(pending_archive)
+            pending.difference_update(current_codes)
+            portfolio["realized_pnl_pending_codes"] = sorted(pending)
+            portfolio["broker_missing_positions_pending"] = [
+                pending_archive[code] for code in sorted(pending_archive)
+            ]
+            if pending:
                 portfolio["realized_pnl_complete"] = False
 
             portfolio["positions"] = reconciled

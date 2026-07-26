@@ -240,6 +240,16 @@ def test_account_apply_preserves_history_and_never_invents_realized_pnl(tmp_path
     assert positions["300001"]["trade_history"] == []
     assert positions["300001"]["trade_history_status"] == "unattributed_broker_position"
     assert "600000" not in positions
+    pending_positions = {
+        item["code"]: item
+        for item in updated["broker_missing_positions_pending"]
+    }
+    assert pending_positions["600000"]["trade_history"] == [
+        {"date": "2026-07-02", "type": "buy"}
+    ]
+    assert pending_positions["600000"]["realized_pnl_status"] == (
+        "pending_attribution"
+    )
     assert "600000" in updated["realized_pnl_pending_codes"]
     assert updated["realized_pnl"] == 12.5
     assert updated["realized_pnl_complete"] is False
@@ -247,3 +257,40 @@ def test_account_apply_preserves_history_and_never_invents_realized_pnl(tmp_path
     assert updated["total_assets"] == 4100.0
     assert updated["broker_snapshot"]["reported_total_assets"] == 4100.0
     assert updated["portfolio_sync_status"] == "broker_applied"
+
+
+def test_account_apply_restores_history_when_pending_position_reappears(tmp_path):
+    """Catches a transient broker omission permanently discarding local history."""
+    portfolio_path = tmp_path / "portfolio.json"
+    portfolio_path.write_text(json.dumps(_portfolio()), encoding="utf-8")
+    bridge = FakeBridge(_valid_payload())
+    service = _service(tmp_path, bridge, portfolio_path)
+    assert service.sync_account(apply=True, bootstrap=True).status == "applied"
+
+    reappeared = _valid_payload()
+    reappeared["capturedAt"] = "2026-07-26T09:35:05+08:00"
+    reappeared["totalAssets"] = "4900.00"
+    reappeared["positions"].append(
+        {
+            "code": "600000",
+            "name": "已消失持仓",
+            "shares": 100,
+            "availableShares": 100,
+            "averageCost": "8.00",
+            "currentPrice": "8.00",
+            "marketValue": "800.00",
+            "unrealizedPnl": "0.00",
+        }
+    )
+    service.bridge = FakeBridge(reappeared)
+
+    result = service.sync_account(apply=True)
+    updated = json.loads(portfolio_path.read_text(encoding="utf-8"))
+    positions = {item["code"]: item for item in updated["positions"]}
+
+    assert result.status == "applied"
+    assert positions["600000"]["trade_history"] == [
+        {"date": "2026-07-02", "type": "buy"}
+    ]
+    assert updated["broker_missing_positions_pending"] == []
+    assert "600000" not in updated["realized_pnl_pending_codes"]
