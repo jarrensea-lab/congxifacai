@@ -3897,6 +3897,70 @@ def test_legacy_next_day_helpers_do_not_reintroduce_false_routing_or_fake_long_c
     assert "纯预算阻断" not in long_lines
 
 
+def test_budget_blocked_real_long_thesis_remains_visible_as_non_trading_research():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="长期红线复核",
+            confidence=8,
+            positions=[],
+            available_cash=1304.25,
+            total_assets=5972.25,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    {
+                        "code": "688008",
+                        "name": "预算阻断长期样本",
+                        "source": "long_horizon",
+                        "action": "research_only",
+                        "production_eligibility": {
+                            "eligible": False,
+                            "reason": "research_only_provenance",
+                        },
+                        "entry_price": 233.66,
+                        "lot_size": 200,
+                        "lot_value": 46732,
+                        "block_reason": "lot_size_exceeded",
+                        "decision_reason": "一手金额超过当前执行预算。",
+                        "thesis_status": "broken",
+                        "long_quality_score": 0,
+                        "red_line_status": "triggered",
+                        "valuation_zone": "unknown",
+                        "long_horizon_reason": "下行安全红线触发。",
+                        "combined_decision_reason": (
+                            "一手金额超过当前执行预算。"
+                            "长期跟踪：下行安全红线触发。"
+                        ),
+                    }
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    new_entry = feishu.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = feishu.split("## 二、中长期论文状态", 1)[1]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+
+    assert "预算阻断长期样本(688008)" not in new_entry
+    assert "预算阻断长期样本(688008)" in long_section
+    assert "红线触发" in long_section
+    assert "风险退出" in long_section
+    assert "人工复核买入" not in long_section
+    assert "预算阻断长期样本(688008)" in appendix
+
+
 @pytest.mark.parametrize("thesis_status", ["healthy", "unknown"])
 def test_long_horizon_research_provenance_stays_non_trading_long_tracking(
     thesis_status,

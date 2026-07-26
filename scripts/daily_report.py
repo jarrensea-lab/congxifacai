@@ -2764,7 +2764,7 @@ def build_next_day_strategy_sections(
         ),
         "candidates": candidates,
         "candidate_missing_reason": candidate_missing_reason,
-        "long_horizon": _long_horizon_view(visible_decision),
+        "long_horizon": _long_horizon_view(decision),
         "budget_blocked": budget_rows,
         "budget_blocked_count": len(hidden_codes),
         "research_reference": research_rows,
