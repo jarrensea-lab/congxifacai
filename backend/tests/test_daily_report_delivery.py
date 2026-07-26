@@ -3768,6 +3768,204 @@ def test_legacy_next_day_helpers_do_not_reintroduce_false_routing_or_fake_long_c
     assert "纯预算阻断" not in long_lines
 
 
+@pytest.mark.parametrize("thesis_status", ["healthy", "unknown"])
+def test_long_horizon_research_provenance_stays_non_trading_long_tracking(
+    thesis_status,
+):
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=3,
+            final_view="长期跟踪",
+            confidence=6,
+            positions=[],
+            available_cash=5000,
+            total_assets=5000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    {
+                        "code": "002123",
+                        "name": "长期影子样本",
+                        "source": "long_horizon",
+                        "action": "research_only",
+                        "production_eligibility": {
+                            "eligible": False,
+                            "reason": "shadow_only",
+                        },
+                        "entry_price": 3.2,
+                        "stop_loss": 2.9,
+                        "target_price": 3.8,
+                        "lot_value": 320,
+                        "thesis_status": thesis_status,
+                        "long_quality_score": (
+                            82 if thesis_status == "healthy" else None
+                        ),
+                        "red_line_status": (
+                            "clear" if thesis_status == "healthy" else "unknown"
+                        ),
+                        "valuation_zone": (
+                            "fair_zone"
+                            if thesis_status == "healthy"
+                            else "unknown"
+                        ),
+                        "combined_decision_reason": "只做长期影子跟踪，不产生买入动作。",
+                    }
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    new_entry = feishu.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = feishu.split("## 二、中长期论文状态", 1)[1]
+    assert "长期影子样本(002123)" not in new_entry
+    assert "长期影子样本(002123)" in long_section
+    assert (
+        "论文成立" in long_section
+        if thesis_status == "healthy"
+        else "论文状态未知" in long_section
+    )
+    assert "人工复核买入" not in long_section
+    assert "只展示已建立的长期论文状态，不单独触发交易动作" in long_section
+
+
+def test_over_position_holding_uses_profile_cap_for_exact_partial_reduction():
+    from scripts.daily_report import (
+        build_next_day_strategy_sections,
+        get_strategy_profile,
+    )
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=3,
+            final_view="先降低超限仓位",
+            confidence=8,
+            positions=[
+                {
+                    "code": "000001",
+                    "name": "超仓样本",
+                    "shares": 300,
+                    "avg_cost": 9.5,
+                    "current_price": 10,
+                    "current_value": 3000,
+                }
+            ],
+            available_cash=1000,
+            total_assets=4000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "position_watch": {
+                    "items": {
+                        "000001": {
+                            "stop_loss_price": 8.5,
+                            "target_price": 12,
+                        }
+                    }
+                }
+            },
+            roles={},
+            sentinel_package=None,
+            strategy_profile=get_strategy_profile("growth_sprint"),
+        )
+    )
+
+    holding = sections.split("### 持仓处理", 1)[1].split(
+        "### 新开仓机会",
+        1,
+    )[0]
+    assert "当前300股" in holding
+    assert "仓位超限，精确减仓" in holding
+    assert "精确卖出100股" in holding
+    assert "精确卖出300股" not in holding
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected_header", "expected_audit"),
+    [
+        (
+            {
+                "status": "success",
+                "providers": ["DeepSeek", "Qwen"],
+                "calls": [
+                    {
+                        "role": "猎手",
+                        "provider": "DeepSeek",
+                        "status": "success",
+                    },
+                    {
+                        "role": "裁判",
+                        "provider": "Qwen",
+                        "status": "success",
+                    },
+                ],
+                "degradation_reasons": [],
+            },
+            "本次AI路由：DeepSeek + Qwen（调用成功）",
+            "本次调用成功",
+        ),
+        (
+            {
+                "status": "degraded",
+                "providers": ["DeepSeek"],
+                "calls": [
+                    {
+                        "role": "裁判",
+                        "provider": "DeepSeek",
+                        "requested_provider": "Qwen",
+                        "status": "degraded",
+                        "fallback_reason": "qwen_api_key_missing",
+                    }
+                ],
+                "degradation_reasons": ["qwen_api_key_missing"],
+            },
+            "本次AI路由：DeepSeek（降级）",
+            "Qwen 密钥缺失，实际回退到 DeepSeek",
+        ),
+        (
+            None,
+            "本次AI路由：状态未验证/降级状态未知",
+            "本次状态未验证/降级状态未知",
+        ),
+    ],
+)
+def test_report_model_status_uses_actual_runtime_truth(
+    runtime_status,
+    expected_header,
+    expected_audit,
+):
+    from scripts.daily_report import (
+        build_data_source_audit,
+        format_model_runtime_header,
+    )
+
+    header = format_model_runtime_header(runtime_status)
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={"indices": {}},
+            sentinel_package=None,
+            model_runtime_status=runtime_status,
+        )
+    )
+
+    assert expected_header in header
+    assert expected_audit in audit
+    if runtime_status is None:
+        assert "调用成功" not in header
+
+
 def test_daily_report_archive_keeps_all_report_types_in_trade_day_folder(tmp_path):
     from app.services.report_archive import save_markdown_report
 

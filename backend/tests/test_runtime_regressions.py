@@ -336,6 +336,194 @@ async def test_run_debate_passes_active_strategy_profile_to_account_constraints(
     assert captured["strategy_profile"] is profile
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("engine_runtime_status", "expected_status", "expected_reason"),
+    [
+        (
+            {
+                "status": "success",
+                "providers": ["DeepSeek", "Qwen"],
+                "calls": [],
+                "degradation_reasons": [],
+            },
+            "success",
+            None,
+        ),
+        (
+            {
+                "status": "degraded",
+                "providers": ["DeepSeek"],
+                "calls": [],
+                "degradation_reasons": ["qwen_api_key_missing"],
+            },
+            "degraded",
+            "qwen_api_key_missing",
+        ),
+        (None, "unavailable", "runtime_status_unavailable"),
+    ],
+)
+async def test_run_debate_exposes_structured_model_runtime_status(
+    monkeypatch,
+    engine_runtime_status,
+    expected_status,
+    expected_reason,
+):
+    import app.ai.debate as debate_module
+    from app.engine.workshop import run_debate
+
+    class FakeEngine:
+        async def debate(
+            self,
+            market_data,
+            holdings_data,
+            news,
+            role_performance="",
+        ):
+            result = {
+                "final": {
+                    "final_decision": "观望",
+                    "confidence": 6,
+                    "short_term": {},
+                    "mid_low_freq": {},
+                    "position_plan": {"entries": []},
+                },
+                "debate": {},
+                "quality": {"pass": True, "score": 80},
+            }
+            if engine_runtime_status is not None:
+                result["model_runtime_status"] = engine_runtime_status
+            return result
+
+    monkeypatch.setattr(debate_module, "AIDebateEngine", FakeEngine)
+
+    result = await run_debate(
+        {
+            "available_cash": 3000,
+            "total_assets": 3000,
+            "holdings_str": "空仓",
+            "news": [],
+        }
+    )
+
+    runtime = result["model_runtime_status"]
+    assert runtime["status"] == expected_status
+    if expected_reason:
+        assert expected_reason in runtime["degradation_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_client_marks_qwen_missing_key_fallback_as_degraded_route(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudClient
+    from app.config import settings
+
+    client = CloudClient.__new__(CloudClient)
+
+    async def fake_deepseek(
+        model_name,
+        messages,
+        model_key="",
+        **kwargs,
+    ):
+        return {
+            "content": "{}",
+            "model": model_name,
+            "provider": "DeepSeek",
+        }
+
+    monkeypatch.setattr(settings, "QWEN_API_KEY", "")
+    monkeypatch.setattr(client, "_call_deepseek", fake_deepseek)
+
+    result = await client.chat(
+        "qwen_judge",
+        [{"role": "user", "content": "test"}],
+    )
+
+    assert result["provider"] == "DeepSeek"
+    assert result["requested_provider"] == "Qwen"
+    assert result["fallback_reason"] == "qwen_api_key_missing"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("qwen_fallback", "expected_status", "expected_providers"),
+    [
+        (False, "success", ["DeepSeek", "Qwen"]),
+        (True, "degraded", ["DeepSeek"]),
+    ],
+)
+async def test_ai_debate_engine_collects_actual_provider_routes(
+    monkeypatch,
+    qwen_fallback,
+    expected_status,
+    expected_providers,
+):
+    from app.ai.debate import AIDebateEngine
+
+    engine = AIDebateEngine()
+
+    async def fake_call_role(
+        name,
+        prompt,
+        model,
+        num_predict=0,
+        retries=1,
+        timeout=120.0,
+    ):
+        requested_qwen = model in {"qwen-researcher", "cloud-judge"}
+        provider = (
+            "DeepSeek"
+            if requested_qwen and qwen_fallback
+            else ("Qwen" if requested_qwen else "DeepSeek")
+        )
+        payload = (
+            {
+                "final_decision": "观望",
+                "confidence": 6,
+                "short_term": {},
+                "mid_low_freq": {},
+            }
+            if name == "裁判"
+            else {"analysis": f"{name}观点"}
+        )
+        return {
+            "content": json.dumps(payload, ensure_ascii=False),
+            "thinking": "",
+            "provider": provider,
+            "requested_provider": (
+                "Qwen" if requested_qwen else "DeepSeek"
+            ),
+            "model": "test-model",
+            "status": (
+                "degraded"
+                if requested_qwen and qwen_fallback
+                else "success"
+            ),
+            "fallback_reason": (
+                "qwen_api_key_missing"
+                if requested_qwen and qwen_fallback
+                else ""
+            ),
+        }
+
+    async def fake_validate(content):
+        return {"pass": True, "score": 90, "issues": []}
+
+    monkeypatch.setattr(engine, "_call_role", fake_call_role)
+    monkeypatch.setattr(engine, "validate_output", fake_validate)
+
+    result = await engine.debate("{}", "空仓", "[]")
+    runtime = result["model_runtime_status"]
+
+    assert runtime["status"] == expected_status
+    assert runtime["providers"] == expected_providers
+    assert len(runtime["calls"]) == 5
+    if qwen_fallback:
+        assert "qwen_api_key_missing" in runtime["degradation_reasons"]
+
+
 def test_debate_prompts_defer_cash_and_position_limits_to_injected_profile():
     source = Path("backend/app/ai/debate.py").read_text(encoding="utf-8")
 

@@ -118,6 +118,45 @@ def build_feishu_summary(md_content: str, limit: int = 3000) -> str:
     return summary[:limit].rstrip() + "\n\n...*(完整报告已保存至 Obsidian 报告目录)*"
 
 
+def _active_single_position_limit_pct(
+    profile: dict,
+    total_assets: float,
+) -> float:
+    if total_assets < 5000:
+        return float(profile["single_position_limit_pct"])
+    return float(
+        profile.get(
+            "standard_single_position_limit_pct",
+            profile["single_position_limit_pct"],
+        )
+    )
+
+
+def _over_position_sell_quantity(
+    *,
+    shares: int,
+    price: float,
+    total_assets: float,
+    profile: dict,
+) -> int:
+    """Reuse execution-guard account-cap math for an exact A-share reduction."""
+    shares = max(0, int(shares or 0))
+    price = float(price or 0)
+    assets = float(total_assets or 0)
+    if shares <= 0 or price <= 0 or assets <= 0:
+        return 0
+    single_pct = _active_single_position_limit_pct(profile, assets)
+    single_limit = round(assets * single_pct / 100, 2)
+    if shares * price <= single_limit:
+        return 0
+    if shares <= 100:
+        return shares
+    target_shares = int(single_limit / price)
+    sell_quantity = max(0, shares - target_shares)
+    sell_quantity = ((sell_quantity + 99) // 100) * 100
+    return min(sell_quantity, shares)
+
+
 def build_execution_guard(
     positions: list[dict],
     available_cash: float,
@@ -128,11 +167,7 @@ def build_execution_guard(
     profile = strategy_profile or get_strategy_profile()
     lines = []
     reserve_pct = float(profile["cash_reserve_pct"])
-    single_pct = (
-        float(profile["single_position_limit_pct"])
-        if total_assets < 5000
-        else float(profile["standard_single_position_limit_pct"])
-    )
+    single_pct = _active_single_position_limit_pct(profile, total_assets)
     reserve_cash = round(total_assets * reserve_pct / 100, 2) if total_assets else 0
     single_limit = round(total_assets * single_pct / 100, 2) if total_assets else 0
     buy_budget = max(0.0, min(available_cash - reserve_cash, single_limit))
@@ -168,18 +203,20 @@ def build_execution_guard(
         if not shares or not price or not total_assets:
             continue
         ratio = value / total_assets * 100
-        target_shares = int((single_limit / price) // 1)
         if ratio > single_pct and total_assets < 5000:
-            if shares <= 100:
+            sell_qty = _over_position_sell_quantity(
+                shares=shares,
+                price=price,
+                total_assets=total_assets,
+                profile=profile,
+            )
+            if sell_qty == shares:
                 lines.append(
                     f"- {p.get('name', p.get('code', '持仓'))}: 当前{shares}股，占总资产约{ratio:.1f}%，"
                     f"超过小账户{single_pct:.0f}%上限；若要立刻合规，机器可执行方案是清仓{shares}股，"
                     "否则只能继续持有观察，不能执行非整手减仓后留下零碎仓的方案。"
                 )
-            else:
-                sell_qty = max(0, shares - target_shares)
-                sell_qty = ((sell_qty + 99) // 100) * 100
-                sell_qty = min(sell_qty, shares)
+            elif sell_qty:
                 lines.append(
                     f"- {p.get('name', p.get('code', '持仓'))}: 当前{shares}股，占总资产约{ratio:.1f}%；"
                     f"若按{single_pct:.0f}%上限降仓，优先卖出约{sell_qty}股。"
@@ -388,6 +425,7 @@ def build_data_source_audit(
     sqlite_ok: bool | None = None,
     deepseek_ok: bool | None = None,
     qwen_ok: bool | None = None,
+    model_runtime_status: dict | None = None,
 ) -> list[str]:
     """Render data-source audit rows for the main report."""
     indices = market_data.get("indices", {}) if isinstance(market_data, dict) else {}
@@ -471,12 +509,40 @@ def build_data_source_audit(
             f"失败原因={','.join(failure_reasons)}；{coverage_detail}"
         )
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
-    deepseek_status = "configured" if os.getenv("DEEPSEEK_API_KEY") else "missing"
-    qwen_status = "configured" if (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")) else "missing"
-    if deepseek_ok is not None:
-        deepseek_status = "ok" if deepseek_ok else "degraded"
-    if qwen_ok is not None:
-        qwen_status = "ok" if qwen_ok else "degraded"
+    if model_runtime_status is None and (
+        deepseek_ok is not None or qwen_ok is not None
+    ):
+        probe_calls = []
+        for provider, probe in (
+            ("DeepSeek", deepseek_ok),
+            ("Qwen", qwen_ok),
+        ):
+            if probe is None:
+                continue
+            probe_calls.append({
+                "role": "连通性探测",
+                "provider": provider,
+                "requested_provider": provider,
+                "status": "success" if probe else "degraded",
+            })
+        model_runtime_status = {
+            "status": (
+                "success"
+                if deepseek_ok is True and qwen_ok is True
+                else "degraded"
+            ),
+            "providers": [
+                call["provider"]
+                for call in probe_calls
+                if call["status"] == "success"
+            ],
+            "calls": probe_calls,
+            "degradation_reasons": (
+                []
+                if deepseek_ok is True and qwen_ok is True
+                else ["cloud_call_failed"]
+            ),
+        }
     if sqlite_ok is None:
         sqlite_ok = not (
             market_data.get("portfolio_sync_failed") is True
@@ -489,11 +555,12 @@ def build_data_source_audit(
         f"| 行情数据 | {'ok' if market_ok else 'degraded'} | {market_detail} |",
         f"| Tushare 高频新闻 | {sentinel_status.get('status', 'missing')} | 新闻 {(sentinel_package or {}).get('event_count', 0)} 条 |",
         f"| Sentinel 研究包 | {'ok' if sentinel_package else 'missing'} | 研究输入，不产生交易指令 |",
-        f"| DeepSeek | {_status_label(deepseek_status)} | 四角色/裁判主模型；状态表示配置存在，不等于本次探活成功 |",
-        f"| Qwen | {_status_label(qwen_status)} | 研究员/备用裁判；状态表示配置存在，不等于本次探活成功 |",
+    ]
+    rows.extend(_model_runtime_audit_rows(model_runtime_status))
+    rows.extend([
         f"| 本地持仓 | {'ok' if portfolio_loaded else 'missing'} | 账户约束优先生效 |",
         f"| SQLite | {'ok' if sqlite_ok else 'degraded'} | 辩论快照与持仓同步 |",
-    ]
+    ])
     return rows
 
 
@@ -583,6 +650,104 @@ def _status_label(value: str) -> str:
         "degraded": "降级",
     }
     return labels.get(str(value or "").lower(), str(value or "—"))
+
+
+def _model_runtime_truth(value: dict | None) -> dict:
+    if not isinstance(value, dict):
+        return {
+            "status": "unavailable",
+            "providers": [],
+            "calls": [],
+            "degradation_reasons": ["runtime_status_unavailable"],
+        }
+    status = str(value.get("status") or "").strip().lower()
+    if status not in {"success", "degraded", "unavailable"}:
+        status = "unavailable"
+    providers = [
+        str(provider)
+        for provider in value.get("providers") or []
+        if str(provider).strip()
+    ]
+    calls = [
+        {
+            key: str(call.get(key) or "")
+            for key in (
+                "role",
+                "provider",
+                "requested_provider",
+                "model",
+                "status",
+                "fallback_reason",
+            )
+        }
+        for call in value.get("calls") or []
+        if isinstance(call, dict)
+    ]
+    reasons = [
+        str(reason)
+        for reason in value.get("degradation_reasons") or []
+        if str(reason).strip()
+    ]
+    if status == "unavailable" and not reasons:
+        reasons = ["runtime_status_unavailable"]
+    return {
+        "status": status,
+        "providers": list(dict.fromkeys(providers)),
+        "calls": calls,
+        "degradation_reasons": list(dict.fromkeys(reasons)),
+    }
+
+
+def _model_degradation_text(reasons: list[str]) -> str:
+    labels = {
+        "qwen_api_key_missing": "Qwen 密钥缺失，实际回退到 DeepSeek",
+        "cloud_call_failed": "云端模型调用失败",
+        "empty_model_output": "模型返回空内容",
+        "judge_not_called": "裁判未完成调用",
+        "debate_call_failed": "本次辩论调用失败",
+        "runtime_status_unavailable": "本次状态未验证/降级状态未知",
+    }
+    return "；".join(
+        labels.get(str(reason), "存在未分类降级")
+        for reason in reasons
+    )
+
+
+def format_model_runtime_header(model_runtime_status: dict | None) -> str:
+    """Describe only providers actually observed in this report run."""
+    runtime = _model_runtime_truth(model_runtime_status)
+    status = runtime["status"]
+    providers = runtime["providers"]
+    provider_text = " + ".join(providers)
+    if status == "success" and provider_text:
+        return f"> 🤖 本次AI路由：{provider_text}（调用成功）"
+    if status == "degraded":
+        route = provider_text or "未确认实际提供方"
+        return f"> 🤖 本次AI路由：{route}（降级）"
+    return "> 🤖 本次AI路由：状态未验证/降级状态未知"
+
+
+def _model_runtime_audit_rows(
+    model_runtime_status: dict | None,
+) -> list[str]:
+    runtime = _model_runtime_truth(model_runtime_status)
+    if runtime["status"] == "success":
+        provider_text = " + ".join(runtime["providers"]) or "实际提供方未记录"
+        detail = f"实际提供方：{provider_text}；本次调用成功"
+        status_text = "成功"
+    elif runtime["status"] == "degraded":
+        provider_text = " + ".join(runtime["providers"]) or "实际提供方未确认"
+        reason_text = _model_degradation_text(
+            runtime["degradation_reasons"]
+        ) or "存在未分类降级"
+        detail = f"实际提供方：{provider_text}；{reason_text}"
+        status_text = "降级"
+    else:
+        status_text = "未验证"
+        detail = "本次状态未验证/降级状态未知"
+    return [
+        f"| AI 模型实际路由 | {status_text} | {detail} |",
+    ]
 
 
 def _missing_data_label(value: str) -> str:
@@ -1854,6 +2019,8 @@ def _holding_action_view(
     positions: list[dict],
     decision: dict,
     target_date: str,
+    total_assets: float,
+    profile: dict,
 ) -> list[dict]:
     """Normalize holdings into exact, renderer-only action rows."""
     watch_items = _position_watch_items(decision)
@@ -1917,13 +2084,37 @@ def _holding_action_view(
                 "若开盘即回落到目标位下方，先人工核价再执行。"
             )
         else:
-            action = "持有观察"
-            sell_quantity = 0
-            next_signal = (
-                f"跌破 {_money(stop_loss)} 则卖出{shares}股；"
-                f"达到 {_money(target_price)} 则卖出{shares}股；"
-                "否则精确卖出0股，不加仓。"
+            over_position_sell = _over_position_sell_quantity(
+                shares=shares,
+                price=price,
+                total_assets=total_assets,
+                profile=profile,
             )
+            if over_position_sell:
+                action = (
+                    "仓位超限，精确退出"
+                    if over_position_sell == shares
+                    else "仓位超限，精确减仓"
+                )
+                sell_quantity = over_position_sell
+                single_pct = _active_single_position_limit_pct(
+                    profile,
+                    total_assets,
+                )
+                next_signal = (
+                    f"按当前策略单票上限 {single_pct:.0f}% 卖出"
+                    f"{over_position_sell}股；执行后重新核对持仓真值，"
+                    f"剩余{shares - over_position_sell}股继续服从止损 "
+                    f"{_money(stop_loss)} 和目标 {_money(target_price)}。"
+                )
+            else:
+                action = "持有观察"
+                sell_quantity = 0
+                next_signal = (
+                    f"跌破 {_money(stop_loss)} 则卖出{shares}股；"
+                    f"达到 {_money(target_price)} 则卖出{shares}股；"
+                    "否则精确卖出0股，不加仓。"
+                )
 
         price_text = (
             "待核验"
@@ -2088,17 +2279,6 @@ def _candidate_view(
 def _long_horizon_view(decision: dict) -> list[dict]:
     rows: list[dict] = []
     for item in _target_scores(decision):
-        production = item.get("production_eligibility")
-        action = _effective_target_action(item).lower()
-        if (
-            action in {"research_only", "research_reference"}
-            or item.get("research_only") is True
-            or (
-                isinstance(production, dict)
-                and production.get("eligible") is False
-            )
-        ):
-            continue
         has_long_truth = (
             bool(item.get("thesis_status"))
             or item.get("long_quality_score") is not None
@@ -2205,6 +2385,7 @@ def _next_day_audit_lines(
     sentinel_package: dict | None,
     profile: dict,
     gate: dict,
+    model_runtime_status: dict | None,
 ) -> list[str]:
     lines = [
         f"- 报告状态：已生成；服务交易日 {target_date}；报告日 {report_date}；风险等级 R{risk_level}；置信度 {confidence}/10。",
@@ -2266,6 +2447,7 @@ def _next_day_audit_lines(
         build_data_source_audit(
             market_data=market_data,
             sentinel_package=sentinel_package,
+            model_runtime_status=model_runtime_status,
         )
     )
     return lines
@@ -2321,6 +2503,7 @@ def build_next_day_strategy_sections(
     strategy_profile: dict | None = None,
     portfolio_truth: dict | None = None,
     visible_decision_gate: dict | None = None,
+    model_runtime_status: dict | None = None,
 ) -> list[str]:
     """Compatibility wrapper that prepares truth and calls the pure renderer."""
     profile = strategy_profile or get_strategy_profile()
@@ -2413,6 +2596,8 @@ def build_next_day_strategy_sections(
             positions=positions,
             decision=visible_decision,
             target_date=target_date,
+            total_assets=total_assets,
+            profile=profile,
         ),
         "candidates": candidates,
         "candidate_missing_reason": candidate_missing_reason,
@@ -2433,6 +2618,7 @@ def build_next_day_strategy_sections(
             sentinel_package=sentinel_package,
             profile=profile,
             gate=gate,
+            model_runtime_status=model_runtime_status,
         ),
         "score_audit_lines": _next_day_score_audit_lines(
             decision=visible_decision,
@@ -3331,6 +3517,7 @@ async def main():
         decision = debate_result.get("decision", {})
         roles = debate_result.get("roles", {})
         risk_level = debate_result.get("recommended_risk_level", 3)
+        model_runtime_status = debate_result.get("model_runtime_status")
         final_view = decision.get("final_view", decision.get("final_decision", "待分析"))
         confidence = decision.get("confidence", "N/A")
         print(f"   辩论完成 — 裁判结论: {final_view} | R{risk_level}", flush=True)
@@ -3341,6 +3528,12 @@ async def main():
         final_view = "分析失败"
         confidence = "N/A"
         roles = {}
+        model_runtime_status = {
+            "status": "degraded",
+            "providers": [],
+            "calls": [],
+            "degradation_reasons": ["debate_call_failed"],
+        }
 
     print("🎯 生成标的池评分...", flush=True)
     from app.data_sources.akshare_market import AKShareMarketClient
@@ -3416,7 +3609,10 @@ async def main():
     lines.append("# 📊 恭喜发财 — 次日投资策略主报告")
     lines.append("")
     lines.append(f"> 📅 **{today}** | 🕐 {time_str} | 服务交易日: **{target_date}**")
-    lines.append(f"> 🤖 DeepSeek + Qwen 多角色辩论 | 📈 风险等级: **R{risk_level}**")
+    lines.append(
+        f"{format_model_runtime_header(model_runtime_status)} | "
+        f"📈 风险等级: **R{risk_level}**"
+    )
     lines.append("")
     lines.append("---")
     lines.append("")
@@ -3437,6 +3633,7 @@ async def main():
         strategy_profile=strategy_profile,
         portfolio_truth=portfolio,
         visible_decision_gate=visible_gate,
+        model_runtime_status=model_runtime_status,
     ))
     gate_path = write_visible_decision_gate(visible_gate)
     print(f"✅ 统一入场闸门已保存: {gate_path}", flush=True)

@@ -37,7 +37,17 @@ class CloudClient:
             model_name = CLOUD_MODELS.get(fallback_key)
             if not model_name:
                 raise ValueError(f"No fallback for {model_key}")
-            return await self._call_deepseek(model_name, messages, fallback_key, **kwargs)
+            result = await self._call_deepseek(
+                model_name,
+                messages,
+                fallback_key,
+                **kwargs,
+            )
+            return {
+                **result,
+                "requested_provider": "Qwen",
+                "fallback_reason": "qwen_api_key_missing",
+            }
 
         model_name = CLOUD_MODELS.get(model_key)
         if not model_name:
@@ -70,6 +80,7 @@ class CloudClient:
             "content": data["choices"][0]["message"]["content"],
             "model": data.get("model", model_name),
             "usage": data.get("usage", {}),
+            "provider": "DeepSeek",
         }
 
     async def _call_qwen(self, model_name: str, messages: list[dict], **kwargs) -> dict:
@@ -93,6 +104,7 @@ class CloudClient:
             "content": data["choices"][0]["message"]["content"],
             "model": data.get("model", model_name),
             "usage": data.get("usage", {}),
+            "provider": "Qwen",
         }
 
     async def analyze_research_report(self, report_text: str) -> dict:

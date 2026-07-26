@@ -46,6 +46,53 @@ def build_production_gate(engine_result: dict) -> dict:
     }
 
 
+def normalize_model_runtime_status(value) -> dict:
+    """Keep only the runtime route contract; missing truth fails closed."""
+    if not isinstance(value, dict):
+        return {
+            "status": "unavailable",
+            "providers": [],
+            "calls": [],
+            "degradation_reasons": ["runtime_status_unavailable"],
+        }
+    status = str(value.get("status") or "").strip().lower()
+    if status not in {"success", "degraded", "unavailable"}:
+        status = "unavailable"
+    providers = list(dict.fromkeys(
+        str(provider)
+        for provider in value.get("providers") or []
+        if str(provider).strip()
+    ))
+    calls = [
+        {
+            key: str(call.get(key) or "")
+            for key in (
+                "role",
+                "provider",
+                "requested_provider",
+                "model",
+                "status",
+                "fallback_reason",
+            )
+        }
+        for call in value.get("calls") or []
+        if isinstance(call, dict)
+    ]
+    reasons = list(dict.fromkeys(
+        str(reason)
+        for reason in value.get("degradation_reasons") or []
+        if str(reason).strip()
+    ))
+    if status == "unavailable" and not reasons:
+        reasons = ["runtime_status_unavailable"]
+    return {
+        "status": status,
+        "providers": providers,
+        "calls": calls,
+        "degradation_reasons": reasons,
+    }
+
+
 async def run_debate(analysis_report: dict, strategy_type: str = "premarket") -> dict:
     """执行 AI 辩论 — V6: DeepSeek 云端多模型并行辩论
 
@@ -189,6 +236,9 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
         "quality": result.get("quality", {}),
         "production_gate": build_production_gate(result),
         "judge_thinking": result.get("judge_thinking", ""),
+        "model_runtime_status": normalize_model_runtime_status(
+            result.get("model_runtime_status")
+        ),
     }
 
 
