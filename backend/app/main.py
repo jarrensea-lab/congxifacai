@@ -311,20 +311,47 @@ app.include_router(strategy.router)
 async def _fetch_market_data() -> dict:
     """通过 DataRouter 拉取市场数据（多源容错）"""
     indices = {}
+    providers: set[str] = set()
+    data_cutoffs: list[str] = []
     for code in ["sh000001", "sz399001", "sz399006"]:
         try:
             result = await data_router.fetch(code)
             if result and result.get("price"):
                 indices[code] = {"price": result["price"], "change_pct": result.get("change_pct", 0)}
+                providers.add(str(result.get("source") or "data_router"))
+                cutoff = (
+                    result.get("quote_timestamp")
+                    or result.get("trading_date")
+                    or result.get("captured_at")
+                )
+                if cutoff:
+                    data_cutoffs.append(str(cutoff))
         except Exception:
             continue
     if not indices:
         try:
             batch = await tencent_client.fetch_batch(["sh000001", "sz399001"])
             for k, v in batch.items():
-                indices[k] = {"price": v.get("price", 0), "change_pct": v.get("change_pct", 0)}
+                if not v.get("price"):
+                    continue
+                indices[k] = {"price": v["price"], "change_pct": v.get("change_pct", 0)}
+                providers.add(str(v.get("source") or "tencent"))
+                cutoff = (
+                    v.get("quote_timestamp")
+                    or v.get("trading_date")
+                    or v.get("captured_at")
+                )
+                if cutoff:
+                    data_cutoffs.append(str(cutoff))
         except Exception:
-            indices = {"sh000001": {"price": 3350, "change_pct": 0}, "sz399001": {"price": 10800, "change_pct": 0}}
+            pass
+
+    market_source_status = {
+        "status": "ok" if indices else "failed",
+        "provider": "+".join(sorted(providers)) if indices else "data_router+tencent",
+        "data_cutoff": max(data_cutoffs) if data_cutoffs else None,
+        "error": "" if indices else "all_realtime_index_sources_failed",
+    }
 
     db = SessionLocal()
     try:
@@ -336,7 +363,8 @@ async def _fetch_market_data() -> dict:
             "holdings_str": hd["holdings_str"], "news": [],
             "available_cash": hd.get("available_cash", 0),
             "total_assets": hd.get("total_assets", 0),
-            "portfolio_sync_failed": hd.get("portfolio_sync_failed", False)}
+            "portfolio_sync_failed": hd.get("portfolio_sync_failed", False),
+            "market_source_status": market_source_status}
 
 
 def _decision_recommendations(decision: dict) -> list[dict]:
@@ -694,9 +722,12 @@ async def _run_premarket_with_status():
                 )
         except Exception as exc:
             logger.warning(f"Sentinel evidence 盘前接入失败，降级继续: {exc}")
-        sh = market_data["indices"].get("sh000001", {}).get("price", 3350)
-        sz = market_data["indices"].get("sz399001", {}).get("price", 10800)
-        logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")
+        sh = market_data["indices"].get("sh000001", {}).get("price")
+        sz = market_data["indices"].get("sz399001", {}).get("price")
+        if sh and sz:
+            logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")
+        else:
+            logger.warning("盘前指数不可用，禁止使用固定占位值")
 
         report = await run_analysis(market_data)
         logger.info("分析完成，启动AI辩论...")

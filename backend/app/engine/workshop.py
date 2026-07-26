@@ -4,6 +4,9 @@ import json
 import re
 from datetime import datetime
 
+from app.services.quant_lifecycle import lot_size_for_code
+from app.services.strategy_profile import get_strategy_profile
+
 logger = logging.getLogger("congxi")
 
 # 风险等级定义
@@ -76,19 +79,18 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
             f"总资产: ¥{float(total_assets):,.2f}\n"
             f"可用现金: ¥{float(available_cash):,.2f}\n"
         )
-    strategy_profile = analysis_report.get("strategy_profile") or {}
-    if strategy_profile:
-        holdings_data += (
-            f"\n【当前策略模式】\n"
-            f"模式: {strategy_profile.get('title', '未指定')}\n"
-            f"目标: {strategy_profile.get('target', '未指定')}\n"
-            f"账户最大回撤: -{strategy_profile.get('max_drawdown_pct', '?')}%\n"
-            f"单票上限: {strategy_profile.get('single_position_limit_pct', '?')}%\n"
-            f"现金底线: {strategy_profile.get('cash_reserve_pct', '?')}%\n"
-            f"单笔硬止损: {strategy_profile.get('stop_loss_pct', '?')}%\n"
-            "报告中的仓位、止损、现金底线必须以上述当前策略模式为准；"
-            "不要沿用旧的30%现金底线或10%单票上限，除非当前策略模式明确如此。\n"
-        )
+    strategy_profile = analysis_report.get("strategy_profile") or get_strategy_profile()
+    holdings_data += (
+        f"\n【当前策略模式】\n"
+        f"模式: {strategy_profile.get('title', '未指定')}\n"
+        f"目标: {strategy_profile.get('target', '未指定')}\n"
+        f"账户最大回撤: -{strategy_profile.get('max_drawdown_pct', '?')}%\n"
+        f"单票上限: {strategy_profile.get('single_position_limit_pct', '?')}%\n"
+        f"现金底线: {strategy_profile.get('cash_reserve_pct', '?')}%\n"
+        f"单笔硬止损: {strategy_profile.get('stop_loss_pct', '?')}%\n"
+        "报告中的仓位、止损、现金底线必须以上述当前策略模式为准；"
+        "不得使用任何与该模式冲突的静态仓位规则。\n"
+    )
     news_str = json.dumps(analysis_report.get("news", []), ensure_ascii=False)
     sentinel_evidence = analysis_report.get("sentinel_evidence", "")
     if sentinel_evidence:
@@ -143,6 +145,7 @@ async def run_debate(analysis_report: dict, strategy_type: str = "premarket") ->
         available_cash=available_cash,
         holdings_codes=holdings_codes,
         total_assets=total_assets,
+        strategy_profile=strategy_profile,
     )
 
     risk_level = max(
@@ -462,20 +465,27 @@ def _apply_account_constraints(
     available_cash: float = 0,
     holdings_codes: set[str] | None = None,
     total_assets: float = 0,
+    strategy_profile: dict | None = None,
 ) -> dict:
     """Filter actionable stock pool by current cash and A-share lot size."""
     holdings_codes = holdings_codes or set()
+    profile = strategy_profile or get_strategy_profile()
     available_cash = round(float(available_cash or 0), 2)
     total_assets = round(float(total_assets or available_cash or 0), 2)
-    reserve_cash = round(total_assets * 0.30, 2) if total_assets else 0
-    executable_cash = max(0.0, min(available_cash, available_cash - reserve_cash))
-    small_account_single_limit = round(total_assets * 0.10, 2) if total_assets and total_assets < 5000 else None
-    max_new_ticket = executable_cash
-    if small_account_single_limit is not None:
-        max_new_ticket = min(max_new_ticket, small_account_single_limit)
+    cash_reserve_pct = float(profile.get("cash_reserve_pct", 0) or 0)
+    single_position_limit_pct = float(profile.get("single_position_limit_pct", 100) or 100)
+    reserve_cash = round(total_assets * cash_reserve_pct / 100, 2) if total_assets else 0
+    executable_cash = max(0.0, available_cash - reserve_cash)
+    single_position_limit = (
+        round(total_assets * single_position_limit_pct / 100, 2)
+        if total_assets
+        else executable_cash
+    )
+    max_new_ticket = min(executable_cash, single_position_limit)
 
     watchlist = []
     stock_pool = []
+    lot_size_by_code: dict[str, int] = {}
     for bucket in ("short_term", "mid_low_freq"):
         section = decision.get(bucket, {})
         if not isinstance(section, dict):
@@ -486,7 +496,10 @@ def _apply_account_constraints(
                 continue
             code = str(rec.get("code", ""))
             price = _extract_first_price(rec.get("buy_range", "") or rec.get("price", ""))
-            min_lot_amount = round(price * 100, 2) if price else None
+            lot_size = lot_size_for_code(code)
+            if code:
+                lot_size_by_code[code] = lot_size
+            min_lot_amount = round(price * lot_size, 2) if price else None
             is_existing = code in holdings_codes
             if (
                 code
@@ -496,7 +509,8 @@ def _apply_account_constraints(
             ):
                 moved = dict(rec)
                 moved["reason_unaffordable"] = (
-                    f"一手约需¥{min_lot_amount:,.2f}，当前可用现金¥{available_cash:,.2f}，"
+                    f"最小交易单位{lot_size}股约需¥{min_lot_amount:,.2f}，"
+                    f"当前可用现金¥{available_cash:,.2f}，"
                     f"按保留现金后可执行预算约¥{max_new_ticket:,.2f}"
                 )
                 watchlist.append(moved)
@@ -507,12 +521,17 @@ def _apply_account_constraints(
 
     decision["stock_pool"] = stock_pool
     decision["unaffordable_watchlist"] = watchlist
+    lot_sizes = set(lot_size_by_code.values())
     decision["account_constraints"] = {
+        "profile_mode": str(profile.get("mode") or "unknown"),
         "available_cash": available_cash,
         "total_assets": total_assets,
+        "cash_reserve_pct": cash_reserve_pct,
+        "single_position_limit_pct": single_position_limit_pct,
         "reserve_cash": reserve_cash,
         "executable_cash": round(max_new_ticket, 2),
-        "lot_size": 100,
+        "lot_size": next(iter(lot_sizes)) if len(lot_sizes) == 1 else None,
+        "lot_size_by_code": lot_size_by_code,
     }
     if watchlist:
         suffix = f" 已将 {len(watchlist)} 个一手买不起的新标的移入观察名单。"

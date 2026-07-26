@@ -2122,6 +2122,60 @@ def test_data_source_audit_marks_sqlite_degraded_from_structured_sync_truth():
     assert "SECRET" not in audit
 
 
+def test_data_source_audit_requires_structured_market_success_with_indices():
+    from scripts.daily_report import build_data_source_audit
+
+    failed_audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {"shanghai": 4000},
+                "market_source_status": {
+                    "status": "failed",
+                    "provider": "data_router+tencent",
+                    "data_cutoff": None,
+                    "error": "all_realtime_index_sources_failed",
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+    ok_audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {"shanghai": 4000},
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": "2026-07-24T15:00:00+08:00",
+                    "error": "",
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+    empty_audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {},
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": "2026-07-24T15:00:00+08:00",
+                    "error": "",
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | degraded |" in failed_audit
+    assert "all_realtime_index_sources_failed" in failed_audit
+    assert "| 行情数据 | ok |" in ok_audit
+    assert "tencent" in ok_audit
+    assert "2026-07-24T15:00:00+08:00" in ok_audit
+    assert "| 行情数据 | degraded |" in empty_audit
+
+
 @pytest.mark.asyncio
 async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
     tmp_path,

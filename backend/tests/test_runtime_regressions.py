@@ -290,6 +290,181 @@ async def test_run_analysis_and_debate_propagate_growth_sprint_profile(monkeypat
     assert "现金底线: 10%" in captured["holdings_data"]
 
 
+@pytest.mark.asyncio
+async def test_run_debate_passes_active_strategy_profile_to_account_constraints(monkeypatch):
+    import app.ai.debate as debate_module
+    import app.engine.workshop as workshop_module
+
+    profile = {
+        "mode": "growth_sprint",
+        "title": "高收益试验模式",
+        "cash_reserve_pct": 10,
+        "single_position_limit_pct": 50,
+    }
+    captured = {}
+
+    class FakeEngine:
+        async def debate(self, market_data, holdings_data, news, role_performance=""):
+            return {
+                "final": {
+                    "final_decision": "观望",
+                    "confidence": 6,
+                    "short_term": {},
+                    "mid_low_freq": {},
+                    "position_plan": {"entries": []},
+                },
+                "debate": {},
+            }
+
+    real_apply = workshop_module._apply_account_constraints
+
+    def capture_profile(*args, **kwargs):
+        captured["strategy_profile"] = kwargs.get("strategy_profile")
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(debate_module, "AIDebateEngine", FakeEngine)
+    monkeypatch.setattr(workshop_module, "_apply_account_constraints", capture_profile)
+
+    await workshop_module.run_debate({
+        "available_cash": 3000,
+        "total_assets": 3000,
+        "holdings_str": "空仓",
+        "strategy_profile": profile,
+        "news": [],
+    })
+
+    assert captured["strategy_profile"] is profile
+
+
+def test_debate_prompts_defer_cash_and_position_limits_to_injected_profile():
+    source = Path("backend/app/ai/debate.py").read_text(encoding="utf-8")
+
+    for stale_rule in (
+        "留足30%现金",
+        "至少保留 30% 总资产",
+        "单票不超20%",
+        "单票不超过 10%",
+        "单票不超过10%",
+    ):
+        assert stale_rule not in source
+    assert source.count("服从【持仓情况】中注入的【当前策略模式】") >= 6
+
+
+@pytest.mark.asyncio
+async def test_cloud_client_deepseek_400_fails_closed_without_response_body_leak(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudClient
+    from app.config import settings
+
+    class FailedResponse:
+        status_code = 400
+        text = "authorization=SECRET-DO-NOT-LEAK"
+
+    class FakeHttpClient:
+        async def post(self, *args, **kwargs):
+            return FailedResponse()
+
+    client = CloudClient.__new__(CloudClient)
+    client._client = FakeHttpClient()
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "test-key")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.chat(
+            "reporter",
+            [{"role": "user", "content": "ping"}],
+            max_tokens=10,
+        )
+
+    assert "DeepSeek API 400" in str(exc_info.value)
+    assert "SECRET" not in str(exc_info.value)
+    assert await client.is_available() is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_fails_closed_when_all_index_sources_fail(
+    monkeypatch,
+):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def no_primary_quote(code):
+        return None
+
+    async def failed_fallback(codes):
+        raise RuntimeError("authorization=SECRET-DO-NOT-REPORT")
+
+    monkeypatch.setattr(main_module.data_router, "fetch", no_primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", failed_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] == "failed"
+    assert result["market_source_status"]["provider"] == "data_router+tencent"
+    assert result["market_source_status"]["data_cutoff"] is None
+    assert result["market_source_status"]["error"]
+    assert "SECRET" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_reports_real_index_source_and_cutoff(monkeypatch):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "change_pct": 1.2,
+            "source": "tencent",
+            "quote_timestamp": "2026-07-24T15:00:00+08:00",
+        }
+
+    async def unexpected_fallback(codes):
+        raise AssertionError("fallback should not be called after real quotes")
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", unexpected_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert len(result["indices"]) == 3
+    assert result["market_source_status"] == {
+        "status": "ok",
+        "provider": "tencent",
+        "data_cutoff": "2026-07-24T15:00:00+08:00",
+        "error": "",
+    }
+
+
 def test_repair_final_decision_uses_roles_when_judge_json_invalid():
     """If judge output is unparsable, synthesize a usable conservative decision."""
     from app.engine.workshop import _repair_final_decision

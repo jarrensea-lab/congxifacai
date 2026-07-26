@@ -384,6 +384,19 @@ def build_data_source_audit(
 ) -> list[str]:
     """Render data-source audit rows for the main report."""
     indices = market_data.get("indices", {}) if isinstance(market_data, dict) else {}
+    market_status = market_data.get("market_source_status", {}) if isinstance(market_data, dict) else {}
+    market_status = market_status if isinstance(market_status, dict) else {}
+    market_ok = market_status.get("status") == "ok" and bool(indices)
+    if market_ok:
+        market_detail = (
+            f"指数 {len(indices)} 项；provider={market_status.get('provider') or 'unknown'}；"
+            f"data_cutoff={market_status.get('data_cutoff') or 'unknown'}"
+        )
+    else:
+        market_detail = (
+            f"指数 {len(indices)} 项；provider={market_status.get('provider') or 'unknown'}；"
+            f"失败原因={market_status.get('error') or 'market_source_status_missing_or_no_indices'}"
+        )
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
     deepseek_status = "configured" if os.getenv("DEEPSEEK_API_KEY") else "missing"
     qwen_status = "configured" if (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")) else "missing"
@@ -400,7 +413,7 @@ def build_data_source_audit(
     rows = [
         "| 数据源 | 状态 | 覆盖/说明 |",
         "|---|---|---|",
-        f"| 行情数据 | {'ok' if indices else 'degraded'} | 指数 {len(indices)} 项 |",
+        f"| 行情数据 | {'ok' if market_ok else 'degraded'} | {market_detail} |",
         f"| Tushare 高频新闻 | {sentinel_status.get('status', 'missing')} | 新闻 {(sentinel_package or {}).get('event_count', 0)} 条 |",
         f"| Sentinel 研究包 | {'ok' if sentinel_package else 'missing'} | 研究输入，不产生交易指令 |",
         f"| DeepSeek | {_status_label(deepseek_status)} | 四角色/裁判主模型；状态表示配置存在，不等于本次探活成功 |",
@@ -2447,10 +2460,17 @@ async def main():
     # ===== 2. 获取行情 =====
     print("📊 获取实时行情...", flush=True)
     tc = FastRealtimeMarketDataSource()
+    market_provider = str(getattr(tc, "name", "fast_realtime_market_data"))
     strategy_profile = get_strategy_profile()
     available_cash = float(portfolio.get("available_cash", portfolio.get("cash", 0)) or 0)
     market_data = {
         "indices": {},
+        "market_source_status": {
+            "status": "failed",
+            "provider": "fast_realtime_market_data",
+            "data_cutoff": None,
+            "error": "index_quotes_not_fetched",
+        },
         "sectors": [],
         "holdings": [],
         "holdings_str": "空仓",
@@ -2466,17 +2486,43 @@ async def main():
         sh = indices.get("sh000001", {})
         sz = indices.get("sz399001", {})
         cy = indices.get("sz399006", {})
-        market_data["indices"] = {
-            "shanghai": sh.get("price", 0),
-            "shenzhen": sz.get("price", 0),
-            "cyb": cy.get("price", 0),
-            "sh_change": sh.get("change_pct", 0),
-            "sz_change": sz.get("change_pct", 0),
-            "cy_change": cy.get("change_pct", 0),
+        normalized_indices = {}
+        cutoffs = []
+        providers = set()
+        for quote, price_key, change_key in (
+            (sh, "shanghai", "sh_change"),
+            (sz, "shenzhen", "sz_change"),
+            (cy, "cyb", "cy_change"),
+        ):
+            if not quote.get("price"):
+                continue
+            normalized_indices[price_key] = quote["price"]
+            normalized_indices[change_key] = quote.get("change_pct", 0)
+            providers.add(str(quote.get("source") or market_provider))
+            cutoff = (
+                quote.get("quote_timestamp")
+                or quote.get("trading_date")
+                or quote.get("captured_at")
+            )
+            if cutoff:
+                cutoffs.append(str(cutoff))
+        market_data["indices"] = normalized_indices
+        market_data["market_source_status"] = {
+            "status": "ok" if normalized_indices else "failed",
+            "provider": "+".join(sorted(providers)) if normalized_indices else market_provider,
+            "data_cutoff": max(cutoffs) if cutoffs else None,
+            "error": "" if normalized_indices else "all_realtime_index_sources_failed",
         }
         print(f"   上证: {sh.get('price','?')} ({sh.get('change_pct',0):+.2f}%) | "
               f"深证: {sz.get('price','?')} ({sz.get('change_pct',0):+.2f}%)", flush=True)
     except Exception as e:
+        market_data["indices"] = {}
+        market_data["market_source_status"] = {
+            "status": "failed",
+            "provider": market_provider,
+            "data_cutoff": None,
+            "error": "all_realtime_index_sources_failed",
+        }
         print(f"   ⚠️ 指数获取失败: {e}", flush=True)
 
     if positions:

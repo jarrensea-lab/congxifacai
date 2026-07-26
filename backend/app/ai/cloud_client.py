@@ -1,7 +1,17 @@
 """云端模型客户端 — DeepSeek (默认) + Qwen (可选)"""
 import httpx
 import json
+import logging
 from app.config import CLOUD_MODELS, settings
+
+
+def _raise_api_error(provider: str, status_code: int) -> None:
+    logging.getLogger("cong-xi-fa-cai").warning(
+        "%s API HTTP %s",
+        provider,
+        status_code,
+    )
+    raise RuntimeError(f"{provider} API {status_code}")
 
 
 class CloudClient:
@@ -54,9 +64,7 @@ class CloudClient:
             headers={"Authorization": f"Bearer {settings.DEEPSEEK_API_KEY}"},
         )
         if resp.status_code != 200:
-            app_logger = __import__('logging').getLogger('cong-xi-fa-cai')
-            app_logger.warning(f"DeepSeek API {resp.status_code}: {resp.text[:200]}")
-            return {"content": json.dumps({"error": f"DeepSeek API {resp.status_code}"}, ensure_ascii=False), "model": model_name, "usage": {}}
+            _raise_api_error("DeepSeek", resp.status_code)
         data = resp.json()
         return {
             "content": data["choices"][0]["message"]["content"],
@@ -79,9 +87,7 @@ class CloudClient:
             headers={"Authorization": f"Bearer {settings.QWEN_API_KEY}"},
         )
         if resp.status_code != 200:
-            app_logger = __import__('logging').getLogger('cong-xi-fa-cai')
-            app_logger.warning(f"Qwen API {resp.status_code}: {resp.text[:200]}")
-            return {"content": json.dumps({"error": f"Qwen API {resp.status_code}"}, ensure_ascii=False), "model": model_name, "usage": {}}
+            _raise_api_error("Qwen", resp.status_code)
         data = resp.json()
         return {
             "content": data["choices"][0]["message"]["content"],
