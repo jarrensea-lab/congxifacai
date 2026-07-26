@@ -73,6 +73,7 @@ def normalize_model_runtime_status(value) -> dict:
                 "model",
                 "status",
                 "fallback_reason",
+                "degradation_reason",
             )
         }
         for call in value.get("calls") or []

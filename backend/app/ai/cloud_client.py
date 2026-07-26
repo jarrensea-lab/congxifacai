@@ -5,6 +5,26 @@ import logging
 from app.config import CLOUD_MODELS, settings
 
 
+class CloudRouteError(RuntimeError):
+    """Sanitized model-route failure with no provider response payload."""
+
+    def __init__(
+        self,
+        *,
+        provider: str,
+        requested_provider: str,
+        model: str,
+        fallback_reason: str,
+        degradation_reason: str,
+    ):
+        super().__init__("cloud model route failed")
+        self.provider = provider
+        self.requested_provider = requested_provider
+        self.model = model
+        self.fallback_reason = fallback_reason
+        self.degradation_reason = degradation_reason
+
+
 def _raise_api_error(provider: str, status_code: int) -> None:
     logging.getLogger("cong-xi-fa-cai").warning(
         "%s API HTTP %s",
@@ -37,12 +57,21 @@ class CloudClient:
             model_name = CLOUD_MODELS.get(fallback_key)
             if not model_name:
                 raise ValueError(f"No fallback for {model_key}")
-            result = await self._call_deepseek(
-                model_name,
-                messages,
-                fallback_key,
-                **kwargs,
-            )
+            try:
+                result = await self._call_deepseek(
+                    model_name,
+                    messages,
+                    fallback_key,
+                    **kwargs,
+                )
+            except Exception:
+                raise CloudRouteError(
+                    provider="DeepSeek",
+                    requested_provider="Qwen",
+                    model=model_name,
+                    fallback_reason="qwen_api_key_missing",
+                    degradation_reason="cloud_call_failed",
+                ) from None
             return {
                 **result,
                 "requested_provider": "Qwen",

@@ -678,6 +678,7 @@ def _model_runtime_truth(value: dict | None) -> dict:
                 "model",
                 "status",
                 "fallback_reason",
+                "degradation_reason",
             )
         }
         for call in value.get("calls") or []

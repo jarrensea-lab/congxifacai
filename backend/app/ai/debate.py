@@ -293,6 +293,7 @@ def build_model_runtime_status(calls: list[dict]) -> dict:
                 "model",
                 "status",
                 "fallback_reason",
+                "degradation_reason",
             )
         }
         sanitized_calls.append(sanitized)
@@ -302,8 +303,10 @@ def build_model_runtime_status(calls: list[dict]) -> dict:
         fallback_reason = sanitized["fallback_reason"]
         if fallback_reason and fallback_reason not in degradation_reasons:
             degradation_reasons.append(fallback_reason)
-        if sanitized["status"] != "success" and not fallback_reason:
-            reason = str(call.get("degradation_reason") or "cloud_call_failed")
+        reason = sanitized["degradation_reason"]
+        if not reason and sanitized["status"] != "success" and not fallback_reason:
+            reason = "cloud_call_failed"
+        if reason:
             if reason not in degradation_reasons:
                 degradation_reasons.append(reason)
 
@@ -440,25 +443,41 @@ class AIDebateEngine:
                             "degradation_reason": "empty_model_output",
                         }
                 except Exception as ce:
+                    provider = str(
+                        getattr(ce, "provider", "") or requested_provider
+                    )
+                    routed_requested_provider = str(
+                        getattr(ce, "requested_provider", "")
+                        or requested_provider
+                    )
+                    fallback_reason = str(
+                        getattr(ce, "fallback_reason", "") or ""
+                    )
+                    degradation_reason = str(
+                        getattr(ce, "degradation_reason", "")
+                        or "cloud_call_failed"
+                    )
                     logger.warning(
-                        f"{requested_provider} 调用不可用({name}): {ce}"
+                        f"{provider} 调用不可用({name})"
                     )
                     return {
                         "content": _json.dumps(
                             {
                                 "error": "AI服务暂不可用",
                                 "degraded": True,
-                                "reason": str(ce)[:200],
+                                "reason": degradation_reason,
                             },
                             ensure_ascii=False,
                         ),
                         "thinking": "",
-                        "provider": requested_provider,
-                        "requested_provider": requested_provider,
-                        "model": model,
+                        "provider": provider,
+                        "requested_provider": routed_requested_provider,
+                        "model": str(
+                            getattr(ce, "model", "") or model
+                        ),
                         "status": "degraded",
-                        "fallback_reason": "",
-                        "degradation_reason": "cloud_call_failed",
+                        "fallback_reason": fallback_reason,
+                        "degradation_reason": degradation_reason,
                     }
 
             # === llama.cpp 本地模型 ===

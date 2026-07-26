@@ -3966,6 +3966,48 @@ def test_report_model_status_uses_actual_runtime_truth(
         assert "调用成功" not in header
 
 
+def test_report_shows_deepseek_as_actual_failed_qwen_fallback_route():
+    from scripts.daily_report import (
+        build_data_source_audit,
+        format_model_runtime_header,
+    )
+
+    runtime_status = {
+        "status": "degraded",
+        "providers": ["DeepSeek"],
+        "calls": [
+            {
+                "role": "裁判",
+                "provider": "DeepSeek",
+                "requested_provider": "Qwen",
+                "model": "deepseek-chat",
+                "status": "degraded",
+                "fallback_reason": "qwen_api_key_missing",
+            }
+        ],
+        "degradation_reasons": [
+            "qwen_api_key_missing",
+            "cloud_call_failed",
+        ],
+    }
+
+    header = format_model_runtime_header(runtime_status)
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={"indices": {}},
+            sentinel_package=None,
+            model_runtime_status=runtime_status,
+        )
+    )
+
+    assert header == "> 🤖 本次AI路由：DeepSeek（降级）"
+    assert "Qwen" not in header
+    assert (
+        "实际提供方：DeepSeek；"
+        "Qwen 密钥缺失，实际回退到 DeepSeek；云端模型调用失败"
+    ) in audit
+
+
 def test_daily_report_archive_keeps_all_report_types_in_trade_day_folder(tmp_path):
     from app.services.report_archive import save_markdown_report
 

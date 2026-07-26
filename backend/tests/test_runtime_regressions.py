@@ -447,6 +447,74 @@ async def test_cloud_client_marks_qwen_missing_key_fallback_as_degraded_route(
 
 
 @pytest.mark.asyncio
+async def test_qwen_missing_key_preserves_deepseek_route_when_fallback_fails(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudClient
+    from app.config import settings
+
+    client = CloudClient.__new__(CloudClient)
+
+    async def failed_deepseek(*args, **kwargs):
+        raise RuntimeError("authorization=SECRET-DO-NOT-REPORT")
+
+    monkeypatch.setattr(settings, "QWEN_API_KEY", "")
+    monkeypatch.setattr(client, "_call_deepseek", failed_deepseek)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.chat(
+            "qwen_judge",
+            [{"role": "user", "content": "test"}],
+        )
+
+    error = exc_info.value
+    assert error.provider == "DeepSeek"
+    assert error.requested_provider == "Qwen"
+    assert error.fallback_reason == "qwen_api_key_missing"
+    assert error.degradation_reason == "cloud_call_failed"
+    assert "SECRET" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_ai_role_keeps_failed_qwen_fallback_route_in_runtime_truth(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudRouteError, cloud
+    from app.ai.debate import AIDebateEngine, build_model_runtime_status
+
+    async def failed_chat(*args, **kwargs):
+        raise CloudRouteError(
+            provider="DeepSeek",
+            requested_provider="Qwen",
+            model="deepseek-chat",
+            fallback_reason="qwen_api_key_missing",
+            degradation_reason="cloud_call_failed",
+        )
+
+    monkeypatch.setattr(cloud, "chat", failed_chat)
+
+    call = await AIDebateEngine()._call_role(
+        "裁判",
+        "test",
+        "cloud-judge",
+    )
+    runtime = build_model_runtime_status([
+        {"role": "裁判", **call},
+    ])
+
+    assert call["provider"] == "DeepSeek"
+    assert call["requested_provider"] == "Qwen"
+    assert call["fallback_reason"] == "qwen_api_key_missing"
+    assert call["degradation_reason"] == "cloud_call_failed"
+    assert runtime["status"] == "degraded"
+    assert runtime["providers"] == ["DeepSeek"]
+    assert runtime["degradation_reasons"] == [
+        "qwen_api_key_missing",
+        "cloud_call_failed",
+    ]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("qwen_fallback", "expected_status", "expected_providers"),
     [
