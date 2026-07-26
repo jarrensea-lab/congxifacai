@@ -59,6 +59,7 @@ def test_runtime_yitaojin_defaults_use_local_state_directory(monkeypatch, tmp_pa
         "CONGXI_YITAOJIN_WATCHLIST_STATE_PATH",
         "CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH",
         "CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH",
+        "CONGXI_YITAOJIN_RUNTIME_STATUS_PATH",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -72,6 +73,7 @@ def test_runtime_yitaojin_defaults_use_local_state_directory(monkeypatch, tmp_pa
     assert paths.watchlist_state == root / "yitaojin" / "watchlist_state.json"
     assert paths.watchlist_audit == root / "yitaojin" / "watchlist_sync_audit.jsonl"
     assert paths.quote_snapshot == root / "yitaojin" / "quote_snapshot.json"
+    assert paths.runtime_status == root / "yitaojin" / "runtime_status.json"
     assert not root.exists()
 
 
@@ -87,6 +89,7 @@ def test_runtime_yitaojin_individual_path_overrides_are_respected(monkeypatch, t
         "CONGXI_YITAOJIN_WATCHLIST_STATE_PATH": tmp_path / "watchlist.json",
         "CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH": tmp_path / "watchlist.jsonl",
         "CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH": tmp_path / "quotes.json",
+        "CONGXI_YITAOJIN_RUNTIME_STATUS_PATH": tmp_path / "runtime-status.json",
     }
     for name, path in overrides.items():
         monkeypatch.setenv(name, str(path))
@@ -102,6 +105,7 @@ def test_runtime_yitaojin_individual_path_overrides_are_respected(monkeypatch, t
     assert paths.watchlist_state == overrides["CONGXI_YITAOJIN_WATCHLIST_STATE_PATH"]
     assert paths.watchlist_audit == overrides["CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH"]
     assert paths.quote_snapshot == overrides["CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH"]
+    assert paths.runtime_status == overrides["CONGXI_YITAOJIN_RUNTIME_STATUS_PATH"]
 
 
 def test_business_engine_and_scheduler_use_distinct_resolved_paths():

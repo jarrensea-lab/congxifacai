@@ -1,6 +1,7 @@
 """FastAPI 主应用 — V7: DeepSeek云端AI + 飞书全通道 + 定时调度"""
 import asyncio
 import json
+import os
 from contextlib import asynccontextmanager
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -168,6 +169,7 @@ async def lifespan(app: FastAPI):
         'interval', seconds=30,
         id='bot_poll', name='飞书Bot消息轮询', replace_existing=True,
     )
+    register_yitaojin_jobs(scheduler)
 
     scheduler.start()
     for stale_job_id in ("daily_report",):
@@ -195,6 +197,16 @@ app = FastAPI(
     version="8.2.0-dev",
     lifespan=lifespan,
 )
+
+
+@app.get("/api/integrations/yitaojin/status")
+async def get_yitaojin_runtime_status():
+    """Expose sanitized broker integration health without account material."""
+    from app.config import resolve_runtime_yitaojin_paths
+    from app.integrations.yitaojin.runtime import load_yitaojin_runtime_status
+
+    paths = resolve_runtime_yitaojin_paths()
+    return load_yitaojin_runtime_status(paths.runtime_status)
 
 # ============================================================
 # 共享实例初始化
@@ -401,6 +413,12 @@ async def _scan_candidate_pool_and_push(
     entry_gate: dict | None = None,
 ) -> dict:
     effective_entry_gate = entry_gate or load_runtime_visible_decision_gate()
+    effective_entry_gate, quote_validations = (
+        _runtime_quote_gate_and_validations(
+            effective_entry_gate,
+            positions=positions,
+        )
+    )
     try:
         result = await evaluate_candidate_pool(
             CandidatePoolStore(),
@@ -409,6 +427,7 @@ async def _scan_candidate_pool_and_push(
             total_assets=float(total_assets or 0),
             positions=positions,
             entry_gate=effective_entry_gate,
+            quote_validations=quote_validations,
         )
     except Exception as exc:
         logger.warning(f"{stage}候选池扫描失败: {exc}")
@@ -436,6 +455,83 @@ async def _scan_candidate_pool_and_push(
     }
 
 
+def _runtime_quote_gate_and_validations(
+    entry_gate: dict,
+    *,
+    positions: dict[str, dict] | None,
+    quote_summary: dict | None = None,
+) -> tuple[dict, dict | None]:
+    """Use live per-code quotes while preserving every non-quote decision veto."""
+    if quote_summary is None:
+        try:
+            from app.config import resolve_runtime_yitaojin_paths
+            from app.integrations.yitaojin.quotes import (
+                load_quote_validation_summary,
+            )
+
+            paths = resolve_runtime_yitaojin_paths()
+            try:
+                raw = json.loads(
+                    paths.quote_snapshot.read_text(encoding="utf-8")
+                )
+            except (OSError, json.JSONDecodeError):
+                raw = {}
+            requested_codes = (
+                {
+                    str(code)
+                    for code in raw.get("requested_codes", [])
+                    if isinstance(code, str)
+                }
+                if isinstance(raw, dict)
+                else set()
+            )
+            held_codes = set(positions or {})
+            quote_summary = load_quote_validation_summary(
+                paths.quote_snapshot,
+                critical_codes=requested_codes - held_codes,
+            )
+        except Exception:
+            quote_summary = {
+                "enabled": (
+                    os.getenv("CONGXI_YITAOJIN_ENABLED", "")
+                    .strip()
+                    .lower()
+                    == "true"
+                ),
+                "status": "unavailable",
+                "validations": {},
+                "reasons": ["quote_snapshot_unavailable"],
+            }
+    current_reasons = list(entry_gate.get("reasons") or [])
+    quote_enabled = (
+        isinstance(quote_summary, dict)
+        and quote_summary.get("enabled") is True
+    )
+    if not quote_enabled and "quote_validation_blocked" not in current_reasons:
+        return entry_gate, None
+
+    runtime_gate = dict(entry_gate)
+    reasons = [
+        reason
+        for reason in current_reasons
+        if reason != "quote_validation_blocked"
+    ]
+    runtime_gate["reasons"] = reasons
+    runtime_gate["entry_allowed"] = not reasons
+    runtime_gate["state"] = "allowed" if not reasons else "blocked"
+    if not quote_enabled:
+        if isinstance(quote_summary, dict):
+            runtime_gate["quote_validation"] = dict(quote_summary)
+        return runtime_gate, None
+
+    runtime_gate["quote_validation"] = dict(quote_summary)
+    validations = quote_summary.get("validations")
+    return (
+        runtime_gate,
+        dict(validations) if isinstance(validations, dict) else {},
+    )
+
+
 def _in_intraday_alert_window(now: datetime | None = None) -> bool:
     now = now or datetime.now()
     current = now.time()
@@ -457,6 +553,9 @@ async def _run_intraday_alert_scan_with_status():
         return
     gs["running"] = True
     gs["started_at"] = str(datetime.now())
+    yitaojin_quote_task = asyncio.create_task(
+        _run_yitaojin_quotes_with_status("intraday_quotes")
+    )
     try:
         logger.info("--- 盘中事件触发扫描 ---")
         db = SessionLocal()
@@ -488,6 +587,13 @@ async def _run_intraday_alert_scan_with_status():
             if deliverable_watch_alerts:
                 _feishu_webhook_push("旺财V7.5 盘中持仓触发", _format_lifecycle_alerts(deliverable_watch_alerts))
 
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(yitaojin_quote_task),
+                    timeout=50,
+                )
+            except asyncio.TimeoutError:
+                logger.warning("盘中易淘金行情校验超时，候选入场将失败关闭")
             acc = db.query(SimAccount).first()
             cash, total_assets = _account_cash_and_total(acc)
             lifecycle_result = await _scan_candidate_pool_and_push(
@@ -954,6 +1060,107 @@ async def _run_daily_report_with_status():
             logger.warning("次日投资策略主报告结束但未返回报告路径")
     except Exception as e:
         logger.error(f"次日投资策略主报告异常: {e}", exc_info=True)
+
+
+async def _run_yitaojin_task_with_status(task: str) -> dict:
+    """Run one isolated broker task; failures never abort reports or risk scans."""
+    try:
+        from app.integrations.yitaojin.runtime import run_yitaojin_task
+
+        result = await run_yitaojin_task(task)
+        state = result.get("state", "unknown")
+        if state == "failed":
+            logger.warning(
+                "易淘金任务失败: "
+                f"task={task} reason={result.get('last_failure_reason', 'unknown')}"
+            )
+        else:
+            logger.info(f"易淘金任务完成: task={task} state={state}")
+        return result
+    except Exception as exc:
+        logger.error(
+            f"易淘金任务包装器异常: task={task} type={exc.__class__.__name__}",
+            exc_info=True,
+        )
+        return {
+            "enabled": bool(getattr(settings, "CONGXI_YITAOJIN_ENABLED", False)),
+            "state": "failed",
+            "task": task,
+            "last_failure_reason": exc.__class__.__name__,
+        }
+
+
+async def _run_yitaojin_morning_with_status():
+    return await _run_yitaojin_task_with_status("morning")
+
+
+async def _run_yitaojin_evening_with_status():
+    return await _run_yitaojin_task_with_status("evening")
+
+
+async def _run_yitaojin_quotes_with_status(task: str = "priority_quotes"):
+    return await _run_yitaojin_task_with_status(task)
+
+
+def register_yitaojin_jobs(target_scheduler) -> None:
+    """Register bounded jobs; intraday quote refresh reuses the existing scan."""
+    job_options = {
+        "replace_existing": True,
+        "max_instances": 1,
+        "coalesce": True,
+    }
+    target_scheduler.add_job(
+        _run_yitaojin_morning_with_status,
+        CronTrigger(
+            hour=8,
+            minute=55,
+            day_of_week="mon-fri",
+            timezone="Asia/Shanghai",
+        ),
+        id="yitaojin_morning",
+        name="易淘金盘前账户、自选与重点行情",
+        misfire_grace_time=300,
+        **job_options,
+    )
+    target_scheduler.add_job(
+        _run_yitaojin_quotes_with_status,
+        CronTrigger(
+            hour=11,
+            minute=35,
+            day_of_week="mon-fri",
+            timezone="Asia/Shanghai",
+        ),
+        id="yitaojin_midday_quotes",
+        name="易淘金午间重点行情校验",
+        misfire_grace_time=120,
+        **job_options,
+    )
+    target_scheduler.add_job(
+        _run_yitaojin_quotes_with_status,
+        CronTrigger(
+            hour=14,
+            minute=55,
+            day_of_week="mon-fri",
+            timezone="Asia/Shanghai",
+        ),
+        id="yitaojin_close_quotes",
+        name="易淘金收盘前重点行情校验",
+        misfire_grace_time=120,
+        **job_options,
+    )
+    target_scheduler.add_job(
+        _run_yitaojin_evening_with_status,
+        CronTrigger(
+            hour=20,
+            minute=45,
+            day_of_week="mon-fri",
+            timezone="Asia/Shanghai",
+        ),
+        id="yitaojin_evening",
+        name="易淘金晚间账户与自选同步",
+        misfire_grace_time=900,
+        **job_options,
+    )
 
 
 async def _run_sentinel_research_with_status():

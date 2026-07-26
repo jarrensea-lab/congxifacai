@@ -30,6 +30,7 @@ class RuntimeYitaojinPaths:
     watchlist_state: Path
     watchlist_audit: Path
     quote_snapshot: Path
+    runtime_status: Path
 
 
 def resolve_runtime_state_dir() -> Path:
@@ -89,6 +90,10 @@ def resolve_runtime_yitaojin_paths() -> RuntimeYitaojinPaths:
             "CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH",
             integration_dir / "quote_snapshot.json",
         ),
+        runtime_status=resolve(
+            "CONGXI_YITAOJIN_RUNTIME_STATUS_PATH",
+            integration_dir / "runtime_status.json",
+        ),
     )
 
 
@@ -142,6 +147,13 @@ class Settings(BaseSettings):
     # 服务配置
     SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000
+
+    # 广发易淘金：默认完全关闭，UI 写入还需第二个开关
+    CONGXI_YITAOJIN_ENABLED: bool = False
+    CONGXI_YITAOJIN_WRITE_ENABLED: bool = False
+    CONGXI_YITAOJIN_APP_PATH: str = "/Applications/GF-Trader.app"
+    CONGXI_YITAOJIN_TASK_TIMEOUT_SECONDS: int = 120
+    CONGXI_YITAOJIN_APP_START_TIMEOUT_SECONDS: int = 30
 
     # 数据库
     DATABASE_PATH: str = _runtime_database_paths.business
