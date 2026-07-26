@@ -1,6 +1,7 @@
 import csv
 import json
 import math
+import stat
 import zipfile
 from pathlib import Path
 
@@ -9,7 +10,9 @@ import pytest
 from app.data_sources.offline_market_data import (
     ExternalMarketDataRegistry,
     OfflineMinuteDataSource,
+    OfflineArchiveDataError,
 )
+from app.data_sources import offline_market_data
 
 
 def _write_csv(path: Path, rows: list[list[object]]) -> None:
@@ -83,6 +86,81 @@ def test_registry_rejects_live_mode_for_external_historical_data(tmp_path):
 
     with pytest.raises(ValueError, match="shadow"):
         ExternalMarketDataRegistry.load(registry_path)
+
+
+@pytest.mark.parametrize(
+    ("payload", "reason"),
+    [
+        ([], "registry_root_not_object"),
+        (
+            {
+                "version": 1,
+                "mode": "shadow",
+                "minute_data": [],
+                "adjustment_factors": {},
+            },
+            "registry_section_invalid:minute_data",
+        ),
+        (
+            {
+                "version": 1,
+                "mode": "shadow",
+                "minute_data": {"root": "relative/minutes"},
+                "adjustment_factors": {
+                    "primary": "tushare_csv",
+                    "tushare_csv": {"root": "/absolute/factors"},
+                },
+            },
+            "registry_path_not_absolute:minute_data.root",
+        ),
+        (
+            {
+                "version": 1,
+                "mode": "shadow",
+                "minute_data": {"root": "/absolute/minutes"},
+                "adjustment_factors": {
+                    "primary": "tushare_csv",
+                    "tushare_csv": {"root": "/absolute/factors"},
+                    "vendor_archives": [],
+                },
+            },
+            "registry_section_invalid:adjustment_factors.vendor_archives",
+        ),
+        (
+            {
+                "version": 1,
+                "mode": "shadow",
+                "minute_data": {"root": "/absolute/minutes"},
+                "adjustment_factors": {
+                    "primary": "tushare_csv",
+                    "tushare_csv": {"root": "/absolute/factors"},
+                    "vendor_archives": {"root": "relative/vendor"},
+                },
+            },
+            "registry_path_not_absolute:adjustment_factors.vendor_archives.root",
+        ),
+    ],
+)
+def test_registry_rejects_malformed_shape_and_relative_paths(
+    tmp_path,
+    payload,
+    reason,
+):
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=reason):
+        ExternalMarketDataRegistry.load(registry_path)
+
+
+def test_registry_wraps_malformed_json_with_safe_named_error(tmp_path):
+    registry_path = tmp_path / "registry.json"
+    registry_path.write_text("{not-json", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="registry_json_invalid") as exc_info:
+        ExternalMarketDataRegistry.load(registry_path)
+
+    assert "not-json" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -500,3 +578,488 @@ async def test_qfq_reference_factor_never_uses_factor_after_as_of(tmp_path):
 
     assert result["status"] == "ok"
     assert result["bars"][0]["close"] == 5.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("factor", ["nan", "inf", "-inf", "0", "-1", ""])
+async def test_qfq_rejects_nonfinite_or_nonpositive_factor(tmp_path, factor):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2025,
+        member="sz000725_2025.csv",
+        rows=[
+            header,
+            ["2025-01-02 15:00:00", "sz000725", "京东方Ａ", 10, 10, 10, 10, 100, 1000, 0, 0],
+        ],
+    )
+    _write_csv(
+        registry.tushare_factor_root / "000725.SZ.csv",
+        [
+            ["股票代码", "交易日期", "复权因子"],
+            ["000725.SZ", "20250102", factor],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="qfq",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "invalid_adjustment_factor"
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("factor_code", "reason"),
+    [
+        ("000001.SZ", "adjustment_factor_code_mismatch"),
+        ("", "adjustment_factor_code_invalid"),
+        ("not-a-code", "adjustment_factor_code_invalid"),
+    ],
+)
+async def test_qfq_rejects_invalid_or_mismatched_factor_code(
+    tmp_path,
+    factor_code,
+    reason,
+):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2025,
+        member="sz000725_2025.csv",
+        rows=[
+            header,
+            ["2025-01-02 15:00:00", "sz000725", "京东方Ａ", 10, 10, 10, 10, 100, 1000, 0, 0],
+        ],
+    )
+    _write_csv(
+        registry.tushare_factor_root / "000725.SZ.csv",
+        [
+            ["股票代码", "交易日期", "复权因子"],
+            [factor_code, "20250102", "1.0"],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="qfq",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == reason
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+async def test_qfq_rejects_duplicate_factor_trade_date(tmp_path):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2025,
+        member="sz000725_2025.csv",
+        rows=[
+            header,
+            ["2025-01-02 15:00:00", "sz000725", "京东方Ａ", 10, 10, 10, 10, 100, 1000, 0, 0],
+        ],
+    )
+    _write_csv(
+        registry.tushare_factor_root / "000725.SZ.csv",
+        [
+            ["股票代码", "交易日期", "复权因子"],
+            ["000725.SZ", "20250102", "1.0"],
+            ["000725.SZ", "20250102", "1.0"],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="qfq",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "duplicate_adjustment_factor_date"
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+async def test_qfq_rejects_nonfinite_adjusted_output(tmp_path):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2025,
+        member="sz000725_2025.csv",
+        rows=[
+            header,
+            ["2025-01-02 15:00:00", "sz000725", "京东方Ａ", 10, 10, 10, 10, 100, 1000, 0, 0],
+            ["2025-01-03 15:00:00", "sz000725", "京东方Ａ", 10, 10, 10, 10, 100, 1000, 0, 0],
+        ],
+    )
+    _write_csv(
+        registry.tushare_factor_root / "000725.SZ.csv",
+        [
+            ["股票代码", "交易日期", "复权因子"],
+            ["000725.SZ", "20250102", "1e308"],
+            ["000725.SZ", "20250103", "1e-308"],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=2,
+        adjustment="qfq",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "adjusted_price_not_finite"
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("row_code", "reason"),
+    [
+        ("000001", "minute_row_code_mismatch"),
+        ("", "minute_row_code_invalid"),
+        ("not-a-code", "minute_row_code_invalid"),
+    ],
+)
+async def test_minute_row_code_must_match_requested_member(
+    tmp_path,
+    row_code,
+    reason,
+):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["2026-07-03 15:00:00", row_code, "错误行", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="none",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == reason
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+async def test_zip_member_size_limit_fails_closed_before_open(tmp_path, monkeypatch):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["2026-07-03 15:00:00", "sz000725", "京东方Ａ", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0],
+        ],
+    )
+    monkeypatch.setattr(offline_market_data, "MAX_ZIP_MEMBER_BYTES", 16)
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="none",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "archive_member_too_large"
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+async def test_zip_compression_ratio_limit_fails_closed_before_open(
+    tmp_path,
+    monkeypatch,
+):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["2026-07-03 15:00:00", "sz000725", "京东方Ａ", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0],
+        ],
+    )
+    monkeypatch.setattr(offline_market_data, "MAX_ZIP_COMPRESSION_RATIO", 0.5)
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="none",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "archive_member_compression_ratio_exceeded"
+    assert result["bars"] == []
+
+
+@pytest.mark.parametrize(
+    ("flag_bits", "unix_mode", "reason"),
+    [
+        (0x1, stat.S_IFREG | 0o600, "archive_member_encrypted"),
+        (0, stat.S_IFLNK | 0o777, "archive_member_non_regular"),
+    ],
+)
+def test_zip_rejects_encrypted_or_nonregular_member(
+    flag_bits,
+    unix_mode,
+    reason,
+):
+    info = zipfile.ZipInfo("sz000725_2026.csv")
+    info.file_size = 100
+    info.compress_size = 50
+    info.flag_bits = flag_bits
+    info.external_attr = unix_mode << 16
+
+    with pytest.raises(OfflineArchiveDataError, match=reason):
+        offline_market_data._validate_zip_member_info(info)
+
+
+@pytest.mark.asyncio
+async def test_zip_row_limit_fails_closed(tmp_path, monkeypatch):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["2026-07-03 14:59:00", "sz000725", "京东方Ａ", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0],
+            ["2026-07-03 15:00:00", "sz000725", "京东方Ａ", 8.1, 8.2, 8.3, 8, 100, 820, 0, 0],
+        ],
+    )
+    monkeypatch.setattr(offline_market_data, "MAX_CSV_ROWS", 1)
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="none",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "archive_row_limit_exceeded"
+    assert result["bars"] == []
+
+
+@pytest.mark.asyncio
+async def test_aware_row_and_as_of_are_converted_to_shanghai_timezone(tmp_path):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="5",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["2026-07-03T01:35:00+00:00", "sz000725", "京东方Ａ", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0],
+            ["2026-07-03T01:45:00+00:00", "sz000725", "京东方Ａ", 8.1, 8.2, 8.3, 8, 100, 820, 0, 0],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="5",
+        count=10,
+        adjustment="none",
+        as_of="2026-07-03T01:40:00+00:00",
+    )
+
+    assert result["status"] == "ok"
+    assert [bar["date"] for bar in result["bars"]] == [
+        "2026-07-03 09:35:00"
+    ]
+    assert result["data_cutoff"] == "2026-07-03 09:35:00"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_as_of", ["not-a-timestamp", "", 0])
+async def test_invalid_as_of_returns_named_safe_error(tmp_path, invalid_as_of):
+    registry = _registry(tmp_path)
+    registry.minute_root.mkdir(parents=True)
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="none",
+        as_of=invalid_as_of,
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "invalid_as_of"
+    if invalid_as_of == "not-a-timestamp":
+        assert invalid_as_of not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_invalid_archive_timestamp_returns_named_safe_error(tmp_path):
+    registry = _registry(tmp_path)
+    header = ["时间", "代码", "名称", "开盘价", "收盘价", "最高价", "最低价", "成交量", "成交额", "涨幅", "振幅"]
+    _write_minute_archive(
+        registry.minute_root,
+        period="1",
+        year=2026,
+        member="sz000725_2026.csv",
+        rows=[
+            header,
+            ["not-a-timestamp", "sz000725", "京东方Ａ", 8, 8.1, 8.2, 7.9, 100, 810, 0, 0],
+        ],
+    )
+
+    result = await OfflineMinuteDataSource(registry).fetch_kline(
+        "000725",
+        period="day",
+        count=1,
+        adjustment="none",
+    )
+
+    assert result["status"] == "error"
+    assert result["reason"] == "invalid_timestamp"
+    assert "not-a-timestamp" not in json.dumps(result, ensure_ascii=False)
+
+
+def _valid_offline_response() -> dict:
+    return {
+        "status": "ok",
+        "data_cutoff": "2026-07-03 15:00:00",
+        "bars": [
+            {
+                "date": "2026-07-02",
+                "open": 8.0,
+                "close": 8.1,
+                "high": 8.2,
+                "low": 7.9,
+                "volume": 100.0,
+                "amount": 810.0,
+            },
+            {
+                "date": "2026-07-03",
+                "open": 8.1,
+                "close": 8.2,
+                "high": 8.3,
+                "low": 8.0,
+                "volume": 110.0,
+                "amount": 902.0,
+            },
+        ],
+    }
+
+
+def test_offline_response_validator_accepts_complete_chronological_bars():
+    response = _valid_offline_response()
+
+    bars, error = offline_market_data.validate_offline_kline_response(
+        response,
+        as_of="2026-07-03",
+        minimum_bars=2,
+    )
+
+    assert error is None
+    assert bars == response["bars"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload["bars"][0].pop("amount"),
+        lambda payload: payload["bars"][0].update(close=float("nan")),
+        lambda payload: payload["bars"][0].update(volume=-1),
+        lambda payload: payload["bars"][0].update(high=7.0),
+        lambda payload: payload.update(bars="not-a-list"),
+    ],
+)
+def test_offline_response_validator_rejects_malformed_bar_values(mutate):
+    response = _valid_offline_response()
+    mutate(response)
+
+    bars, error = offline_market_data.validate_offline_kline_response(
+        response,
+        as_of="2026-07-03",
+    )
+
+    assert bars == []
+    assert error == "offline_history_invalid"
+
+
+@pytest.mark.parametrize(
+    "dates",
+    [
+        ["2026-07-02", "2026-07-02"],
+        ["2026-07-03", "2026-07-02"],
+        ["not-a-date", "2026-07-03"],
+    ],
+)
+def test_offline_response_validator_rejects_duplicate_or_unordered_dates(dates):
+    response = _valid_offline_response()
+    for bar, bar_date in zip(response["bars"], dates, strict=True):
+        bar["date"] = bar_date
+
+    bars, error = offline_market_data.validate_offline_kline_response(
+        response,
+        as_of="2026-07-03",
+    )
+
+    assert bars == []
+    assert error == "offline_history_invalid"
+
+
+@pytest.mark.parametrize(
+    ("data_cutoff", "as_of"),
+    [
+        ("not-a-date", "2026-07-03"),
+        ("2026-07-04 09:30:00", "2026-07-03"),
+        ("2026-07-02 09:30:00", "2026-07-03"),
+    ],
+)
+def test_offline_response_validator_enforces_data_cutoff(data_cutoff, as_of):
+    response = _valid_offline_response()
+    response["data_cutoff"] = data_cutoff
+
+    bars, error = offline_market_data.validate_offline_kline_response(
+        response,
+        as_of=as_of,
+    )
+
+    assert bars == []
+    assert error == "offline_history_invalid"

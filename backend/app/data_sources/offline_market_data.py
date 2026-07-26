@@ -12,11 +12,13 @@ import io
 import json
 import math
 import os
+import stat
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, time
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.data_sources.base import BaseDataSource
 from app.utils.a_share_codes import a_share_exchange, normalize_a_share_code
@@ -25,6 +27,13 @@ from app.utils.a_share_codes import a_share_exchange, normalize_a_share_code
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_REGISTRY_PATH = PROJECT_ROOT / "data" / "external_market_data_sources.json"
 SUPPORTED_PERIODS = {"1", "5", "15", "30", "60", "day"}
+MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
+# One annual, one-stock minute CSV should stay far below these fail-closed
+# ceilings. They prevent a registry-selected archive from becoming an
+# unbounded decompression/read operation while preserving normal vendor files.
+MAX_ZIP_MEMBER_BYTES = 256 * 1024 * 1024
+MAX_ZIP_COMPRESSION_RATIO = 250.0
+MAX_CSV_ROWS = 1_000_000
 NUMERIC_FIELDS = {
     "open": "开盘价",
     "close": "收盘价",
@@ -33,6 +42,15 @@ NUMERIC_FIELDS = {
     "volume": "成交量",
     "amount": "成交额",
 }
+RETURNED_BAR_FIELDS = (
+    "date",
+    "open",
+    "close",
+    "high",
+    "low",
+    "volume",
+    "amount",
+)
 
 
 class OfflineArchiveDataError(ValueError):
@@ -56,30 +74,41 @@ class ExternalMarketDataRegistry:
     @classmethod
     def load(cls, path: str | Path) -> "ExternalMarketDataRegistry":
         registry_path = Path(path).expanduser().resolve()
-        payload = json.loads(registry_path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(registry_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            raise ValueError("registry_json_invalid") from None
+        if not isinstance(payload, dict):
+            raise ValueError("registry_root_not_object")
         mode = str(payload.get("mode") or "").strip().lower()
         if mode != "shadow":
             raise ValueError("external historical market data must stay in shadow mode")
 
+        _required_object(payload, ("minute_data",))
+        adjustment_factors = _required_object(
+            payload,
+            ("adjustment_factors",),
+        )
+        _required_object(payload, ("adjustment_factors", "tushare_csv"))
         minute_root = _required_root(payload, ("minute_data", "root"))
         factor_root = _required_root(
             payload,
             ("adjustment_factors", "tushare_csv", "root"),
         )
-        primary = (
-            payload.get("adjustment_factors", {}).get("primary")
-            if isinstance(payload.get("adjustment_factors"), dict)
-            else None
-        )
+        primary = adjustment_factors.get("primary")
         if primary != "tushare_csv":
             raise ValueError("tushare_csv must be the primary adjustment factor source")
 
-        vendor_value = (
-            payload.get("adjustment_factors", {})
-            .get("vendor_archives", {})
-            .get("root")
-        )
-        vendor_root = Path(vendor_value).expanduser().resolve() if vendor_value else None
+        vendor_root = None
+        if "vendor_archives" in adjustment_factors:
+            _required_object(
+                payload,
+                ("adjustment_factors", "vendor_archives"),
+            )
+            vendor_root = _required_root(
+                payload,
+                ("adjustment_factors", "vendor_archives", "root"),
+            )
         return cls(
             path=registry_path,
             mode=mode,
@@ -103,7 +132,25 @@ def _required_root(payload: dict[str, Any], keys: tuple[str, ...]) -> Path:
         value = value.get(key)
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"missing registry path: {'.'.join(keys)}")
-    return Path(value).expanduser().resolve()
+    expanded = Path(value).expanduser()
+    if not expanded.is_absolute():
+        raise ValueError(f"registry_path_not_absolute:{'.'.join(keys)}")
+    return expanded.resolve()
+
+
+def _required_object(
+    payload: dict[str, Any],
+    keys: tuple[str, ...],
+) -> dict[str, Any]:
+    value: Any = payload
+    for key in keys:
+        if not isinstance(value, dict):
+            value = None
+            break
+        value = value.get(key)
+    if not isinstance(value, dict):
+        raise ValueError(f"registry_section_invalid:{'.'.join(keys)}")
+    return value
 
 
 class OfflineMinuteDataSource(BaseDataSource):
@@ -151,6 +198,10 @@ class OfflineMinuteDataSource(BaseDataSource):
             _normalize_stock_code(stock_code)
         except ValueError:
             return self._error(stock_code, period, "invalid_stock_code")
+        try:
+            _parse_as_of(as_of)
+        except OfflineArchiveDataError as exc:
+            return self._error(stock_code, period, exc.reason)
         source_available = self.registry.minute_root.is_dir() and (
             adjustment == "none" or self.registry.tushare_factor_root.is_dir()
         )
@@ -192,7 +243,13 @@ class OfflineMinuteDataSource(BaseDataSource):
         for archive in archives:
             year = archive.name.split("_", 1)[0]
             member = f"{prefix}{code}_{year}.csv"
-            archive_rows = _read_member_rows(archive, member, as_of)
+            archive_rows = _read_member_rows(
+                archive,
+                member,
+                as_of,
+                expected_code=code,
+                expected_exchange=exchange,
+            )
             if not archive_rows:
                 continue
             rows.extend(archive_rows)
@@ -235,9 +292,10 @@ class OfflineMinuteDataSource(BaseDataSource):
             "shadow_only": True,
             "freshness": "historical_only",
             "provider_timestamp": datetime.fromtimestamp(
-                newest_archive_mtime
-            ).astimezone().isoformat(),
-            "captured_at": datetime.now().astimezone().isoformat(),
+                newest_archive_mtime,
+                tz=MARKET_TIMEZONE,
+            ).isoformat(),
+            "captured_at": datetime.now(MARKET_TIMEZONE).isoformat(),
             "data_cutoff": rows[-1]["date"],
             "archive_count": len(used_archives),
             "missing_fields": [],
@@ -284,15 +342,37 @@ class OfflineMinuteDataSource(BaseDataSource):
             return {"reason": "adjustment_factor_file_not_found"}
 
         factors: dict[str, float] = {}
+        seen_dates: set[str] = set()
         max_date = _parse_as_of(as_of).strftime("%Y%m%d") if as_of else None
         with factor_path.open(encoding="utf-8-sig", newline="") as handle:
             for factor_row in csv.DictReader(handle):
+                factor_code = str(factor_row.get("股票代码") or "").strip()
+                try:
+                    normalized_code, normalized_exchange, _ = _normalize_stock_code(
+                        factor_code
+                    )
+                except ValueError:
+                    return {"reason": "adjustment_factor_code_invalid"}
+                if (normalized_code, normalized_exchange) != (code, exchange):
+                    return {"reason": "adjustment_factor_code_mismatch"}
                 trade_date = str(factor_row.get("交易日期") or "").strip()
-                if not trade_date or (max_date and trade_date > max_date):
+                try:
+                    datetime.strptime(trade_date, "%Y%m%d")
+                except ValueError:
+                    return {"reason": "invalid_adjustment_factor_date"}
+                if trade_date in seen_dates:
+                    return {"reason": "duplicate_adjustment_factor_date"}
+                seen_dates.add(trade_date)
+                raw_factor = factor_row.get("复权因子")
+                try:
+                    factor = float(raw_factor)
+                except (TypeError, ValueError):
+                    return {"reason": "invalid_adjustment_factor"}
+                if not math.isfinite(factor) or factor <= 0:
+                    return {"reason": "invalid_adjustment_factor"}
+                if max_date and trade_date > max_date:
                     continue
-                factor = _number(factor_row.get("复权因子"))
-                if factor > 0:
-                    factors[trade_date] = factor
+                factors[trade_date] = factor
 
         if not factors:
             return {"reason": "adjustment_factor_not_found"}
@@ -313,14 +393,20 @@ class OfflineMinuteDataSource(BaseDataSource):
         adjusted = []
         for row in rows:
             trade_date = row["date"][:10].replace("-", "")
-            ratio = factors[trade_date] / reference_factor
+            try:
+                ratio = factors[trade_date] / reference_factor
+            except OverflowError:
+                return {"reason": "adjusted_price_not_finite"}
+            prices = {
+                field: row[field] * ratio
+                for field in ("open", "close", "high", "low")
+            }
+            if not all(math.isfinite(value) for value in prices.values()):
+                return {"reason": "adjusted_price_not_finite"}
             adjusted.append(
                 {
                     **row,
-                    "open": row["open"] * ratio,
-                    "close": row["close"] * ratio,
-                    "high": row["high"] * ratio,
-                    "low": row["low"] * ratio,
+                    **prices,
                 }
             )
         return adjusted
@@ -345,20 +431,138 @@ def _normalize_stock_code(stock_code: str) -> tuple[str, str, str]:
 
 
 def _parse_as_of(value: str | None) -> datetime:
-    if not value:
-        return datetime.max
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if value is None:
+        return datetime.max.replace(tzinfo=MARKET_TIMEZONE)
+    if not isinstance(value, str) or not value.strip():
+        raise OfflineArchiveDataError("invalid_as_of")
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        raise OfflineArchiveDataError("invalid_as_of") from None
     if len(value.strip()) == 10:
-        parsed = datetime.combine(parsed.date(), time.max)
-    if parsed.tzinfo is not None:
-        parsed = parsed.astimezone().replace(tzinfo=None)
-    return parsed
+        return datetime.combine(
+            parsed.date(),
+            time.max,
+            tzinfo=MARKET_TIMEZONE,
+        )
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=MARKET_TIMEZONE)
+    return parsed.astimezone(MARKET_TIMEZONE)
+
+
+def _parse_archive_timestamp(value: Any) -> datetime:
+    if not isinstance(value, str) or not value.strip():
+        raise OfflineArchiveDataError("invalid_timestamp")
+    try:
+        parsed = datetime.fromisoformat(
+            value.strip().replace("/", "-").replace("Z", "+00:00")
+        )
+    except (TypeError, ValueError):
+        raise OfflineArchiveDataError("invalid_timestamp") from None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=MARKET_TIMEZONE)
+    return parsed.astimezone(MARKET_TIMEZONE)
+
+
+def validate_offline_kline_response(
+    response: Any,
+    *,
+    as_of: str | None = None,
+    minimum_bars: int = 1,
+) -> tuple[list[dict[str, Any]], str | None]:
+    """Validate an offline ``status=ok`` payload at its consumer boundary."""
+    invalid = ([], "offline_history_invalid")
+    if (
+        not isinstance(response, dict)
+        or response.get("status") != "ok"
+        or not isinstance(minimum_bars, int)
+        or isinstance(minimum_bars, bool)
+        or minimum_bars < 1
+    ):
+        return invalid
+    bars = response.get("bars")
+    if not isinstance(bars, list) or len(bars) < minimum_bars:
+        return invalid
+    try:
+        cutoff = _parse_as_of(response.get("data_cutoff"))
+        upper_bound = (
+            _parse_as_of(as_of)
+            if as_of is not None
+            else datetime.now(MARKET_TIMEZONE)
+        )
+    except OfflineArchiveDataError:
+        return invalid
+    if cutoff > upper_bound:
+        return invalid
+
+    previous: datetime | None = None
+    validated: list[dict[str, Any]] = []
+    for bar in bars:
+        if not isinstance(bar, dict) or any(
+            field not in bar for field in RETURNED_BAR_FIELDS
+        ):
+            return invalid
+        raw_date = bar.get("date")
+        if not isinstance(raw_date, str) or not raw_date.strip():
+            return invalid
+        date_only = len(raw_date.strip()) == 10
+        try:
+            observed_at = (
+                _parse_as_of(raw_date)
+                if date_only
+                else _parse_archive_timestamp(raw_date)
+            )
+        except OfflineArchiveDataError:
+            return invalid
+        if previous is not None and observed_at <= previous:
+            return invalid
+        previous = observed_at
+        if date_only:
+            if (
+                observed_at.date() > cutoff.date()
+                or observed_at.date() > upper_bound.date()
+            ):
+                return invalid
+        elif observed_at > cutoff or observed_at > upper_bound:
+            return invalid
+
+        numeric: dict[str, float] = {}
+        for field in ("open", "close", "high", "low", "volume", "amount"):
+            value = bar.get(field)
+            if isinstance(value, bool):
+                return invalid
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError, OverflowError):
+                return invalid
+            if not math.isfinite(parsed):
+                return invalid
+            numeric[field] = parsed
+        if (
+            min(
+                numeric["open"],
+                numeric["close"],
+                numeric["high"],
+                numeric["low"],
+            )
+            <= 0
+            or numeric["volume"] < 0
+            or numeric["amount"] < 0
+            or numeric["high"] < max(numeric["open"], numeric["close"])
+            or numeric["low"] > min(numeric["open"], numeric["close"])
+        ):
+            return invalid
+        validated.append(bar)
+    return validated, None
 
 
 def _read_member_rows(
     archive: Path,
     member: str,
     as_of: str | None,
+    *,
+    expected_code: str,
+    expected_exchange: str,
 ) -> list[dict[str, Any]]:
     cutoff = _parse_as_of(as_of)
     rows = []
@@ -386,13 +590,30 @@ def _read_member_rows(
         if not case_matches:
             return []
         member_name = case_matches[0]
+        _validate_zip_member_info(bundle.getinfo(member_name))
         with bundle.open(member_name) as raw:
             text = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
-            for item in csv.DictReader(text):
-                timestamp = str(item.get("时间") or "").strip()
-                if not timestamp:
-                    continue
-                observed_at = datetime.fromisoformat(timestamp.replace("/", "-"))
+            for row_number, item in enumerate(csv.DictReader(text), start=1):
+                if row_number > MAX_CSV_ROWS:
+                    raise OfflineArchiveDataError(
+                        "archive_row_limit_exceeded"
+                    )
+                row_code = str(item.get("代码") or "").strip()
+                try:
+                    normalized_code, normalized_exchange, _ = _normalize_stock_code(
+                        row_code
+                    )
+                except ValueError:
+                    raise OfflineArchiveDataError(
+                        "minute_row_code_invalid"
+                    ) from None
+                if (normalized_code, normalized_exchange) != (
+                    expected_code,
+                    expected_exchange,
+                ):
+                    raise OfflineArchiveDataError("minute_row_code_mismatch")
+                timestamp = item.get("时间")
+                observed_at = _parse_archive_timestamp(timestamp)
                 if observed_at > cutoff:
                     continue
                 numeric: dict[str, float] = {}
@@ -425,7 +646,7 @@ def _read_member_rows(
                     raise OfflineArchiveDataError("invalid_numeric_row")
                 rows.append(
                     {
-                        "date": observed_at.isoformat(
+                        "date": observed_at.replace(tzinfo=None).isoformat(
                             sep=" ",
                             timespec="seconds",
                         ),
@@ -435,10 +656,24 @@ def _read_member_rows(
     return rows
 
 
-def _number(value: Any) -> float:
-    if value in (None, ""):
-        return 0.0
-    return float(value)
+def _validate_zip_member_info(info: zipfile.ZipInfo) -> None:
+    if info.flag_bits & 0x1:
+        raise OfflineArchiveDataError("archive_member_encrypted")
+    unix_mode = info.external_attr >> 16
+    file_type = stat.S_IFMT(unix_mode)
+    if file_type not in {0, stat.S_IFREG}:
+        raise OfflineArchiveDataError("archive_member_non_regular")
+    if info.file_size < 0 or info.file_size > MAX_ZIP_MEMBER_BYTES:
+        raise OfflineArchiveDataError("archive_member_too_large")
+    if info.file_size:
+        if info.compress_size <= 0:
+            raise OfflineArchiveDataError(
+                "archive_member_compression_ratio_exceeded"
+            )
+        if info.file_size / info.compress_size > MAX_ZIP_COMPRESSION_RATIO:
+            raise OfflineArchiveDataError(
+                "archive_member_compression_ratio_exceeded"
+            )
 
 
 def _round_price(value: float) -> float:

@@ -9,7 +9,10 @@ V6 新增: 为每支持仓股和推荐股提供历史回测指标，包括胜率
 """
 from typing import Dict, Any
 
-from app.data_sources.offline_market_data import OfflineMinuteDataSource
+from app.data_sources.offline_market_data import (
+    OfflineMinuteDataSource,
+    validate_offline_kline_response,
+)
 from app.utils.logger import logger
 
 
@@ -85,12 +88,20 @@ async def _fetch_kline(stock_code: str, period_days: int):
             count=period_days,
             adjustment="qfq",
         )
-        bars = kline.get("bars", [])
-        if kline.get("status") == "ok":
-            if isinstance(bars, list) and len(bars) >= 20:
-                return bars
-            logger.warning("Offline kline returned malformed or partial success")
+        if not isinstance(kline, dict):
+            logger.warning("Offline kline returned a non-object payload")
             return []
+        if kline.get("status") == "ok":
+            bars, validation_error = validate_offline_kline_response(
+                kline,
+                minimum_bars=20,
+            )
+            if validation_error:
+                logger.warning(
+                    "Offline kline returned malformed or partial success"
+                )
+                return []
+            return bars
         if kline.get("status") != "error":
             logger.warning("Offline kline returned an unknown status")
             return []

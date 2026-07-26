@@ -16,7 +16,10 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
-from app.data_sources.offline_market_data import OfflineMinuteDataSource
+from app.data_sources.offline_market_data import (
+    OfflineMinuteDataSource,
+    validate_offline_kline_response,
+)
 from app.data_sources.tushare_client import TushareDataSource
 from app.services.prediction_lab import (
     PredictionLedger,
@@ -319,7 +322,13 @@ async def backfill_due_predictions(
                 except (OSError, ValueError):
                     kline = {"status": "error", "reason": "source_error"}
                 if kline.get("status") == "ok":
-                    if not isinstance(kline.get("bars"), list) or not kline["bars"]:
+                    validated_bars, validation_error = (
+                        validate_offline_kline_response(
+                            kline,
+                            as_of=as_of,
+                        )
+                    )
+                    if validation_error:
                         code_errors.append(
                             {
                                 "code": code,
@@ -339,6 +348,7 @@ async def backfill_due_predictions(
                             for prediction in code_predictions
                         )
                         continue
+                    kline = {**kline, "bars": validated_bars}
                     offline_history_code_count += 1
                 elif kline.get("status") == "error":
                     kline = {}
