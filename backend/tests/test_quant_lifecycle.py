@@ -1979,6 +1979,156 @@ def test_full_score_reauthorization_recovers_legacy_polluted_production_item(
     assert {item["code"] for item in store.active_items()} == {"002123"}
 
 
+def test_full_score_reauthorization_recovers_legacy_watching_item_without_prior_authorization(
+    tmp_path,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="历史观察标的",
+        status="watching",
+        source="target_scoring",
+        scoring_decision=full_score_decision(action="hold"),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    payload = store.load()
+    polluted = payload["items"]["002123"]
+    assert polluted["scoring_decision"]["authorization_valid"] is False
+    polluted["status"] = "research_reference"
+    polluted["source"] = "long_horizon"
+    polluted["provenance"] = {
+        "original_status": "watching",
+        "original_source": "target_scoring",
+        "research_only": True,
+    }
+    polluted["production_eligibility"] = {
+        "eligible": False,
+        "research_only": True,
+        "approved": False,
+        "original_status": "watching",
+        "original_source": "target_scoring",
+        "reason": "research_only_provenance",
+        "approval": {},
+    }
+    store.save(payload)
+
+    store.upsert_target(
+        code="002123",
+        name="历史观察标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    restored = store.get("002123")
+    assert restored["status"] == "executable"
+    assert restored["source"] == "target_scoring"
+    assert restored["production_eligibility"]["eligible"] is True
+    assert restored["production_eligibility"]["reason"] == "full_score_reauthorization"
+    assert restored["scoring_decision"]["authorization_valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("case", "current_patch", "prior_gate_patch", "prior_provenance_patch"),
+    [
+        ("wrong_current_source", {"source": "manual"}, {}, {}),
+        ("wrong_current_status", {"status": "watching"}, {}, {}),
+        (
+            "current_authorization_false",
+            {"scoring_decision": {"authorization_valid": False}},
+            {},
+            {},
+        ),
+        ("prior_gate_not_blocked", {}, {"eligible": True}, {}),
+        (
+            "prior_gate_wrong_reason",
+            {},
+            {"reason": "production_eligible"},
+            {},
+        ),
+        (
+            "prior_not_research_only",
+            {},
+            {},
+            {"research_only": False},
+        ),
+        (
+            "ordinary_manual_target",
+            {"source": "manual_production_approval"},
+            {},
+            {"original_source": "manual"},
+        ),
+        (
+            "ordinary_sentinel_target",
+            {},
+            {},
+            {"original_source": "sentinel_serenity"},
+        ),
+        (
+            "ordinary_long_horizon_target",
+            {},
+            {},
+            {"original_source": "long_horizon"},
+        ),
+        (
+            "nonproduction_original_status",
+            {},
+            {},
+            {"original_status": "research_reference"},
+        ),
+    ],
+)
+def test_full_score_reauthorization_rejects_nonlegacy_or_incomplete_provenance(
+    case,
+    current_patch,
+    prior_gate_patch,
+    prior_provenance_patch,
+):
+    current = {
+        "status": "executable",
+        "source": "target_scoring",
+        "scoring_decision": {"authorization_valid": True},
+        "production_approval": {
+            "state": "approved",
+            "approved_by": "self_declared",
+        },
+    }
+    current.update(current_patch)
+    prior_gate = {
+        "eligible": False,
+        "reason": "research_only_provenance",
+    }
+    prior_gate.update(prior_gate_patch)
+    prior_provenance = {
+        "research_only": True,
+        "original_source": "target_scoring",
+        "original_status": "watching",
+    }
+    prior_provenance.update(prior_provenance_patch)
+    prior = {
+        "status": "research_reference",
+        "source": "long_horizon",
+        "scoring_decision": {"authorization_valid": False},
+        "production_eligibility": prior_gate,
+        "provenance": prior_provenance,
+    }
+
+    eligibility = TargetPoolStore.production_eligibility_for(
+        current,
+        previous=prior,
+    )
+
+    assert eligibility["eligible"] is False, case
+    assert eligibility["research_only"] is True, case
+    assert eligibility["approved"] is False, case
+    assert eligibility["reason"] == "research_only_provenance", case
+
+
 def test_target_pool_rejects_self_declared_approval_for_research_only_item(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
     store.upsert_target(

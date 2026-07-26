@@ -465,16 +465,10 @@ def target_production_eligibility(
         if isinstance(current.get("scoring_decision"), dict)
         else {}
     )
-    prior_scoring = (
-        prior.get("scoring_decision")
-        if isinstance(prior.get("scoring_decision"), dict)
-        else {}
-    )
     legacy_full_score_reauthorization = (
         str(current.get("source") or "").strip().lower() == "target_scoring"
         and str(current.get("status") or "").strip().lower() == "executable"
         and current_scoring.get("authorization_valid") is True
-        and prior_scoring.get("authorization_valid") is True
         and prior_gate.get("eligible") is False
         and prior_gate.get("reason") == "research_only_provenance"
         and prior_provenance.get("research_only") is True

@@ -927,6 +927,178 @@ async def test_fetch_market_data_fails_closed_when_all_index_sources_fail(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("quotes", "raises", "expected_status"),
+    [
+        ({}, True, "failed"),
+        (
+            {
+                "sh000001": {
+                    "price": 4012.3,
+                    "change_pct": 0.4,
+                    "source": "test_provider",
+                    "quote_timestamp": datetime.now().astimezone().isoformat(),
+                    "freshness": "fresh",
+                }
+            },
+            False,
+            "degraded",
+        ),
+    ],
+)
+async def test_legacy_premarket_entry_never_substitutes_fixed_index_values(
+    quotes,
+    raises,
+    expected_status,
+):
+    from scripts.run_premarket import build_premarket_market_data
+
+    class FakeMarketSource:
+        name = "test_provider"
+
+        async def fetch_batch(self, codes):
+            if raises:
+                raise RuntimeError("provider unavailable")
+            return quotes
+
+    result = await build_premarket_market_data(
+        {
+            "holdings": [],
+            "holdings_str": "空仓",
+            "available_cash": 6000,
+        },
+        market_source=FakeMarketSource(),
+    )
+
+    assert result["market_source_status"]["status"] == expected_status
+    index_prices = [
+        value.get("price") if isinstance(value, dict) else value
+        for value in result["indices"].values()
+    ]
+    assert 3350 not in index_prices
+    assert 10800 not in index_prices
+    if expected_status == "failed":
+        assert result["indices"] == {}
+    else:
+        assert list(result["indices"]) == ["sh000001"]
+
+
+def test_run_premarket_import_preserves_cwd_and_resolves_absolute_project_paths(
+    tmp_path,
+):
+    project_root = Path.cwd().resolve()
+    probe_cwd = tmp_path / "independent-cwd"
+    probe_cwd.mkdir()
+    env = os.environ.copy()
+    python_path = [
+        str(project_root),
+        str(project_root / "backend"),
+    ]
+    if env.get("PYTHONPATH"):
+        python_path.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(python_path)
+    probe = """
+import os
+from pathlib import Path
+
+before = Path.cwd()
+from scripts import run_premarket
+
+assert Path.cwd() == before
+assert Path(run_premarket.PROJECT_ROOT).resolve() == Path(os.environ["EXPECTED_ROOT"])
+assert Path(os.environ["DOTENV_PATH"]).resolve() == Path(os.environ["EXPECTED_ROOT"]) / ".env.local"
+"""
+    env["EXPECTED_ROOT"] = str(project_root)
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=probe_cwd,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_manual_strategy_analysis_passes_failed_market_truth_without_placeholders(
+    monkeypatch,
+):
+    from app.routers import strategy
+
+    captured = {}
+
+    class FakeDb:
+        def commit(self):
+            pass
+
+    class FakeInstance:
+        id = 17
+        analysis_report = None
+        status = "created"
+
+    class FakeLifecycle:
+        def __init__(self):
+            self.db = FakeDb()
+            self.instance = FakeInstance()
+
+        def create_instance(self):
+            return self.instance
+
+        def close(self):
+            pass
+
+    async def failed_market_snapshot(*args, **kwargs):
+        return {
+            "indices": {},
+            "market_source_status": {
+                "status": "failed",
+                "provider": "fast_realtime_market_data",
+                "data_cutoff": None,
+                "freshness_status": "failed",
+                "error": "market_index_fetch_failed",
+                "missing_sources": ["sh000001", "sz399001", "sz399006"],
+                "rejected_sources": [],
+                "coverage": {"expected": 3, "verified": 0},
+            },
+        }
+
+    async def capture_analysis(market_data):
+        captured["market_data"] = market_data
+        return {"overall_bias": "neutral"}
+
+    monkeypatch.setattr(strategy, "StrategyLifecycle", FakeLifecycle)
+    monkeypatch.setattr(
+        strategy,
+        "_get_holdings_data_fn",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "空仓",
+            "available_cash": 6000,
+            "total_assets": 6000,
+        },
+    )
+    monkeypatch.setattr(
+        strategy,
+        "fetch_market_index_snapshot",
+        failed_market_snapshot,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy, "run_analysis", capture_analysis)
+
+    response = await strategy.trigger_analysis()
+
+    market_data = captured["market_data"]
+    assert response["strategy_id"] == 17
+    assert market_data["indices"] == {}
+    assert market_data["market_source_status"]["status"] == "failed"
+    assert 3350 not in market_data["indices"].values()
+    assert 10800 not in market_data["indices"].values()
+
+
+@pytest.mark.asyncio
 async def test_fetch_market_data_fallback_requires_all_three_indices(monkeypatch):
     import app.main as main_module
 

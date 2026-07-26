@@ -152,3 +152,48 @@ def aggregate_market_quote_truth(
             },
         },
     }
+
+
+async def fetch_market_index_snapshot(
+    source=None,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Fetch and validate the complete three-index market snapshot."""
+    if source is None:
+        from app.data_sources.realtime_market_data import (
+            FastRealtimeMarketDataSource,
+        )
+
+        source = FastRealtimeMarketDataSource()
+
+    expected_codes = list(EXPECTED_MARKET_INDEX_CODES)
+    provider = str(
+        getattr(source, "name", None) or "fast_realtime_market_data"
+    )
+    fetch_failed = False
+    try:
+        raw_quotes = await source.fetch_batch(expected_codes)
+    except Exception:
+        raw_quotes = {}
+        fetch_failed = True
+    aggregate = aggregate_market_quote_truth(
+        raw_quotes,
+        expected_codes,
+        default_provider=provider,
+        now=now or datetime.now().astimezone(),
+    )
+    if fetch_failed:
+        aggregate["market_source_status"]["error"] = (
+            "market_index_fetch_failed"
+        )
+    return {
+        "indices": {
+            code: {
+                "price": quote["price"],
+                "change_pct": quote.get("change_pct", 0),
+            }
+            for code, quote in aggregate["quotes"].items()
+        },
+        "market_source_status": aggregate["market_source_status"],
+    }

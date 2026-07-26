@@ -5,12 +5,52 @@ import os
 import asyncio
 import json
 import subprocess
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'backend'))
-os.chdir(os.path.join(os.path.dirname(__file__), '..', 'backend'))
-os.environ['DOTENV_PATH'] = os.path.join(os.path.dirname(__file__), '..', '.env.local')
+
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(PROJECT_ROOT, "backend"))
+os.environ["DOTENV_PATH"] = os.path.join(PROJECT_ROOT, ".env.local")
+
+from app.services.market_data_health import fetch_market_index_snapshot
+from app.services.sentinel_input_gate import (
+    inject_active_sentinel_evidence,
+    sentinel_audit_only_message,
+)
 
 LARK_CLI = "/Users/zhuchenyuan/.npm-global/bin/lark-cli"
 CHAT_ID = "oc_c51ef6103f2e0b5b9ed9c40ab86b3e45"
+
+
+async def build_premarket_market_data(
+    holdings_data: dict,
+    *,
+    market_source=None,
+) -> dict:
+    """Build legacy premarket input from validated three-index truth."""
+    snapshot = await fetch_market_index_snapshot(market_source)
+    available_cash = holdings_data.get("available_cash", 0)
+    return {
+        **snapshot,
+        "sectors": [],
+        "holdings": holdings_data.get("holdings", []),
+        "holdings_str": holdings_data.get("holdings_str", "空仓"),
+        "news": [],
+        "available_cash": available_cash,
+        "total_assets": holdings_data.get("total_assets", available_cash),
+    }
+
+
+def apply_premarket_sentinel_input(
+    package: dict | None,
+    report_date: str,
+    market_data: dict,
+) -> dict[str, object]:
+    """Apply the shared Sentinel gate at the legacy premarket entry."""
+    return inject_active_sentinel_evidence(
+        package,
+        report_date,
+        market_data,
+    )
+
 
 def lark_send(text: str) -> bool:
     """lark-cli IM 文本推送"""
@@ -51,33 +91,47 @@ async def main():
     print(f"持仓: {hd['holdings_str']}, 可用: ¥{hd['available_cash']:,.0f}", flush=True)
 
     # 2. 市场数据
-    from app.data_sources.tencent_client import TencentDataSource
-    tc = TencentDataSource()
-    try:
-        idx = await tc.fetch_batch(["sh000001", "sz399001"])
-        sh = idx.get("sh000001", {}).get("price", 3350)
-        sz = idx.get("sz399001", {}).get("price", 10800)
-    except: sh, sz = 3350, 10800
-    print(f"指数: 上证{sh} 深证{sz}", flush=True)
+    from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
 
-    market_data = {"indices": {"shanghai": sh, "shenzhen": sz}, "sectors": [],
-                   "holdings": hd["holdings"], "holdings_str": hd["holdings_str"], "news": [],
-                   "available_cash": hd["available_cash"], "total_assets": hd["available_cash"]}
+    tc = FastRealtimeMarketDataSource()
+    market_data = await build_premarket_market_data(
+        hd,
+        market_source=tc,
+    )
+    sh = market_data["indices"].get("sh000001", {}).get("price")
+    sz = market_data["indices"].get("sz399001", {}).get("price")
+    market_status = market_data["market_source_status"]["status"]
+    if market_status == "ok" and sh and sz:
+        print(f"指数: 上证{sh} 深证{sz}", flush=True)
+    else:
+        print(
+            f"⚠️ 指数数据不完整（{market_status}），不使用固定占位值",
+            flush=True,
+        )
 
     try:
         from datetime import date
         from app.ai.sentinel_research import load_research_package
-        from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
 
         sentinel_root = os.path.join(os.path.dirname(__file__), "..", "data", "sentinel")
         sentinel_package = load_research_package(str(date.today()), output_root=sentinel_root)
-        if sentinel_package:
-            market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
-            ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+        sentinel_decision = apply_premarket_sentinel_input(
+            sentinel_package,
+            str(date.today()),
+            market_data,
+        )
+        if sentinel_decision["active"] is True:
+            ingest_result = sentinel_decision.get("ingest_result") or {}
             print(
                 "Sentinel evidence: "
                 f"{ingest_result.get('evidence_count', 0)} 条证据, "
                 f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
+                flush=True,
+            )
+        elif sentinel_package:
+            print(
+                "Sentinel evidence 仅归档: "
+                f"{sentinel_audit_only_message(sentinel_decision)}",
                 flush=True,
             )
     except Exception as e:

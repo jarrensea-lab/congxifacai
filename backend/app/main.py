@@ -40,10 +40,6 @@ from app.services.quant_lifecycle import (
     evaluate_position_watch,
     normalize_alert_level,
 )
-from app.services.evidence_ledger import (
-    build_sentinel_evidence_context,
-    upsert_sentinel_evidence_to_target_pool,
-)
 from app.services.schedule_policy import (
     schedule_reason,
     should_run_main_report,
@@ -59,6 +55,10 @@ from app.services.market_data_health import (
     aggregate_market_quote_truth,
 )
 from app.services.notification_gate import NotificationGate, build_alert_digest
+from app.services.sentinel_input_gate import (
+    inject_active_sentinel_evidence,
+    sentinel_audit_only_message,
+)
 from app.services.visible_decision_gate import (
     build_runtime_blocked_gate,
     filter_alerts_by_visible_decision_gate,
@@ -306,6 +306,19 @@ async def _fetch_market_data() -> dict:
             "total_assets": hd.get("total_assets", 0),
             "portfolio_sync_failed": hd.get("portfolio_sync_failed", False),
             "market_source_status": market_source_status}
+
+
+def _apply_premarket_sentinel_input(
+    package: dict | None,
+    report_date: str,
+    market_data: dict,
+) -> dict[str, object]:
+    """Apply the shared Sentinel gate at the backend premarket entry."""
+    return inject_active_sentinel_evidence(
+        package,
+        report_date,
+        market_data,
+    )
 
 
 def _decision_recommendations(decision: dict) -> list[dict]:
@@ -653,22 +666,35 @@ async def _run_premarket_with_status():
             from app.ai.sentinel_research import load_research_package
 
             sentinel_package = load_research_package(str(date.today()))
-            if sentinel_package:
-                market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
-                ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+            sentinel_decision = _apply_premarket_sentinel_input(
+                sentinel_package,
+                str(date.today()),
+                market_data,
+            )
+            if sentinel_decision["active"] is True:
+                ingest_result = sentinel_decision.get("ingest_result") or {}
                 logger.info(
                     "Sentinel evidence 已进入盘前输入: "
                     f"evidence={ingest_result.get('evidence_count', 0)} "
                     f"targets={ingest_result.get('upserted_targets', 0)}"
                 )
+            elif sentinel_package:
+                logger.warning(
+                    "Sentinel evidence 仅归档: "
+                    f"{sentinel_audit_only_message(sentinel_decision)}"
+                )
         except Exception as exc:
             logger.warning(f"Sentinel evidence 盘前接入失败，降级继续: {exc}")
         sh = market_data["indices"].get("sh000001", {}).get("price")
         sz = market_data["indices"].get("sz399001", {}).get("price")
-        if sh and sz:
+        market_status = market_data.get("market_source_status", {}).get("status")
+        if market_status == "ok" and sh and sz:
             logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")
         else:
-            logger.warning("盘前指数不可用，禁止使用固定占位值")
+            logger.warning(
+                f"盘前指数不完整或不可用({market_status or 'failed'})，"
+                "禁止使用固定占位值"
+            )
 
         report = await run_analysis(market_data)
         logger.info("分析完成，启动AI辩论...")

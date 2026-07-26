@@ -38,6 +38,12 @@ from app.services.market_data_health import (
     aggregate_market_quote_truth,
     is_recent_market_cutoff,
 )
+from app.services.sentinel_input_gate import (
+    classify_sentinel_package as _sentinel_package_freshness,
+    inject_active_sentinel_evidence as _inject_active_sentinel_evidence,
+    sentinel_audit_only_message as _sentinel_audit_only_message,
+    sentinel_package_age_days as _sentinel_package_age_days,
+)
 from app.services.visible_decision_gate import (
     ENTRY_ACTIONS,
     apply_visible_decision_gate,
@@ -404,89 +410,6 @@ def build_role_vote_audit(decision: dict, hidden_codes: set[str] | None = None) 
     if len(lines) == 4:
         return ["- 角色投票审计：角色投票为空或格式不可用。"]
     return lines
-
-
-def _sentinel_package_age_days(package: dict | None, report_date: str | None) -> int | None:
-    if not package or not report_date or not package.get("date"):
-        return None
-    try:
-        current = datetime.strptime(str(report_date), "%Y-%m-%d").date()
-        package_date = datetime.strptime(str(package.get("date")), "%Y-%m-%d").date()
-    except ValueError:
-        return None
-    return (current - package_date).days
-
-
-def _sentinel_package_freshness(
-    package: dict | None,
-    report_date: str | None,
-) -> dict[str, object]:
-    if not package:
-        return {
-            "status": "unavailable",
-            "active": False,
-            "age_days": None,
-            "package_date": None,
-            "report_date": report_date,
-        }
-    package_date = package.get("date")
-    age_days = _sentinel_package_age_days(package, report_date)
-    if age_days is None:
-        status = "unknown_date"
-    elif age_days < 0:
-        status = "future"
-    elif age_days > 2:
-        status = "stale"
-    else:
-        status = "active"
-    return {
-        "status": status,
-        "active": status == "active",
-        "age_days": age_days,
-        "package_date": package_date,
-        "report_date": report_date,
-    }
-
-
-def _sentinel_audit_only_message(freshness: dict[str, object]) -> str:
-    status = freshness.get("status")
-    package_date = freshness.get("package_date")
-    report_date = freshness.get("report_date")
-    age_days = freshness.get("age_days")
-    if status == "stale":
-        return (
-            f"研究包日期 {package_date}，已过期 {age_days} 天；"
-            "只保留历史审计/复盘，不参与当前候选或 AI 决策。"
-        )
-    if status == "future":
-        return (
-            f"研究包日期 {package_date} 晚于报告日 {report_date}（未来日期）；"
-            "日期异常，包仅保留历史审计，不参与当前候选或 AI 决策。"
-        )
-    return (
-        "研究包日期缺失或非法，无法验证时效；"
-        "包仅保留历史审计，不参与当前候选或 AI 决策。"
-    )
-
-
-def _inject_active_sentinel_evidence(
-    package: dict | None,
-    report_date: str,
-    market_data: dict,
-    *,
-    context_builder,
-    target_upserter,
-) -> dict[str, object]:
-    """Inject only a fresh, parseable Sentinel package into decision inputs."""
-    freshness = _sentinel_package_freshness(package, report_date)
-    if freshness["active"] is not True:
-        return freshness
-    market_data["sentinel_evidence"] = context_builder(package)
-    ingest_result = target_upserter(package)
-    return {
-        **freshness,
-        "ingest_result": ingest_result,
-    }
 
 
 def build_sentinel_research_section(package: dict | None, report_date: str | None = None) -> list[str]:
@@ -3630,7 +3553,6 @@ async def main():
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
-    from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
     from app.services.portfolio_store import recalculate_portfolio, sync_db_from_user_portfolio
 
     now = datetime.now()
@@ -3759,31 +3681,28 @@ async def main():
     portfolio["total_assets"] = round(available_cash + portfolio["total_value"], 2)
     market_data["total_assets"] = portfolio["total_assets"]
     sentinel_package = load_sentinel_research_package(today)
-    if sentinel_package:
-        try:
-            sentinel_decision = _inject_active_sentinel_evidence(
-                sentinel_package,
-                today,
-                market_data,
-                context_builder=build_sentinel_evidence_context,
-                target_upserter=upsert_sentinel_evidence_to_target_pool,
+    try:
+        sentinel_decision = _inject_active_sentinel_evidence(
+            sentinel_package,
+            today,
+            market_data,
+        )
+        if sentinel_decision["active"] is True:
+            ingest_result = sentinel_decision.get("ingest_result") or {}
+            print(
+                "   Sentinel evidence 接入: "
+                f"{ingest_result.get('evidence_count', 0)} 条证据, "
+                f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
+                flush=True,
             )
-            if sentinel_decision["active"] is True:
-                ingest_result = sentinel_decision.get("ingest_result") or {}
-                print(
-                    "   Sentinel evidence 接入: "
-                    f"{ingest_result.get('evidence_count', 0)} 条证据, "
-                    f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
-                    flush=True,
-                )
-            else:
-                print(
-                    "   Sentinel evidence 仅归档: "
-                    f"{_sentinel_audit_only_message(sentinel_decision)}",
-                    flush=True,
-                )
-        except Exception as e:
-            print(f"   ⚠️ Sentinel evidence 入池失败，降级继续: {e}", flush=True)
+        elif sentinel_package:
+            print(
+                "   Sentinel evidence 仅归档: "
+                f"{_sentinel_audit_only_message(sentinel_decision)}",
+                flush=True,
+            )
+    except Exception as e:
+        print(f"   ⚠️ Sentinel evidence 入池失败，降级继续: {e}", flush=True)
 
     # ===== 3. 分析 + 辩论 =====
     print("📊 构建市场数据摘要...", flush=True)
