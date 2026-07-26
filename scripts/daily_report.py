@@ -1734,6 +1734,13 @@ def _thesis_status_label(status: str) -> str:
     }.get(str(status or ""), "未建论文")
 
 
+def _red_line_status_label(status: str) -> str:
+    return {
+        "triggered": "触发",
+        "clear": "未触发",
+    }.get(str(status or ""), "状态未知")
+
+
 def _valuation_zone_label(zone: str) -> str:
     return {
         "accumulation_zone": "积累区",
@@ -1776,6 +1783,12 @@ def _render_long_horizon_summary(rows: list[dict]) -> list[str]:
         "|---|---|---|---:|---|---|---|",
     ]
     for item in long_rows[:8]:
+        long_quality_score = item.get("long_quality_score")
+        long_quality_label = (
+            str(long_quality_score)
+            if long_quality_score is not None
+            else "未知"
+        )
         next_step = _humanize_reason(
             item.get("combined_decision_reason")
             or item.get("decision_reason")
@@ -1784,8 +1797,8 @@ def _render_long_horizon_summary(rows: list[dict]) -> list[str]:
         )
         lines.append(
             f"| {_cell(_target_label(item), 40)} | {_thesis_status_label(item.get('thesis_status'))} | "
-            f"{_valuation_zone_label(item.get('valuation_zone'))} | {item.get('long_quality_score', 0)} | "
-            f"{'触发' if item.get('red_line_status') == 'triggered' else '未触发'} | "
+            f"{_valuation_zone_label(item.get('valuation_zone'))} | {long_quality_label} | "
+            f"{_red_line_status_label(item.get('red_line_status'))} | "
             f"{_action_nature(item)} | {_cell(next_step, 140)} |"
         )
     lines.append("")
@@ -1949,6 +1962,9 @@ def build_next_day_strategy_sections(
             "",
             "- 标的评分：本次未生成结构化 target_scores；不能把研究线索直接当成买入建议。",
         ])
+    long_horizon_summary = _render_long_horizon_summary(target_scores)
+    if long_horizon_summary:
+        lines.extend(["", *long_horizon_summary])
     lines.extend(["", *build_role_vote_audit(decision, hidden_codes=hidden_codes), ""])
     review_summary = _structured_review_summary(target_buckets, visible_decision)
     if hidden_codes and not target_scores:

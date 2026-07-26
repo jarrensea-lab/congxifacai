@@ -2291,6 +2291,13 @@ async def test_build_target_scores_fails_closed_when_long_thesis_store_is_corrup
     assert "红线状态未知" in sections
     assert "论文成立" not in sections
     assert "红线未触发" not in sections
+    assert (
+        "| 长期摘要保护(002123) | 论文状态未知 | 待估值 | 未知 | "
+        "状态未知 | 观察复核 | 长期论文存储损坏，本批评分已安全阻断；"
+        "当前论文与红线状态未知，历史摘要仅作 last-known 审计，"
+        "修复存储后再评分。 |"
+    ) in sections
+    assert "| None |" not in sections
     assert scores[0]["action"] == "watch"
     assert scores[0]["block_reason"] == "long_thesis_store_invalid"
     assert scores[0]["entry_allowed"] is False
