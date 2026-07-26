@@ -2249,10 +2249,12 @@ def test_data_source_audit_rejects_nonfresh_market_status(freshness_status):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("partial_kind", ["none", "exception", "empty", "price_zero"])
 async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
     tmp_path,
     monkeypatch,
     capsys,
+    partial_kind,
 ):
     import app.data_sources.akshare_market as akshare_module
     import app.data_sources.realtime_market_data as realtime_module
@@ -2292,10 +2294,26 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
 
     class FakeRealtimeSource:
         async def fetch_batch(self, codes):
-            return {
-                code: {"price": 4000 if code == "sh000001" else 12000, "change_pct": 0.1}
+            fresh_cutoff = datetime.now().astimezone().isoformat()
+            quotes = {
+                code: {
+                    "price": 4000 if code == "sh000001" else 12000,
+                    "change_pct": 0.1,
+                    "source": "tencent",
+                    "quote_timestamp": fresh_cutoff,
+                    "freshness": "fresh",
+                }
                 for code in codes
             }
+            if partial_kind == "none":
+                quotes["sz399001"] = None
+            elif partial_kind == "exception":
+                quotes["sz399001"] = RuntimeError("index source failed")
+            elif partial_kind == "empty":
+                quotes["sz399001"] = {}
+            else:
+                quotes["sz399001"]["price"] = 0
+            return quotes
 
     class FakePositionWatchStore:
         def load(self):
@@ -2386,10 +2404,20 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
     visible = captured["visible_decision"]
     target_rows = visible["target_scores"]
     outside_rows = visible["outside_pool_scan"]
+    market_source_status = captured["market_data"]["market_source_status"]
 
     assert db.closed is True
     assert persisted_portfolio["portfolio_sync_failed"] is True
     assert captured["market_data"]["portfolio_sync_failed"] is True
+    assert "shanghai" in captured["market_data"]["indices"]
+    assert "cyb" in captured["market_data"]["indices"]
+    assert "shenzhen" not in captured["market_data"]["indices"]
+    assert market_source_status["status"] == "degraded"
+    assert market_source_status["freshness_status"] == "degraded"
+    assert "sz399001" in (
+        market_source_status["missing_sources"]
+        + market_source_status["rejected_sources"]
+    )
     assert persisted_gate["reasons"] == ["portfolio_sync_failed"]
     assert captured["gate"] == persisted_gate
     assert target_rows[0]["action"] == "watching"
@@ -2403,6 +2431,9 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
     ]
     assert "| SQLite | degraded |" in captured["rendered_sections"]
     assert "| SQLite | degraded |" in report_content
+    assert "| 行情数据 | degraded |" in captured["rendered_sections"]
+    assert "coverage=2/3" in captured["rendered_sections"]
+    assert "sz399001" in captured["rendered_sections"]
     for artifact in (output, report_content, json.dumps(persisted_gate), json.dumps(persisted_portfolio)):
         assert "SECRET-MAIN-PROBE" not in artifact
 

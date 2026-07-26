@@ -410,6 +410,72 @@ def _fresh_market_quote_truth(quote: dict) -> tuple[str, str] | None:
     return cutoff_text, freshness
 
 
+def _aggregate_market_quote_truth(
+    quotes,
+    expected_codes: list[str],
+    *,
+    default_provider: str,
+) -> dict:
+    verified_quotes: dict[str, dict] = {}
+    missing_sources: list[str] = []
+    rejected_sources: list[str] = []
+    providers: set[str] = set()
+    data_cutoffs: list[str] = []
+    accepted_freshness: set[str] = set()
+
+    for code in expected_codes:
+        try:
+            quote = quotes.get(code) if quotes is not None else None
+        except Exception:
+            quote = None
+        if isinstance(quote, Exception) or not isinstance(quote, dict) or not quote:
+            missing_sources.append(code)
+            continue
+        try:
+            price = float(quote.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0
+        quote_truth = _fresh_market_quote_truth(quote)
+        if price <= 0 or not quote_truth:
+            rejected_sources.append(code)
+            continue
+        cutoff, freshness = quote_truth
+        verified_quotes[code] = quote
+        providers.add(str(quote.get("source") or default_provider))
+        data_cutoffs.append(cutoff)
+        accepted_freshness.add(freshness)
+
+    if verified_quotes and (missing_sources or rejected_sources):
+        source_status = "degraded"
+        freshness_status = "degraded"
+        source_error = "partial_market_coverage"
+    elif verified_quotes:
+        source_status = "ok"
+        freshness_status = "fresh" if accepted_freshness == {"fresh"} else "ok"
+        source_error = ""
+    else:
+        source_status = "failed"
+        freshness_status = "failed"
+        source_error = "fresh_market_indices_unavailable"
+
+    return {
+        "quotes": verified_quotes,
+        "market_source_status": {
+            "status": source_status,
+            "provider": "+".join(sorted(providers)) if providers else default_provider,
+            "data_cutoff": min(data_cutoffs) if data_cutoffs else None,
+            "freshness_status": freshness_status,
+            "error": source_error,
+            "missing_sources": missing_sources,
+            "rejected_sources": rejected_sources,
+            "coverage": {
+                "expected": len(expected_codes),
+                "verified": len(verified_quotes),
+            },
+        },
+    }
+
+
 def build_data_source_audit(
     *,
     market_data: dict,
@@ -427,6 +493,24 @@ def build_data_source_audit(
     freshness_status = str(
         market_status.get("freshness_status") or market_status.get("freshness") or ""
     ).strip().lower()
+    coverage = market_status.get("coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    expected_count = coverage.get("expected")
+    verified_count = coverage.get("verified")
+    coverage_text = (
+        f"{verified_count}/{expected_count}"
+        if expected_count is not None and verified_count is not None
+        else "unknown"
+    )
+    missing_sources = market_status.get("missing_sources")
+    missing_sources = missing_sources if isinstance(missing_sources, list) else []
+    rejected_sources = market_status.get("rejected_sources")
+    rejected_sources = rejected_sources if isinstance(rejected_sources, list) else []
+    coverage_detail = (
+        f"coverage={coverage_text}；"
+        f"missing={','.join(map(str, missing_sources)) or 'none'}；"
+        f"rejected={','.join(map(str, rejected_sources)) or 'none'}"
+    )
     market_ok = (
         market_status.get("status") == "ok"
         and bool(indices)
@@ -436,7 +520,8 @@ def build_data_source_audit(
     if market_ok:
         market_detail = (
             f"指数 {len(indices)} 项；provider={market_status.get('provider') or 'unknown'}；"
-            f"data_cutoff={data_cutoff}；freshness={freshness_status}"
+            f"data_cutoff={data_cutoff}；freshness={freshness_status}；"
+            f"{coverage_detail}"
         )
     else:
         failure_reasons = []
@@ -457,7 +542,7 @@ def build_data_source_audit(
         market_detail = (
             f"指数 {len(indices)} 项；provider={market_status.get('provider') or 'unknown'}；"
             f"data_cutoff={data_cutoff or 'unknown'}；"
-            f"失败原因={','.join(failure_reasons)}"
+            f"失败原因={','.join(failure_reasons)}；{coverage_detail}"
         )
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
     deepseek_status = "configured" if os.getenv("DEEPSEEK_API_KEY") else "missing"
@@ -2544,69 +2629,40 @@ async def main():
         "portfolio_sync_status": portfolio.get("portfolio_sync_status", "unknown"),
     }
 
+    index_codes = ["sh000001", "sz399001", "sz399006"]
     try:
-        indices = await tc.fetch_batch(["sh000001", "sz399001", "sz399006"])
-        sh = indices.get("sh000001", {})
-        sz = indices.get("sz399001", {})
-        cy = indices.get("sz399006", {})
+        raw_indices = await tc.fetch_batch(index_codes)
+        aggregate = _aggregate_market_quote_truth(
+            raw_indices,
+            index_codes,
+            default_provider=market_provider,
+        )
+        verified_quotes = aggregate["quotes"]
         normalized_indices = {}
-        cutoffs = []
-        providers = set()
-        observed_freshness = set()
-        rejected_quote_truth = False
-        for quote, price_key, change_key in (
-            (sh, "shanghai", "sh_change"),
-            (sz, "shenzhen", "sz_change"),
-            (cy, "cyb", "cy_change"),
+        for code, price_key, change_key in (
+            ("sh000001", "shanghai", "sh_change"),
+            ("sz399001", "shenzhen", "sz_change"),
+            ("sz399006", "cyb", "cy_change"),
         ):
-            observed_freshness.add(str(
-                quote.get("freshness_status") or quote.get("freshness") or "unknown"
-            ).strip().lower())
-            quote_truth = _fresh_market_quote_truth(quote)
-            if quote.get("price") and not quote_truth:
-                rejected_quote_truth = True
-            if not quote.get("price") or not quote_truth:
+            quote = verified_quotes.get(code)
+            if not quote:
                 continue
-            cutoff, _freshness = quote_truth
             normalized_indices[price_key] = quote["price"]
             normalized_indices[change_key] = quote.get("change_pct", 0)
-            providers.add(str(quote.get("source") or market_provider))
-            cutoffs.append(cutoff)
-        if normalized_indices and rejected_quote_truth:
-            source_status = "degraded"
-            freshness_status = "degraded"
-            source_error = "partial_or_unfresh_market_indices"
-        elif normalized_indices:
-            source_status = "ok"
-            freshness_status = "fresh" if observed_freshness == {"fresh"} else "ok"
-            source_error = ""
-        elif len(observed_freshness) == 1:
-            source_status = "failed"
-            freshness_status = next(iter(observed_freshness))
-            source_error = "fresh_market_indices_unavailable"
-        else:
-            source_status = "failed"
-            freshness_status = "failed"
-            source_error = "fresh_market_indices_unavailable"
         market_data["indices"] = normalized_indices
-        market_data["market_source_status"] = {
-            "status": source_status,
-            "provider": "+".join(sorted(providers)) if normalized_indices else market_provider,
-            "data_cutoff": min(cutoffs) if cutoffs else None,
-            "freshness_status": freshness_status,
-            "error": source_error,
-        }
+        market_data["market_source_status"] = aggregate["market_source_status"]
+        sh = verified_quotes.get("sh000001", {})
+        sz = verified_quotes.get("sz399001", {})
         print(f"   上证: {sh.get('price','?')} ({sh.get('change_pct',0):+.2f}%) | "
               f"深证: {sz.get('price','?')} ({sz.get('change_pct',0):+.2f}%)", flush=True)
     except Exception as e:
+        aggregate = _aggregate_market_quote_truth(
+            {},
+            index_codes,
+            default_provider=market_provider,
+        )
         market_data["indices"] = {}
-        market_data["market_source_status"] = {
-            "status": "failed",
-            "provider": market_provider,
-            "data_cutoff": None,
-            "freshness_status": "failed",
-            "error": "fresh_market_indices_unavailable",
-        }
+        market_data["market_source_status"] = aggregate["market_source_status"]
         print(f"   ⚠️ 指数获取失败: {e}", flush=True)
 
     if positions:

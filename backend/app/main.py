@@ -340,80 +340,107 @@ def _fresh_market_quote_truth(quote: dict) -> tuple[str, str] | None:
     return cutoff_text, freshness
 
 
-async def _fetch_market_data() -> dict:
-    """通过 DataRouter 拉取市场数据（多源容错）"""
-    indices = {}
+def _aggregate_market_quote_truth(
+    quotes,
+    expected_codes: list[str],
+    *,
+    default_provider: str,
+) -> dict:
+    verified_quotes: dict[str, dict] = {}
+    missing_sources: list[str] = []
+    rejected_sources: list[str] = []
     providers: set[str] = set()
     data_cutoffs: list[str] = []
-    observed_freshness: set[str] = set()
-    rejected_quote_truth = False
-    for code in ["sh000001", "sz399001", "sz399006"]:
-        try:
-            result = await data_router.fetch(code)
-            if result:
-                observed_freshness.add(str(
-                    result.get("freshness_status") or result.get("freshness") or "unknown"
-                ).strip().lower())
-            quote_truth = _fresh_market_quote_truth(result) if result else None
-            if result and result.get("price") and not quote_truth:
-                rejected_quote_truth = True
-            if result and result.get("price") and quote_truth:
-                cutoff, _freshness = quote_truth
-                indices[code] = {"price": result["price"], "change_pct": result.get("change_pct", 0)}
-                providers.add(str(result.get("source") or "data_router"))
-                data_cutoffs.append(cutoff)
-        except Exception:
-            continue
-    if not indices:
-        fallback_freshness: set[str] = set()
-        fallback_rejected = False
-        try:
-            batch = await tencent_client.fetch_batch(["sh000001", "sz399001"])
-            for k, v in batch.items():
-                fallback_freshness.add(str(
-                    v.get("freshness_status") or v.get("freshness") or "unknown"
-                ).strip().lower())
-                quote_truth = _fresh_market_quote_truth(v)
-                if v.get("price") and not quote_truth:
-                    fallback_rejected = True
-                if not v.get("price") or not quote_truth:
-                    continue
-                cutoff, _freshness = quote_truth
-                indices[k] = {"price": v["price"], "change_pct": v.get("change_pct", 0)}
-                providers.add(str(v.get("source") or "tencent"))
-                data_cutoffs.append(cutoff)
-        except Exception:
-            pass
-        if indices:
-            observed_freshness = fallback_freshness
-            rejected_quote_truth = fallback_rejected
-        else:
-            observed_freshness.update(fallback_freshness)
-            rejected_quote_truth = rejected_quote_truth or fallback_rejected
+    accepted_freshness: set[str] = set()
 
-    if indices and rejected_quote_truth:
+    for code in expected_codes:
+        try:
+            quote = quotes.get(code) if quotes is not None else None
+        except Exception:
+            quote = None
+        if isinstance(quote, Exception) or not isinstance(quote, dict) or not quote:
+            missing_sources.append(code)
+            continue
+        try:
+            price = float(quote.get("price") or 0)
+        except (TypeError, ValueError):
+            price = 0
+        quote_truth = _fresh_market_quote_truth(quote)
+        if price <= 0 or not quote_truth:
+            rejected_sources.append(code)
+            continue
+        cutoff, freshness = quote_truth
+        verified_quotes[code] = quote
+        providers.add(str(quote.get("source") or default_provider))
+        data_cutoffs.append(cutoff)
+        accepted_freshness.add(freshness)
+
+    if verified_quotes and (missing_sources or rejected_sources):
         source_status = "degraded"
         freshness_status = "degraded"
-        source_error = "partial_or_unfresh_market_indices"
-    elif indices:
+        source_error = "partial_market_coverage"
+    elif verified_quotes:
         source_status = "ok"
-        freshness_status = "fresh" if observed_freshness == {"fresh"} else "ok"
+        freshness_status = "fresh" if accepted_freshness == {"fresh"} else "ok"
         source_error = ""
-    elif len(observed_freshness) == 1:
-        source_status = "failed"
-        freshness_status = next(iter(observed_freshness))
-        source_error = "fresh_market_indices_unavailable"
     else:
         source_status = "failed"
         freshness_status = "failed"
         source_error = "fresh_market_indices_unavailable"
-    market_source_status = {
-        "status": source_status,
-        "provider": "+".join(sorted(providers)) if indices else "data_router+tencent",
-        "data_cutoff": min(data_cutoffs) if data_cutoffs else None,
-        "freshness_status": freshness_status,
-        "error": source_error,
+
+    return {
+        "quotes": verified_quotes,
+        "market_source_status": {
+            "status": source_status,
+            "provider": "+".join(sorted(providers)) if providers else default_provider,
+            "data_cutoff": min(data_cutoffs) if data_cutoffs else None,
+            "freshness_status": freshness_status,
+            "error": source_error,
+            "missing_sources": missing_sources,
+            "rejected_sources": rejected_sources,
+            "coverage": {
+                "expected": len(expected_codes),
+                "verified": len(verified_quotes),
+            },
+        },
     }
+
+
+async def _fetch_market_data() -> dict:
+    """通过 DataRouter 拉取市场数据（多源容错）"""
+    expected_codes = ["sh000001", "sz399001", "sz399006"]
+    primary_quotes = {}
+    for code in expected_codes:
+        try:
+            primary_quotes[code] = await data_router.fetch(code)
+        except Exception:
+            primary_quotes[code] = None
+    aggregate = _aggregate_market_quote_truth(
+        primary_quotes,
+        expected_codes,
+        default_provider="data_router",
+    )
+    if not aggregate["quotes"]:
+        fallback_codes = ["sh000001", "sz399001"]
+        try:
+            fallback_quotes = await tencent_client.fetch_batch(fallback_codes)
+        except Exception:
+            fallback_quotes = {}
+        aggregate = _aggregate_market_quote_truth(
+            fallback_quotes,
+            fallback_codes,
+            default_provider="data_router+tencent",
+        )
+
+    verified_quotes = aggregate["quotes"]
+    indices = {
+        code: {
+            "price": quote["price"],
+            "change_pct": quote.get("change_pct", 0),
+        }
+        for code, quote in verified_quotes.items()
+    }
+    market_source_status = aggregate["market_source_status"]
 
     db = SessionLocal()
     try:
