@@ -365,12 +365,14 @@ def test_run_sentinel_news_job_writes_news_events_and_package(monkeypatch, tmp_p
 
 def test_run_sentinel_news_job_wires_account_fetchers_and_materializes_before_package(
     monkeypatch,
+    recwarn,
     tmp_path,
 ):
     import scripts.run_sentinel as runner
 
     order = []
-    captured = {}
+    quote_calls = []
+    financial_calls = []
     portfolio_path = tmp_path / "portfolio.json"
     portfolio_path.write_text(
         json.dumps({"available_cash": 2100.5, "total_assets": 5980.25}),
@@ -383,49 +385,50 @@ def test_run_sentinel_news_job_wires_account_fetchers_and_materializes_before_pa
         lambda report_date: _sample_events(),
     )
 
-    class FakeTencent:
-        async def fetch_batch(self, codes):
-            return {code: {"code": code, "price": 10.0} for code in codes}
-
-    tencent = FakeTencent()
-
-    async def fake_financial_fetcher(codes):
+    async def fake_quote_fetcher(codes):
+        quote_calls.append(list(codes))
         return {
-            code: {"code": code, "status": "success", "revenue_yoy_pct": 12.0}
+            code: {
+                "code": code,
+                "price": 10.0,
+                "amount_wan": 1000.0,
+                "mcap_yi": 100.0,
+                "pe_ttm": 20.0,
+                "pb": 2.0,
+                "change_pct": 1.0,
+                "source": "fake_async_quote",
+            }
             for code in codes
         }
 
-    monkeypatch.setattr(runner, "TencentDataSource", lambda: tencent, raising=False)
-    monkeypatch.setattr(
-        runner,
-        "fetch_financial_evidence",
-        fake_financial_fetcher,
-        raising=False,
-    )
+    async def fake_financial_fetcher(codes):
+        financial_calls.append(list(codes))
+        return {
+            code: {
+                "code": code,
+                "status": "success",
+                "report_period": "2026Q1",
+                "revenue_yoy_pct": 12.0,
+                "gross_margin_pct": 28.0,
+                "source": "fake_async_financial",
+            }
+            for code in codes
+        }
 
-    def fake_build(top_themes, **kwargs):
-        order.append("build")
-        captured["build_kwargs"] = kwargs
-        return [{
-            "theme": "AI半导体",
-            "learning_report_markdown": "# report\n",
-            "top_candidates": [],
-            "boundary": "research_only",
-        }]
+    persist_reports = runner.persist_serenity_deep_dive_reports
+    persist_package = runner.persist_research_package
 
-    def fake_persist_reports(dives, **kwargs):
+    def tracking_persist_reports(dives, **kwargs):
         order.append("persist_reports")
-        return [{
-            **dives[0],
-            "learning_report_markdown": "",
-            "learning_report_path": str(tmp_path / "learning.md"),
-        }]
+        return persist_reports(dives, **kwargs)
 
     def fake_materialize(package, report_date):
         order.append("materialize")
-        assert package["serenity_deep_dives"][0]["learning_report_path"].endswith(
-            "learning.md"
-        )
+        dive = package["serenity_deep_dives"][0]
+        candidate = dive["top_candidates"][0]
+        assert dive["learning_report_path"]
+        assert candidate["quote_evidence"]["metrics"]["price"] == 10.0
+        assert candidate["financial_evidence"]["metrics"]["revenue_yoy_pct"] == 12.0
         return {
             "status": "success",
             "thesis_count": 1,
@@ -436,32 +439,52 @@ def test_run_sentinel_news_job_wires_account_fetchers_and_materializes_before_pa
             "diagnostics": [],
         }
 
-    def fake_persist_package(package, **kwargs):
+    def tracking_persist_package(package, **kwargs):
         order.append("persist_package")
-        captured["package"] = package
-        return {"research_package": "package.json", "research_report": "package.md"}
+        return persist_package(package, **kwargs)
 
-    monkeypatch.setattr(runner, "build_serenity_deep_dives", fake_build)
-    monkeypatch.setattr(runner, "persist_serenity_deep_dive_reports", fake_persist_reports)
+    monkeypatch.setattr(
+        runner,
+        "persist_serenity_deep_dive_reports",
+        tracking_persist_reports,
+    )
     monkeypatch.setattr(
         runner,
         "materialize_serenity_long_horizon",
         fake_materialize,
         raising=False,
     )
-    monkeypatch.setattr(runner, "persist_research_package", fake_persist_package)
+    monkeypatch.setattr(
+        runner,
+        "persist_research_package",
+        tracking_persist_package,
+    )
+    monkeypatch.setattr(
+        runner,
+        "SERENITY_LEARNING_ARCHIVE_DIR",
+        str(tmp_path / "learning"),
+    )
 
-    result = runner.run_news_job("2026-07-26", output_root=tmp_path)
+    result = runner.run_news_job(
+        "2026-07-26",
+        output_root=tmp_path,
+        quote_fetcher=fake_quote_fetcher,
+        financial_fetcher=fake_financial_fetcher,
+    )
 
-    kwargs = captured["build_kwargs"]
-    assert kwargs["available_cash"] == 2100.5
-    assert kwargs["total_assets"] == 5980.25
-    assert kwargs["quote_fetcher"].__self__ is tencent
-    assert kwargs["financial_fetcher"] is fake_financial_fetcher
-    assert order == ["build", "persist_reports", "materialize", "persist_package"]
+    assert quote_calls and all(codes for codes in quote_calls)
+    assert financial_calls and all(codes for codes in financial_calls)
+    assert order == ["persist_reports", "materialize", "persist_package"]
     assert result["account_status"]["status"] == "loaded"
     assert result["long_horizon_summary"]["verified_count"] == 1
-    assert captured["package"]["long_horizon_summary"]["status"] == "success"
+    assert result["serenity_deep_dive_count"] >= 1
+    assert not [
+        warning
+        for warning in recwarn
+        if issubclass(warning.category, RuntimeWarning)
+        or "event loop" in str(warning.message).lower()
+        or "never awaited" in str(warning.message).lower()
+    ]
 
 
 def test_run_sentinel_review_job_handles_empty_outcomes(tmp_path):

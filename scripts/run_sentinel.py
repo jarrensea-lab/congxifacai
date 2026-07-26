@@ -28,7 +28,9 @@ from app.ai.sentinel_role_performance import (
     summarize_advice_performance,
     suggest_role_adjustments,
 )
-from app.ai.serenity_financial_evidence import fetch_financial_evidence
+from app.ai.serenity_financial_evidence import (
+    fetch_financial_evidence as default_financial_fetcher,
+)
 from app.data_sources.tencent_client import TencentDataSource
 from app.data_sources.horizon_news_importer import (
     import_default_tushare_news_events,
@@ -122,7 +124,13 @@ def _load_account_scale() -> dict[str, Any]:
     }
 
 
-def run_news_job(report_date: str, output_root: str | Path = DEFAULT_OUTPUT_ROOT) -> dict[str, Any]:
+def run_news_job(
+    report_date: str,
+    output_root: str | Path = DEFAULT_OUTPUT_ROOT,
+    *,
+    quote_fetcher=None,
+    financial_fetcher=None,
+) -> dict[str, Any]:
     """Import Tushare high-frequency news and persist a Sentinel research package."""
     root = Path(output_root)
     events = import_default_tushare_news_events(report_date)
@@ -130,15 +138,18 @@ def run_news_job(report_date: str, output_root: str | Path = DEFAULT_OUTPUT_ROOT
     write_sentinel_news_events(events, news_path)
     package = build_news_research_package(events, report_date=report_date)
     account_status = _load_account_scale()
-    quote_source = TencentDataSource()
+    if quote_fetcher is None:
+        quote_fetcher = TencentDataSource().fetch_batch
+    if financial_fetcher is None:
+        financial_fetcher = default_financial_fetcher
     dives = build_serenity_deep_dives(
         package.get("top_themes", []),
         report_date=report_date,
         limit=3,
         available_cash=account_status["available_cash"],
         total_assets=account_status["total_assets"],
-        quote_fetcher=quote_source.fetch_batch,
-        financial_fetcher=fetch_financial_evidence,
+        quote_fetcher=quote_fetcher,
+        financial_fetcher=financial_fetcher,
     )
     package["serenity_deep_dives"] = persist_serenity_deep_dive_reports(
         dives,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,24 @@ _A_SHARE_CODE = re.compile(
     r"^(?:000|001|002|003|300|301|302|600|601|603|605|688|689|"
     r"430|83[0-9]|87[0-9])\d{3}$"
 )
+_CORE_FINANCIAL_METRICS = {
+    "revenue",
+    "total_revenue",
+    "operating_revenue",
+    "revenue_yoy_pct",
+    "net_profit",
+    "net_profit_yoy_pct",
+    "operating_profit",
+    "gross_margin",
+    "gross_margin_pct",
+    "gross_margin_yoy_pct",
+    "roe",
+    "roe_pct",
+    "operating_cash_flow",
+    "operating_cashflow",
+    "operating_cashflow_yoy_pct",
+}
+_VOLATILE_FIELDS = {"created_at", "updated_at", "reviews"}
 
 
 def _summary() -> dict[str, Any]:
@@ -29,6 +48,10 @@ def _summary() -> dict[str, Any]:
         "target_count": 0,
         "forming_count": 0,
         "verified_count": 0,
+        "unchanged_count": 0,
+        "unchanged_thesis_count": 0,
+        "unchanged_target_count": 0,
+        "skipped_count": 0,
         "diagnostics": [],
     }
 
@@ -113,10 +136,63 @@ def _quote_evidence_valid(evidence: Any) -> bool:
 def _financial_evidence_valid(evidence: Any) -> bool:
     if not isinstance(evidence, dict) or not str(evidence.get("fact") or "").strip():
         return False
-    metrics = evidence.get("metrics")
-    if not isinstance(metrics, dict) or evidence.get("strength") == "weak":
+    return (
+        _status_ok(evidence.get("status"))
+        and isinstance(evidence.get("metrics"), dict)
+        and str(evidence.get("strength") or "").strip().lower() != "weak"
+    )
+
+
+def _financial_core_metrics_valid(evidence: Any) -> bool:
+    if not isinstance(evidence, dict):
         return False
-    return any(value not in (None, "") for value in metrics.values())
+    metrics = evidence.get("metrics")
+    if not isinstance(metrics, dict):
+        return False
+    for key in _CORE_FINANCIAL_METRICS:
+        value = metrics.get(key)
+        if isinstance(value, bool) or value in (None, ""):
+            continue
+        try:
+            if math.isfinite(float(value)):
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
+
+
+def _normalize_semantics(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _normalize_semantics(item)
+            for key, item in sorted(value.items())
+            if key not in _VOLATILE_FIELDS
+        }
+    if isinstance(value, list):
+        return [_normalize_semantics(item) for item in value]
+    if isinstance(value, float) and not math.isfinite(value):
+        if math.isnan(value):
+            return "__nan__"
+        return "__positive_inf__" if value > 0 else "__negative_inf__"
+    return value
+
+
+def _project_semantics(existing: Any, desired: Any) -> Any:
+    if isinstance(desired, dict):
+        existing_dict = existing if isinstance(existing, dict) else {}
+        return {
+            key: _project_semantics(existing_dict.get(key), item)
+            for key, item in desired.items()
+            if key not in _VOLATILE_FIELDS
+        }
+    return existing
+
+
+def _semantically_matches(existing: Any, desired: dict[str, Any]) -> bool:
+    if not isinstance(existing, dict):
+        return False
+    projected = _project_semantics(existing, desired)
+    return _normalize_semantics(projected) == _normalize_semantics(desired)
 
 
 def _core_thesis(candidate: dict[str, Any]) -> str:
@@ -139,15 +215,21 @@ def _build_thesis(
         _status_ok(dive.get("quote_status"))
         and _quote_evidence_valid(candidate.get("quote_evidence"))
     )
-    financial_verified = (
+    financial_evidence = candidate.get("financial_evidence")
+    financial_source_verified = (
         _status_ok(dive.get("financial_status"))
-        and _financial_evidence_valid(candidate.get("financial_evidence"))
+        and _financial_evidence_valid(financial_evidence)
+    )
+    financial_core_metrics_verified = _financial_core_metrics_valid(
+        financial_evidence
     )
     missing_verification = []
     if not quote_verified:
         missing_verification.append("quote")
-    if not financial_verified:
+    if not financial_source_verified:
         missing_verification.append("financial")
+    if not financial_core_metrics_verified:
+        missing_verification.append("financial_core_metrics")
 
     quote_metrics = (
         candidate.get("quote_evidence", {}).get("metrics", {})
@@ -254,20 +336,35 @@ def materialize_serenity_long_horizon(
                 )
                 result["evidence_count"] += ledger.append_many(evidence)
                 thesis["evidence_ids"] = [item["evidence_id"] for item in evidence]
-                stored = thesis_store.upsert(thesis)
+                existing_thesis = thesis_store.get(symbol)
+                thesis_unchanged = _semantically_matches(
+                    existing_thesis,
+                    thesis,
+                )
+                if thesis_unchanged:
+                    stored = existing_thesis
+                    result["unchanged_thesis_count"] += 1
+                    result["skipped_count"] += 1
+                else:
+                    stored = thesis_store.upsert(thesis)
                 result["thesis_count"] += 1
                 if stored.get("thesis_status") == "forming":
                     result["forming_count"] += 1
                 if verified:
                     result["verified_count"] += 1
 
-                target_written = target_pool.upsert_target(
-                    code=symbol,
-                    name=stored["name"],
-                    status="long_research",
-                    source="long_horizon",
-                    evidence_ids=thesis["evidence_ids"],
-                    evidence={
+                existing_target = target_pool.get(symbol)
+                merged_evidence_ids = list(dict.fromkeys([
+                    *((existing_target or {}).get("evidence_ids") or []),
+                    *thesis["evidence_ids"],
+                ]))
+                target_semantics = {
+                    "code": symbol,
+                    "name": stored["name"],
+                    "status": "long_research",
+                    "source": "long_horizon",
+                    "evidence_ids": merged_evidence_ids,
+                    "evidence": {
                         "stage": "shadow_only",
                         "boundary": "shadow_only",
                         "research_only": True,
@@ -275,15 +372,35 @@ def materialize_serenity_long_horizon(
                         "thesis_status": stored["thesis_status"],
                         "source_report_path": stored["source_report_path"],
                     },
-                    serenity={
+                    "serenity": {
                         "quality_score": stored["quality_score"],
                         "bottleneck_duration": stored["bottleneck_duration"],
                         "boundary": "research_only",
                     },
+                }
+                target_unchanged = _semantically_matches(
+                    existing_target,
+                    target_semantics,
                 )
+                if target_unchanged:
+                    target_written = True
+                    result["unchanged_target_count"] += 1
+                    result["skipped_count"] += 1
+                else:
+                    target_written = target_pool.upsert_target(
+                        code=symbol,
+                        name=stored["name"],
+                        status="long_research",
+                        source="long_horizon",
+                        evidence_ids=thesis["evidence_ids"],
+                        evidence=target_semantics["evidence"],
+                        serenity=target_semantics["serenity"],
+                    )
                 if not target_written:
                     raise RuntimeError("target_pool_upsert_rejected")
                 result["target_count"] += 1
+                if thesis_unchanged and target_unchanged:
+                    result["unchanged_count"] += 1
             except Exception as exc:
                 result["diagnostics"].append(
                     {

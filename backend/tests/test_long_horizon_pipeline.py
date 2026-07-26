@@ -1,7 +1,10 @@
 """Serenity-to-Long-Thesis research materialization tests."""
 from __future__ import annotations
 
+import copy
 import json
+
+import pytest
 
 from app.services.evidence_ledger import EvidenceLedgerStore
 from app.services.long_thesis import LongThesisStore
@@ -58,6 +61,7 @@ def _candidate(
         candidate["financial_evidence"] = {
             "fact": f"{name}财务核验有效。",
             "strength": "strong",
+            "status": "success",
             "metrics": {
                 "report_period": "2026Q1",
                 "revenue_yoy_pct": 18.0,
@@ -157,7 +161,10 @@ def test_materialize_serenity_long_horizon_persists_verified_and_forming_researc
     forming = thesis_store.get("000001")
     assert forming["thesis_status"] == "forming"
     assert forming["verification_status"] == "incomplete"
-    assert forming["missing_verification"] == ["financial"]
+    assert forming["missing_verification"] == [
+        "financial",
+        "financial_core_metrics",
+    ]
 
     for code in ("688001", "000001"):
         target = target_pool.get(code)
@@ -216,3 +223,143 @@ def test_materializer_accepts_all_injected_stores_positionally(tmp_path):
 
     assert summary["status"] == "success"
     assert summary["thesis_count"] == 0
+
+
+@pytest.mark.parametrize(
+    ("metrics", "verified"),
+    [
+        ({"report_period": "2026Q1"}, False),
+        ({"revenue_yoy_pct": float("nan")}, False),
+        ({"net_profit": float("inf")}, False),
+        ({"gross_margin_pct": "31.5"}, True),
+        ({"operating_cashflow_yoy_pct": 0.0}, True),
+    ],
+)
+def test_financial_verification_requires_a_finite_core_metric(
+    tmp_path,
+    metrics,
+    verified,
+):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    package = _package()
+    package["serenity_deep_dives"] = [package["serenity_deep_dives"][0]]
+    candidate = package["serenity_deep_dives"][0]["top_candidates"][0]
+    candidate["financial_evidence"] = {
+        "fact": "财务接口返回数据。",
+        "strength": "medium",
+        "status": "success",
+        "metrics": metrics,
+    }
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+
+    materialize_serenity_long_horizon(
+        package,
+        "2026-07-26",
+        thesis_store,
+        EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl"),
+        TargetPoolStore(tmp_path / "target_pool.json"),
+    )
+
+    thesis = thesis_store.get("688001")
+    if verified:
+        assert thesis["verification_status"] == "verified"
+        assert thesis["thesis_status"] == "healthy"
+        assert "financial_core_metrics" not in thesis["missing_verification"]
+    else:
+        assert thesis["verification_status"] == "incomplete"
+        assert thesis["thesis_status"] == "forming"
+        assert "financial_core_metrics" in thesis["missing_verification"]
+
+
+@pytest.mark.parametrize(
+    ("financial_status", "strength", "evidence_status"),
+    [
+        ({"status": "failed"}, "strong", "success"),
+        ({"status": "success"}, "weak", "success"),
+        ({"status": "success"}, "Weak", "success"),
+        ({"status": "success"}, "strong", "failed"),
+    ],
+)
+def test_financial_verification_rejects_failed_or_weak_evidence(
+    tmp_path,
+    financial_status,
+    strength,
+    evidence_status,
+):
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    package = _package()
+    package["serenity_deep_dives"] = [package["serenity_deep_dives"][0]]
+    dive = package["serenity_deep_dives"][0]
+    dive["financial_status"] = financial_status
+    dive["top_candidates"][0]["financial_evidence"]["strength"] = strength
+    dive["top_candidates"][0]["financial_evidence"]["status"] = evidence_status
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+
+    materialize_serenity_long_horizon(
+        package,
+        "2026-07-26",
+        thesis_store,
+        EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl"),
+        TargetPoolStore(tmp_path / "target_pool.json"),
+    )
+
+    thesis = thesis_store.get("688001")
+    assert thesis["verification_status"] == "incomplete"
+    assert thesis["thesis_status"] == "forming"
+    assert "financial" in thesis["missing_verification"]
+
+
+def test_repeated_materialization_does_not_refresh_thesis_or_target(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services import long_thesis, quant_lifecycle
+    from app.services.long_horizon_pipeline import (
+        materialize_serenity_long_horizon,
+    )
+
+    clock = {"now": "2026-07-26 20:00:00"}
+    monkeypatch.setattr(long_thesis, "_now", lambda: clock["now"])
+    monkeypatch.setattr(quant_lifecycle, "_now", lambda: clock["now"])
+    package = _package()
+    package["serenity_deep_dives"] = [copy.deepcopy(package["serenity_deep_dives"][0])]
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    ledger = EvidenceLedgerStore(tmp_path / "evidence_ledger.jsonl")
+    target_pool = TargetPoolStore(tmp_path / "target_pool.json")
+
+    materialize_serenity_long_horizon(
+        package,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+    thesis_bytes = thesis_store.path.read_bytes()
+    target_bytes = target_pool.path.read_bytes()
+    thesis_updated_at = thesis_store.get("688001")["updated_at"]
+    target_updated_at = target_pool.get("688001")["updated_at"]
+    clock["now"] = "2026-07-26 20:05:00"
+
+    repeated = materialize_serenity_long_horizon(
+        package,
+        "2026-07-26",
+        thesis_store,
+        ledger,
+        target_pool,
+    )
+
+    assert repeated["evidence_count"] == 0
+    assert repeated["unchanged_count"] == 1
+    assert repeated["unchanged_thesis_count"] == 1
+    assert repeated["unchanged_target_count"] == 1
+    assert repeated["skipped_count"] == 2
+    assert thesis_store.path.read_bytes() == thesis_bytes
+    assert target_pool.path.read_bytes() == target_bytes
+    assert thesis_store.get("688001")["updated_at"] == thesis_updated_at
+    assert target_pool.get("688001")["updated_at"] == target_updated_at

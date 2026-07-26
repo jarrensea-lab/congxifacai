@@ -39,6 +39,7 @@ def build_financial_evidence(
                 "需要补充财报接口权限、AKShare 依赖或本地证据缓存。"
             ),
             "strength": "weak",
+            "status": str((snapshot or {}).get("status") or "unavailable"),
             "source": "财务证据不可用",
             "metrics": {},
         }
@@ -68,6 +69,7 @@ def build_financial_evidence(
     return {
         "fact": fact,
         "strength": "strong" if has_core_metrics else "medium",
+        "status": str(snapshot.get("status") or "unknown"),
         "source": f"{snapshot.get('source', '财务数据')}财务证据",
         "metrics": metrics,
     }
