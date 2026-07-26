@@ -1634,6 +1634,118 @@ def test_target_pool_long_horizon_states_are_not_intraday_scan_active(tmp_path):
     assert store.get("000003")["status"] == "accumulation_zone"
 
 
+@pytest.mark.parametrize(
+    "long_status",
+    [
+        "long_research",
+        "long_watch",
+        "accumulation_zone",
+        "tactical_watch",
+        "thesis_review",
+    ],
+)
+@pytest.mark.parametrize("requested_status", ["watching", "research_reference"])
+def test_target_scoring_cannot_downgrade_long_horizon_status(
+    tmp_path,
+    long_status,
+    requested_status,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status=long_status,
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v2"],
+    )
+
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status=requested_status,
+        source="target_scoring",
+        scoring_decision={
+            "action": "watch",
+            "score": 88,
+            "source_status": {
+                "quote": "ok",
+                "kline": "ok",
+                "fund_flow": "ok",
+                "financial": "ok",
+            },
+            "current_long_evidence_ids": ["long-thesis:002123:v2"],
+        },
+        current_long_evidence_ids=["long-thesis:002123:v2"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    item = store.get("002123")
+    assert item["status"] == long_status
+    assert item["current_long_evidence_ids"] == ["long-thesis:002123:v2"]
+    assert item["scoring_decision"]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2"
+    ]
+
+
+@pytest.mark.parametrize(
+    "long_status",
+    [
+        "long_research",
+        "long_watch",
+        "accumulation_zone",
+        "tactical_watch",
+        "thesis_review",
+    ],
+)
+def test_target_scoring_cannot_promote_long_horizon_without_production_approval(
+    tmp_path,
+    long_status,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status=long_status,
+        source="long_horizon",
+    )
+    assert store.get("002123")["production_eligibility"]["eligible"] is False
+
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(action="buy"),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    assert store.get("002123")["status"] == long_status
+
+
+def test_target_scoring_can_explicitly_remove_long_horizon_target(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status="long_watch",
+        source="long_horizon",
+    )
+
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status="removed",
+        source="target_scoring",
+        scoring_decision={"action": "remove"},
+    )
+
+    assert store.get("002123")["status"] == "removed"
+
+
 def test_target_pool_cooldown_after_loss_is_durable_and_not_scan_active(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
     store.upsert_target(

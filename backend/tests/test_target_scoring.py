@@ -1,3 +1,6 @@
+import pytest
+
+import app.services.target_scoring as target_scoring
 from app.services.target_scoring import score_long_quality, score_target
 
 
@@ -239,3 +242,133 @@ def test_score_target_blocks_trade_when_long_thesis_red_line_is_triggered():
     assert result["thesis_status"] == "broken"
     assert result["red_line_status"] == "triggered"
     assert "中长期 thesis 红线触发" in result["decision_reason"]
+
+
+def test_score_target_keeps_forming_thesis_incomplete_and_carries_current_evidence():
+    long_thesis = {
+        "symbol": "002123",
+        "quality_score": 88,
+        "thesis_status": "forming",
+        "verification_status": "incomplete",
+        "missing_verification": ["financial"],
+        "current_long_evidence_ids": ["long-thesis:002123:v2"],
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "status": "clear"}],
+    }
+    snapshot = _base_snapshot(code="002123", price=3.2)
+    snapshot["quote"].update(
+        {"change_pct": 1.2, "vol_ratio": 1.1, "amount_wan": 8200}
+    )
+
+    result = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+        long_thesis=long_thesis,
+    )
+
+    assert result["action"] == "watch"
+    assert result["thesis_status"] == "forming"
+    assert result["verification_status"] == "incomplete"
+    assert result["current_long_evidence_ids"] == ["long-thesis:002123:v2"]
+
+
+@pytest.mark.parametrize(
+    ("current_status", "expected"),
+    [
+        ("long_watch", "long_watch"),
+        ("accumulation_zone", "accumulation_zone"),
+        ("tactical_watch", "tactical_watch"),
+    ],
+)
+def test_next_target_status_preserves_explicit_long_state_during_watch_scan(
+    current_status,
+    expected,
+):
+    assert callable(getattr(target_scoring, "next_target_status", None))
+    assert (
+        target_scoring.next_target_status(
+            current_status,
+            "watch",
+            {
+                "thesis_status": "healthy",
+                "long_quality_score": 90,
+                "red_line_status": "clear",
+            },
+        )
+        == expected
+    )
+
+
+def test_next_target_status_routes_forming_and_broken_theses_without_buying():
+    assert (
+        target_scoring.next_target_status(
+            "long_watch",
+            "watch",
+            {
+                "thesis_status": "forming",
+                "verification_status": "incomplete",
+                "long_quality_score": 90,
+            },
+        )
+        == "long_research"
+    )
+    assert (
+        target_scoring.next_target_status(
+            "long_watch",
+            "buy",
+            {
+                "thesis_status": "forming",
+                "verification_status": "incomplete",
+                "long_quality_score": 90,
+            },
+            authorization_valid=True,
+        )
+        == "long_research"
+    )
+    assert (
+        target_scoring.next_target_status(
+            "long_research",
+            "buy",
+            {
+                "thesis_status": "broken",
+                "red_line_status": "triggered",
+                "long_quality_score": 0,
+            },
+            authorization_valid=True,
+        )
+        == "thesis_review"
+    )
+
+
+def test_next_target_status_allows_only_authorized_tactical_buy_and_explicit_remove():
+    healthy = {
+        "thesis_status": "healthy",
+        "long_quality_score": 95,
+        "red_line_status": "clear",
+    }
+
+    assert target_scoring.next_target_status("watching", "watch", healthy) == "watching"
+    assert (
+        target_scoring.next_target_status("long_research", "watch", healthy)
+        == "long_watch"
+    )
+    assert (
+        target_scoring.next_target_status(
+            "long_research",
+            "buy",
+            healthy,
+            authorization_valid=False,
+        )
+        == "long_research"
+    )
+    assert (
+        target_scoring.next_target_status(
+            "watching",
+            "buy",
+            healthy,
+            authorization_valid=True,
+        )
+        == "executable"
+    )
+    assert target_scoring.next_target_status("long_watch", "remove", healthy) == "removed"

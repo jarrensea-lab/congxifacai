@@ -2056,14 +2056,16 @@ async def build_target_scores_for_report(
     total_assets: float,
     limit: int | None = None,
     market_source=None,
+    long_thesis_store=None,
 ) -> list[dict]:
     """Score current target-pool items with normalized data snapshots."""
     from app.ai.serenity_financial_evidence import fetch_financial_evidence
     from app.data_sources.akshare_market import AKShareMarketClient
     from app.data_sources.akshare_news import AKShareNewsClient
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
+    from app.services.long_thesis import LongThesisStore
     from app.services.quant_lifecycle import TargetPoolStore, target_production_eligibility
-    from app.services.target_scoring import score_target
+    from app.services.target_scoring import next_target_status, score_target
     from app.services.target_snapshot import build_target_snapshot
 
     class CachedMarketSource:
@@ -2091,6 +2093,11 @@ async def build_target_scores_for_report(
         return {code: financial_cache.get(code, {}) for code in codes}
 
     store = TargetPoolStore()
+    resolved_long_thesis_store = (
+        long_thesis_store
+        if long_thesis_store is not None
+        else LongThesisStore()
+    )
     payload = store.load()
     items = [
         item for item in payload.get("items", {}).values()
@@ -2138,19 +2145,50 @@ async def build_target_scores_for_report(
             None,
         )
         snapshot["production_eligibility"] = target_production_eligibility(item)
-        score = score_target(snapshot, available_cash=available_cash, total_assets=total_assets)
+        thesis = resolved_long_thesis_store.get(code)
+        score = score_target(
+            snapshot,
+            available_cash=available_cash,
+            total_assets=total_assets,
+            long_thesis=thesis,
+        )
         score["source_status"] = {
             key: (snapshot.get(key) or {}).get("status")
             for key in ("quote", "kline", "fund_flow", "northbound", "news", "financial", "sentinel", "serenity")
         }
+        thesis_current_ids = (
+            thesis.get("current_long_evidence_ids")
+            if isinstance(thesis, dict)
+            else None
+        )
+        current_long_evidence_ids = (
+            thesis_current_ids
+            if isinstance(thesis_current_ids, list)
+            else item.get("current_long_evidence_ids") or []
+        )
+        current_long_evidence_ids = list(dict.fromkeys(
+            str(value).strip()
+            for value in current_long_evidence_ids
+            if str(value).strip()
+        ))
+        score["current_long_evidence_ids"] = current_long_evidence_ids
         quote = snapshot.get("quote") if isinstance(snapshot.get("quote"), dict) else {}
         action = str(score.get("action") or "")
-        next_status = {
-            "buy": "executable",
-            "add": "executable",
-            "research_only": "research_reference",
-            "remove": "removed",
-        }.get(action, "watching")
+        authorization_valid = (
+            action in {"buy", "add"}
+            and float(score.get("score", 0) or 0) >= 70
+            and not (score.get("missing_data") or [])
+            and all(
+                score["source_status"].get(key) == "ok"
+                for key in ("quote", "kline", "fund_flow", "financial")
+            )
+        )
+        next_status = next_target_status(
+            str(item.get("status") or "watching"),
+            action,
+            score,
+            authorization_valid=authorization_valid,
+        )
         store.upsert_target(
             code=code,
             name=score.get("name") or item.get("name", code),
@@ -2158,6 +2196,7 @@ async def build_target_scores_for_report(
             source="target_scoring",
             evidence=evidence,
             evidence_ids=item.get("evidence_ids") or [],
+            current_long_evidence_ids=current_long_evidence_ids,
             sentinel=item.get("sentinel") or {},
             serenity=item.get("serenity") or {},
             scoring_decision={
@@ -2168,6 +2207,16 @@ async def build_target_scores_for_report(
                 "missing_data": score.get("missing_data") or [],
                 "playbook": score.get("playbook", "watch"),
                 "source_status": score.get("source_status") or {},
+                "long_quality_score": score.get("long_quality_score", 0),
+                "thesis_status": score.get("thesis_status", ""),
+                "valuation_zone": score.get("valuation_zone", "unknown"),
+                "red_line_status": score.get("red_line_status", ""),
+                "long_horizon_reason": score.get("long_horizon_reason", ""),
+                "combined_decision_reason": score.get(
+                    "combined_decision_reason",
+                    score.get("decision_reason", ""),
+                ),
+                "current_long_evidence_ids": current_long_evidence_ids,
                 "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
             current_price=quote.get("price"),

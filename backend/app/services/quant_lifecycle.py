@@ -418,10 +418,18 @@ def target_production_eligibility(
         if payload.get("research_only") is True or provenance.get("research_only") is True:
             return True
         status = str(payload.get("status") or "").strip().lower().replace("-", "_")
-        if status in {"research_only", "research_reference", "long_research", "hypothesis", "shadow"}:
+        if status in {
+            "research_only",
+            "research_reference",
+            "hypothesis",
+            "shadow",
+        } or status in LONG_HORIZON_STATUSES:
             return True
         source = str(payload.get("source") or "").strip().lower()
-        if any(marker in source for marker in ("gbrain", "sentinel", "serenity")):
+        if any(
+            marker in source
+            for marker in ("gbrain", "sentinel", "serenity", "long_horizon")
+        ):
             return True
         evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
         stage_values = [
@@ -582,6 +590,19 @@ class TargetPoolStore(CandidatePoolStore):
             normalized_status = "cooldown_after_loss"
         elif not gate["eligible"] and normalized_status in {"candidate", "watching", "executable", "actionable"}:
             normalized_status = "research_reference"
+        if (
+            source == "target_scoring"
+            and existing.get("status")
+            in {
+                "long_research",
+                "long_watch",
+                "accumulation_zone",
+                "tactical_watch",
+                "thesis_review",
+            }
+            and normalized_status in {"watching", "research_reference"}
+        ):
+            normalized_status = str(existing["status"])
         merged_evidence_ids = list(dict.fromkeys([
             *(existing.get("evidence_ids") or []),
             *(evidence_ids or []),

@@ -6,6 +6,11 @@ from pathlib import Path
 import pytest
 
 
+class _EmptyLongThesisStore:
+    def get(self, symbol):
+        return None
+
+
 def test_save_report_to_obsidian_writes_report_index_and_status(tmp_path):
     from scripts.daily_report import save_report_to_obsidian
 
@@ -1658,6 +1663,7 @@ async def test_build_target_scores_prioritizes_actionable_pool_status(monkeypatc
         total_assets=6052.57,
         limit=1,
         market_source=shared_market_source,
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert selected_codes == ["300002"]
@@ -1715,6 +1721,7 @@ async def test_build_target_scores_does_not_reactivate_cooldown_after_loss(monke
         available_cash=2103.25,
         total_assets=5975.25,
         market_source=FakeSource(),
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert selected_codes == ["300002"]
@@ -1775,6 +1782,7 @@ async def test_build_target_scores_refreshes_newest_research_hypothesis_first(mo
         total_assets=5975.25,
         limit=1,
         market_source=FakeSource(),
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert selected_codes == ["000563"]
@@ -1847,6 +1855,7 @@ async def test_build_target_scores_keeps_triggered_research_reference_non_execut
         available_cash=6085.61,
         total_assets=6085.61,
         limit=1,
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert scores[0]["score"] >= 70
@@ -1855,6 +1864,229 @@ async def test_build_target_scores_keeps_triggered_research_reference_non_execut
     assert writes[0]["scoring_decision"]["score"] == scores[0]["score"]
     assert writes[0]["scoring_decision"]["action"] == "research_only"
     assert writes[0]["scoring_decision"]["source_status"]["quote"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current_status", "expected_status"),
+    [
+        ("long_research", "long_watch"),
+        ("long_watch", "long_watch"),
+        ("accumulation_zone", "accumulation_zone"),
+    ],
+)
+async def test_build_target_scores_consumes_injected_long_thesis_and_preserves_long_state(
+    monkeypatch,
+    tmp_path,
+    current_status,
+    expected_status,
+):
+    from app.services.long_thesis import LongThesisStore
+    from scripts.daily_report import build_target_scores_for_report
+
+    writes = []
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    thesis_store.upsert(
+        {
+            "symbol": "002123",
+            "name": "梦网科技",
+            "quality_score": 88,
+            "thesis_status": "healthy",
+            "verification_status": "verified",
+            "current_long_evidence_ids": [
+                "long-thesis:002123:v2",
+                "long-red-line:002123:v2",
+            ],
+            "valuation_anchor": {
+                "accumulation_price": 3.3,
+                "fair_price": 4.0,
+                "overpriced_price": 5.2,
+            },
+            "assumptions": [{"id": "growth", "status": "intact"}],
+            "red_lines": [{"id": "margin", "status": "clear"}],
+            "financial_evidence": {"raw_blob": "not-for-scorecard" * 100},
+        }
+    )
+
+    class FakeStore:
+        def load(self):
+            return {
+                "items": {
+                    "002123": {
+                        "code": "002123",
+                        "name": "梦网科技",
+                        "status": current_status,
+                        "source": "long_horizon",
+                        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+                    }
+                }
+            }
+
+        def upsert_target(self, **kwargs):
+            writes.append(kwargs)
+            return True
+
+    class FakeSource:
+        async def fetch_fund_flow_individual(self):
+            return []
+
+        async def fetch_hsgt_flow(self):
+            return []
+
+    async def fake_snapshot(code, **kwargs):
+        return {
+            "code": code,
+            "name": kwargs["name"],
+            "quote": {
+                "status": "ok",
+                "price": 3.2,
+                "change_pct": 1.2,
+                "amount_wan": 8200,
+                "turnover_pct": 3.0,
+                "vol_ratio": 1.1,
+            },
+            "kline": {
+                "status": "ok",
+                "bars": [
+                    {"open": 3.1, "close": 3.15, "high": 3.2, "low": 3.0}
+                    for _ in range(20)
+                ],
+            },
+            "fund_flow": {"status": "ok", "net": "净流入"},
+            "financial": {"status": "ok", "revenue_yoy_pct": 12.0},
+            "news": {"status": "ok", "items": [{"title": "订单增长"}]},
+            "sentinel": {"status": "ok", "evidence_ids": ["ev_test"]},
+            "serenity": {"status": "ok", "score": 65},
+        }
+
+    monkeypatch.setattr("app.services.quant_lifecycle.TargetPoolStore", FakeStore)
+    monkeypatch.setattr(
+        "app.data_sources.realtime_market_data.FastRealtimeMarketDataSource",
+        FakeSource,
+    )
+    monkeypatch.setattr("app.data_sources.akshare_news.AKShareNewsClient", FakeSource)
+    monkeypatch.setattr(
+        "app.services.target_snapshot.build_target_snapshot",
+        fake_snapshot,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=FakeSource(),
+        long_thesis_store=thesis_store,
+    )
+
+    assert scores[0]["action"] == "watch"
+    assert scores[0]["block_reason"] == "price_not_triggered"
+    assert scores[0]["long_quality_score"] == 88
+    assert scores[0]["thesis_status"] == "healthy"
+    assert scores[0]["valuation_zone"] == "accumulation_zone"
+    assert scores[0]["red_line_status"] == "clear"
+    assert scores[0]["long_horizon_reason"] == "assumptions_intact"
+    assert "长期跟踪" in scores[0]["combined_decision_reason"]
+    assert scores[0]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2",
+        "long-red-line:002123:v2",
+    ]
+    assert writes[0]["status"] == expected_status
+    assert writes[0]["current_long_evidence_ids"] == scores[0][
+        "current_long_evidence_ids"
+    ]
+    decision = writes[0]["scoring_decision"]
+    for field in (
+        "long_quality_score",
+        "thesis_status",
+        "valuation_zone",
+        "red_line_status",
+        "long_horizon_reason",
+        "combined_decision_reason",
+        "current_long_evidence_ids",
+    ):
+        assert decision[field] == scores[0][field]
+    assert "financial_evidence" not in decision
+
+
+@pytest.mark.asyncio
+async def test_build_target_scores_default_long_thesis_store_uses_env_path(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_thesis import LongThesisStore
+    from scripts.daily_report import build_target_scores_for_report
+
+    thesis_path = tmp_path / "env-long-thesis.json"
+    monkeypatch.setenv("CONGXI_LONG_THESIS_PATH", str(thesis_path))
+    LongThesisStore().upsert(
+        {
+            "symbol": "000001",
+            "quality_score": 77,
+            "thesis_status": "healthy",
+            "assumptions": [{"id": "deposit", "status": "intact"}],
+            "red_lines": [],
+        }
+    )
+    received_theses = []
+
+    class FakeStore:
+        def load(self):
+            return {
+                "items": {
+                    "000001": {
+                        "code": "000001",
+                        "name": "平安银行",
+                        "status": "long_research",
+                        "source": "long_horizon",
+                    }
+                }
+            }
+
+        def upsert_target(self, **kwargs):
+            return True
+
+    class FakeSource:
+        async def fetch_fund_flow_individual(self):
+            return []
+
+        async def fetch_hsgt_flow(self):
+            return []
+
+    async def fake_snapshot(code, **kwargs):
+        return {"code": code, "name": kwargs["name"], "quote": {"price": 10.0}}
+
+    def fake_score(snapshot, **kwargs):
+        received_theses.append(kwargs.get("long_thesis"))
+        return {
+            "code": snapshot["code"],
+            "name": snapshot["name"],
+            "score": 50,
+            "action": "watch",
+            "long_quality_score": 77,
+            "thesis_status": "healthy",
+        }
+
+    monkeypatch.setattr("app.services.quant_lifecycle.TargetPoolStore", FakeStore)
+    monkeypatch.setattr(
+        "app.data_sources.realtime_market_data.FastRealtimeMarketDataSource",
+        FakeSource,
+    )
+    monkeypatch.setattr("app.data_sources.akshare_news.AKShareNewsClient", FakeSource)
+    monkeypatch.setattr(
+        "app.services.target_snapshot.build_target_snapshot",
+        fake_snapshot,
+    )
+    monkeypatch.setattr("app.services.target_scoring.score_target", fake_score)
+
+    await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=FakeSource(),
+    )
+
+    assert received_theses[0]["symbol"] == "000001"
+    assert received_theses[0]["quality_score"] == 77
 
 
 def test_build_feishu_summary_keeps_full_report_local_hint():
