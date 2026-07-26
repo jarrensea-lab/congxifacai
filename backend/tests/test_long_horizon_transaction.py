@@ -82,12 +82,14 @@ def _transaction(
     tmp_path: Path,
     *,
     transaction_lock_path: Path | None = None,
+    transaction_journal_path: Path | None = None,
 ):
     thesis_path = tmp_path / "long_thesis.json"
     ledger_path = tmp_path / "evidence_ledger.jsonl"
     target_path = tmp_path / "target_pool.json"
     transaction = LongHorizonBatchTransaction(
-        tmp_path / "long_horizon_transaction.json",
+        transaction_journal_path
+        or tmp_path / "long_horizon_transaction.json",
         [
             ("long_thesis", thesis_path),
             ("evidence_ledger", ledger_path),
@@ -607,3 +609,139 @@ def test_journal_unlinked_before_state_clean_blocks_writers_until_cleanup(
         "ev_committed_before_cleanup",
         "ev_external_unlink_clear",
     }
+
+
+@pytest.mark.parametrize("with_transaction_writes", [False, True])
+def test_custom_journal_commit_clears_state_and_default_stores_can_write(
+    tmp_path,
+    with_transaction_writes,
+):
+    transaction, thesis_path, ledger_path, target_path = _transaction(
+        tmp_path,
+        transaction_journal_path=tmp_path / "custom-pending.json",
+    )
+    with transaction.locked():
+        transaction.begin()
+        if with_transaction_writes:
+            EvidenceLedgerStore(ledger_path).append_many([{
+                "evidence_id": "ev_custom_transaction",
+                "type": "test",
+                "summary": "committed transaction write",
+            }])
+        transaction.commit()
+
+    assert not _transaction_state_path(transaction).exists()
+    writes = _ordinary_store_writes(
+        thesis_path,
+        ledger_path,
+        target_path,
+        f"custom_commit_{with_transaction_writes}",
+    )
+    for write in writes:
+        write()
+
+
+@pytest.mark.parametrize("recovery_method", ["rollback", "recover_pending"])
+def test_custom_journal_recovery_clears_state_and_default_stores_can_write(
+    tmp_path,
+    recovery_method,
+):
+    transaction, thesis_path, ledger_path, target_path = _transaction(
+        tmp_path,
+        transaction_journal_path=tmp_path / "custom-recovery.json",
+    )
+    with transaction.locked():
+        transaction.begin()
+        EvidenceLedgerStore(ledger_path).append_many([{
+            "evidence_id": "ev_custom_partial",
+            "type": "test",
+            "summary": "must be restored",
+        }])
+    with transaction.locked():
+        recovered = getattr(transaction, recovery_method)()
+
+    assert recovered["status"] in {"rolled_back", "recovered"}
+    assert not _transaction_state_path(transaction).exists()
+    writes = _ordinary_store_writes(
+        thesis_path,
+        ledger_path,
+        target_path,
+        f"custom_{recovery_method}",
+    )
+    for write in writes:
+        write()
+
+
+def test_custom_journal_unlinked_before_state_removal_blocks_until_recovery(
+    tmp_path,
+):
+    transaction, thesis_path, ledger_path, target_path = _transaction(
+        tmp_path,
+        transaction_journal_path=tmp_path / "custom-commit-window.json",
+    )
+    with transaction.locked():
+        transaction.begin()
+        EvidenceLedgerStore(ledger_path).append_many([{
+            "evidence_id": "ev_custom_committed",
+            "type": "test",
+            "summary": "must remain after state cleanup",
+        }])
+    transaction.journal_path.unlink()
+    state_path = _transaction_state_path(transaction)
+    state_path.write_text(
+        json.dumps({
+            "version": 1,
+            "batch_id": "batch-custom-commit-window",
+            "status": "committing",
+            "journal_path": str(transaction.journal_path.resolve()),
+        }),
+        encoding="utf-8",
+    )
+    paths = (thesis_path, ledger_path, target_path)
+    before = _store_bytes(paths)
+    writes = _ordinary_store_writes(
+        thesis_path,
+        ledger_path,
+        target_path,
+        "custom_commit_window",
+    )
+
+    _assert_writes_recovery_required(writes, paths, before)
+    with transaction.locked():
+        cleaned = transaction.recover_pending()
+    assert cleaned["status"] == "recovery_state_cleared"
+    assert not state_path.exists()
+    for write in writes:
+        write()
+
+
+def test_legacy_clean_state_ignores_journal_mismatch_and_is_recoverable(
+    tmp_path,
+):
+    transaction, thesis_path, ledger_path, target_path = _transaction(
+        tmp_path,
+        transaction_journal_path=tmp_path / "legacy-custom.json",
+    )
+    state_path = _transaction_state_path(transaction)
+    state_path.write_text(
+        json.dumps({
+            "version": 1,
+            "batch_id": "batch-legacy-clean",
+            "status": "clean",
+            "journal_path": str(transaction.journal_path.resolve()),
+        }),
+        encoding="utf-8",
+    )
+
+    for write in _ordinary_store_writes(
+        thesis_path,
+        ledger_path,
+        target_path,
+        "legacy_clean",
+    ):
+        write()
+    with transaction.locked():
+        cleaned = transaction.recover_pending()
+
+    assert cleaned["status"] == "recovery_state_cleared"
+    assert not state_path.exists()

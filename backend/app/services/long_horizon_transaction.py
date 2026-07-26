@@ -222,6 +222,8 @@ def _read_transaction_state(
         or state.get("status") not in valid_statuses
     ):
         raise RuntimeError("transaction state schema invalid")
+    if state["status"] == "clean":
+        return state
     raw_journal_path = Path(str(state.get("journal_path") or ""))
     if (
         not raw_journal_path.is_absolute()
@@ -393,18 +395,14 @@ class LongHorizonBatchTransaction:
             )
             if (
                 state_status in {"preparing", "committing", "recovered"}
-                or (state_status in {"", "clean"} and has_temps)
+                or state_status == "clean"
+                or (not state_status and has_temps)
             ):
                 _cleanup_transaction_temps(
                     self.state_path,
                     self.journal_path,
                 )
-                _write_transaction_state(
-                    self.state_path,
-                    self.journal_path,
-                    status="clean",
-                    batch_id=state_batch_id,
-                )
+                _durable_unlink(self.state_path)
                 return {
                     "status": "recovery_state_cleared",
                     "batch_id": state_batch_id,
@@ -504,12 +502,7 @@ class LongHorizonBatchTransaction:
             self.state_path,
             self.journal_path,
         )
-        _write_transaction_state(
-            self.state_path,
-            self.journal_path,
-            status="clean",
-            batch_id=batch_id,
-        )
+        _durable_unlink(self.state_path)
         return {
             "status": "recovered",
             "batch_id": batch_id,
@@ -543,9 +536,4 @@ class LongHorizonBatchTransaction:
             self.state_path,
             self.journal_path,
         )
-        _write_transaction_state(
-            self.state_path,
-            self.journal_path,
-            status="clean",
-            batch_id=batch_id,
-        )
+        _durable_unlink(self.state_path)
