@@ -74,6 +74,48 @@ private final class FakeWatchlistUiClient: WatchlistUiClient {
 
 do {
     expect(
+        AXClient.childTraversalAttributes(forRole: "AXTable")
+            == ["AXVisibleRows", "AXRows", "AXChildren"],
+        "AX tables do not expose virtualized rows to the snapshot traversal"
+    )
+    expect(
+        AXClient.childTraversalAttributes(forRole: "AXGroup")
+            == ["AXChildren"],
+        "non-table Accessibility traversal changed unexpectedly"
+    )
+    expect(
+        AXClient.snapshotMaxDepth == 24,
+        "snapshot depth does not reach GF-Trader's nested virtualized rows"
+    )
+    expect(
+        AXClient.snapshotNodeBudget == 7_500,
+        "snapshot node budget is too small for the bounded GF-Trader table"
+    )
+    expect(
+        AXClient.rowChildLimit == 16,
+        "Accessibility rows are not bounded before sensitive trailing columns"
+    )
+    expect(
+        AXClient.accountAssetNavigationStages
+            == [["我的"], ["资产全景"]],
+        "account asset navigation left the safe read-only route"
+    )
+    expect(
+        AXClient.accountHoldingsNavigationStages
+            == [["自选股", "自选"], ["我的持仓"]],
+        "account holdings navigation left the watchlist route"
+    )
+    expect(
+        AXClient.safeLoginIndicators == ["锁定账号"],
+        "login detection no longer uses the safe account-lock indicator"
+    )
+    expect(
+        AXClient.safeHoldingsLoginLabels
+            == ["普通持仓", "可用数量", "成本价"],
+        "holdings login fallback no longer requires the full safe field set"
+    )
+
+    expect(
         Set(BridgeCommand.allCases.map(\.rawValue)) == [
             "probe",
             "read_account",
@@ -457,6 +499,108 @@ do {
         "raw account identity leaked into fingerprint"
     )
 
+    let liveLayoutRoot = AXSnapshotNode(
+        summary: AXNodeSummary(
+            role: "AXGroup",
+            title: "易淘金账户",
+            label: nil,
+            value: nil
+        ),
+        children: [
+            .labeled(
+                "资产概览",
+                value: "总资产（元） 6,051.25 资产分布 股票 4,668.00 元 现金 1,383.25 元"
+            ),
+            .labeled("脱敏账号", value: "*******5159 普通"),
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXRow",
+                    title: nil,
+                    label: nil,
+                    value: nil
+                ),
+                children: [
+                    .labeled("表头", value: "序号"),
+                    .labeled("表头", value: "名称"),
+                ]
+            ),
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXRow",
+                    title: nil,
+                    label: nil,
+                    value: nil
+                ),
+                children: [
+                    .labeled("表头", value: "代码"),
+                    .labeled("表头", value: "可用数量"),
+                    .labeled("表头", value: "当前数量"),
+                    .labeled("表头", value: "成本价"),
+                ]
+            ),
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXRow",
+                    title: nil,
+                    label: nil,
+                    value: nil
+                ),
+                children: [
+                    .labeled("名称", value: "长江电力"),
+                ]
+            ),
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXRow",
+                    title: nil,
+                    label: nil,
+                    value: nil
+                ),
+                children: [
+                    .labeled("代码", value: "600900"),
+                    .labeled("可用数量", value: "100"),
+                    .labeled("当前数量", value: "100"),
+                    .labeled("成本价", value: "27.2500"),
+                    .labeled("浮动盈亏", value: "165.00"),
+                    .labeled("盈亏比", value: "6.06%"),
+                    .labeled("个股仓位", value: "47.76%"),
+                    .labeled("持仓市值", value: "2,890.00"),
+                    .labeled("地区", value: "北京市"),
+                    .labeled("涨幅", value: "-0.14%"),
+                    .labeled("报价", value: "28.90"),
+                    .labeled("现价", value: "--"),
+                ]
+            ),
+        ]
+    )
+    let liveLayoutAccount = try YitaojinReader.parseAccount(
+        from: liveLayoutRoot,
+        fingerprintSalt: Data(repeating: 8, count: 32),
+        capturedAt: "2026-07-27T08:30:05+08:00"
+    )
+    expect(
+        liveLayoutAccount.totalAssets == "6051.25",
+        "live-layout total assets were not normalized"
+    )
+    expect(
+        liveLayoutAccount.availableCash == "1383.25",
+        "live-layout cash was not normalized"
+    )
+    expect(
+        liveLayoutAccount.positions.first?.name == "长江电力",
+        "live-layout position name was not paired by row order"
+    )
+    expect(
+        liveLayoutAccount.positions.first?.shares == 100
+            && liveLayoutAccount.positions.first?.availableShares == 100,
+        "live-layout position quantities were not parsed"
+    )
+    expect(
+        liveLayoutAccount.positions.first?.currentPrice == "28.90",
+        "live-layout current price was not parsed: "
+            + (liveLayoutAccount.positions.first?.currentPrice ?? "nil")
+    )
+
     let watchlistRoot = AXSnapshotNode(
         summary: AXNodeSummary(
             role: "AXGroup",
@@ -484,6 +628,35 @@ do {
     expect(
         watchlist.codes == ["300207", "300456"],
         "watchlist parser extracted a six-digit numeric substring"
+    )
+
+    let virtualizedWatchlistRoot = AXSnapshotNode(
+        summary: AXNodeSummary(
+            role: "AXTable",
+            title: "自选股",
+            label: nil,
+            value: nil
+        ),
+        children: [
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXRow",
+                    title: nil,
+                    label: nil,
+                    value: nil
+                ),
+                children: [
+                    .labeled("代码", value: "000100"),
+                    .labeled("代码副本", value: "000100"),
+                    .labeled("成交量", value: "139976"),
+                ]
+            ),
+        ]
+    )
+    expect(
+        YitaojinReader.parseWatchlist(from: virtualizedWatchlistRoot).codes
+            == ["000100"],
+        "watchlist parser confused a six-digit quote value with the row code"
     )
 } catch {
     failures.append("unexpected self-test error: \(error)")
