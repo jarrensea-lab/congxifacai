@@ -21,6 +21,14 @@
         <string>growth_sprint</string>
         <key>CONGXI_STATE_DIR</key>
         <string>/Users/zhuchenyuan/Library/Application Support/congxicai-v7</string>
+        <key>CONGXI_YITAOJIN_ENABLED</key>
+        <string>true</string>
+        <key>CONGXI_YITAOJIN_WRITE_ENABLED</key>
+        <string>false</string>
+        <key>CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED</key>
+        <string>true</string>
+        <key>CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED</key>
+        <string>false</string>
     </dict>
 
     <key>WorkingDirectory</key>

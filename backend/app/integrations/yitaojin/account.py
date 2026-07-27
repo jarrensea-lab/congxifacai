@@ -107,12 +107,20 @@ class YitaojinAccountService:
             )
         try:
             salt = self._load_or_create_salt(bootstrap=bootstrap)
-            payload = self.bridge.run(
-                BridgeCommand.READ_ACCOUNT,
-                {
-                    "fingerprintSalt": base64.b64encode(salt).decode("ascii"),
-                },
-            )
+            bridge_payload = {
+                "fingerprintSalt": base64.b64encode(salt).decode("ascii"),
+            }
+            for attempt in range(2):
+                try:
+                    payload = self.bridge.run(
+                        BridgeCommand.READ_ACCOUNT,
+                        bridge_payload,
+                        timeout=45.0,
+                    )
+                    break
+                except BridgeUnavailableError:
+                    if attempt == 1:
+                        raise
             snapshot = AccountSnapshot.from_bridge_payload(payload)
         except (YitaojinError, SnapshotValidationError) as exc:
             return self._result(
