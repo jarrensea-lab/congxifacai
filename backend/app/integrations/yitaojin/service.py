@@ -115,7 +115,10 @@ class YitaojinSyncService:
                 mode=mode,
                 input_payload={},
             )
-        if apply and not self._enabled("CONGXI_YITAOJIN_WRITE_ENABLED"):
+        if apply and not (
+            self._enabled("CONGXI_YITAOJIN_WRITE_ENABLED")
+            or self._enabled("CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED")
+        ):
             return self._result(
                 status="blocked",
                 reasons=("write_disabled",),

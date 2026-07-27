@@ -21,7 +21,7 @@ final class YitaojinReader {
     }
 
     func readWatchlist() throws -> WatchlistData {
-        let root = try client.snapshotForPage(labels: ["自选股", "自选"])
+        let root = try client.snapshotForWatchlist()
         return Self.parseWatchlist(from: root)
     }
 
@@ -29,7 +29,7 @@ final class YitaojinReader {
         codes: [String],
         capturedAt: String
     ) throws -> QuotesData {
-        let root = try client.snapshotForPage(labels: ["自选股", "自选", "我的持仓"])
+        let root = try client.snapshotForWatchlist()
         var quotes: [QuoteData] = []
         var found = Set<String>()
         for row in root.flattened where row.summary.role == "AXRow" {

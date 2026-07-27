@@ -591,7 +591,7 @@ def test_runtime_paths_and_launchd_keep_integration_disabled_by_default(
     assert "/Applications/GF-Trader.app" in launchd
 
 
-def test_user_launchd_enables_only_close_account_write():
+def test_user_launchd_enables_account_and_watchlist_specific_writes():
     import plistlib
 
     launchd_plist = plistlib.loads(Path(
@@ -601,5 +601,5 @@ def test_user_launchd_enables_only_close_account_write():
 
     assert environment["CONGXI_YITAOJIN_ENABLED"] == "true"
     assert environment["CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED"] == "true"
-    assert environment["CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED"] == "false"
+    assert environment["CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED"] == "true"
     assert environment["CONGXI_YITAOJIN_WRITE_ENABLED"] == "false"

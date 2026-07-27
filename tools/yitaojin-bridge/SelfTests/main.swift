@@ -106,6 +106,25 @@ do {
         "account holdings navigation left the watchlist route"
     )
     expect(
+        AXClient.watchlistNavigationStages
+            == [["自选"], ["自选股"]],
+        "watchlist navigation no longer selects the real self-selected subgroup"
+    )
+    expect(
+        AXClient.navigationTextMatches(
+            "自选股(8)",
+            labels: ["自选股"]
+        ),
+        "watchlist navigation does not accept the dynamic self-selected count"
+    )
+    expect(
+        !AXClient.navigationTextMatches(
+            "我的持仓",
+            labels: ["自选股"]
+        ),
+        "watchlist navigation can still mistake holdings for the self-selected list"
+    )
+    expect(
         AXClient.safeLoginIndicators == ["锁定账号"],
         "login detection no longer uses the safe account-lock indicator"
     )

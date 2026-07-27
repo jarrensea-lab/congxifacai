@@ -20,6 +20,10 @@ final class AXClient {
         ["自选股", "自选"],
         ["我的持仓"],
     ]
+    static let watchlistNavigationStages = [
+        ["自选"],
+        ["自选股"],
+    ]
     static let safeLoginIndicators = ["锁定账号"]
     static let safeHoldingsLoginLabels = [
         "普通持仓",
@@ -36,6 +40,22 @@ final class AXClient {
             ]
         }
         return [kAXChildrenAttribute as String]
+    }
+
+    static func navigationTextMatches(
+        _ value: String,
+        labels: [String]
+    ) -> Bool {
+        if labels.contains(value) {
+            return true
+        }
+        guard labels.contains("自选股") else {
+            return false
+        }
+        return value.range(
+            of: #"^自选股(?:\(\d+\))?$"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private let safetyPolicy = SafetyPolicy()
@@ -150,6 +170,13 @@ final class AXClient {
         )
     }
 
+    func snapshotForWatchlist() throws -> AXSnapshotNode {
+        try snapshotAfterNavigation(
+            stages: Self.watchlistNavigationStages,
+            settleSeconds: 0.5
+        )
+    }
+
     func applicationSnapshot() throws -> AXSnapshotNode {
         try snapshot(
             applicationElement(),
@@ -247,23 +274,35 @@ final class AXClient {
         root: AXUIElement,
         navigation: AXNodeSummary
     ) {
-        let root = try applicationElement()
-        guard let navigation = findNavigationElement(
-            in: root,
-            labels: ["自选股", "自选"],
-            maxDepth: 10,
-            maxNodes: 1_500
-        ) else {
+        var navigationSummary: AXNodeSummary?
+        for labels in Self.watchlistNavigationStages {
+            let root = try applicationElement()
+            guard let action = safeNavigationAction(
+                in: root,
+                labels: labels,
+                maxDepth: 14,
+                maxNodes: 2_500
+            ) else {
+                throw BridgeFailure(
+                    "watchlist_page_unavailable",
+                    "The self-selected list navigation target is unavailable"
+                )
+            }
+            try safetyPolicy.assertReadable(path: [action.label])
+            try press(action.target)
+            Thread.sleep(forTimeInterval: 0.5)
+            navigationSummary = action.label
+        }
+        guard let navigationSummary else {
             throw BridgeFailure(
                 "watchlist_page_unavailable",
                 "The self-selected list navigation target is unavailable"
             )
         }
-        let navigationSummary = summary(of: navigation)
-        try safetyPolicy.assertReadable(path: [navigationSummary])
-        try press(navigation)
-        Thread.sleep(forTimeInterval: 0.35)
-        return (root: root, navigation: navigationSummary)
+        return (
+            root: try applicationElement(),
+            navigation: navigationSummary
+        )
     }
 
     private func findSearchField(in root: AXUIElement) -> AXUIElement? {
@@ -462,7 +501,9 @@ final class AXClient {
         ) { node in
             [node.title, node.label, node.value]
                 .compactMap { $0 }
-                .contains(where: labels.contains)
+                .contains {
+                    Self.navigationTextMatches($0, labels: labels)
+                }
         }
         for match in matches {
             let label = summary(of: match)
@@ -678,7 +719,7 @@ final class AXClient {
 
 extension AXClient: WatchlistUiClient {
     func readWatchlistCodes() throws -> Set<String> {
-        let snapshot = try snapshotForPage(labels: ["自选股", "自选"])
+        let snapshot = try snapshotForWatchlist()
         return Set(YitaojinReader.parseWatchlist(from: snapshot).codes)
     }
 

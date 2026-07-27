@@ -28,7 +28,7 @@
         <key>CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED</key>
         <string>true</string>
         <key>CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED</key>
-        <string>false</string>
+        <string>true</string>
     </dict>
 
     <key>WorkingDirectory</key>
