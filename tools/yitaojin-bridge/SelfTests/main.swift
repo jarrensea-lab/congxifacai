@@ -114,6 +114,15 @@ do {
             == ["普通持仓", "可用数量", "成本价"],
         "holdings login fallback no longer requires the full safe field set"
     )
+    expect(
+        AXClient.accountAssetNavigationAttempts == 2,
+        "account capture no longer retries the read-only asset route once"
+    )
+    expect(
+        AXClient.accountHoldingsNavigationAttempts == 2
+            && AXClient.accountHoldingsPollCount == 5,
+        "account capture no longer waits for the virtualized holdings table"
+    )
 
     expect(
         Set(BridgeCommand.allCases.map(\.rawValue)) == [
@@ -497,6 +506,47 @@ do {
     expect(
         !account.accountFingerprint.contains("masked-stable-id"),
         "raw account identity leaked into fingerprint"
+    )
+
+    let unavailablePriceRoot = AXSnapshotNode(
+        summary: AXNodeSummary(
+            role: "AXGroup",
+            title: "资产",
+            label: nil,
+            value: nil
+        ),
+        children: [
+            .labeled("总资产", value: "2100.00"),
+            .labeled("可用资金", value: "100.00"),
+            .labeled("资金账号", value: "masked-stable-id"),
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXRow",
+                    title: "持仓",
+                    label: nil,
+                    value: nil
+                ),
+                children: [
+                    .labeled("证券代码", value: "000001"),
+                    .labeled("证券名称", value: "测试股份"),
+                    .labeled("持仓数量", value: "100"),
+                    .labeled("可用数量", value: "100"),
+                    .labeled("成本价", value: "19.00"),
+                    .labeled("现价", value: "--"),
+                    .labeled("市值", value: "2000.00"),
+                    .labeled("浮动盈亏", value: "100.00"),
+                ]
+            ),
+        ]
+    )
+    let unavailablePriceAccount = try YitaojinReader.parseAccount(
+        from: unavailablePriceRoot,
+        fingerprintSalt: Data(repeating: 7, count: 32),
+        capturedAt: "2026-07-26T15:10:05+08:00"
+    )
+    expect(
+        unavailablePriceAccount.positions.first?.currentPrice == "20",
+        "unavailable UI price was not reconciled from market value and shares"
     )
 
     let liveLayoutRoot = AXSnapshotNode(

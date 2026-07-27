@@ -25,7 +25,13 @@ from app.integrations.yitaojin.models import (
 PROJECT_TIMEZONE = ZoneInfo("Asia/Shanghai")
 EXPECTED_APP_PATH = "/Applications/GF-Trader.app"
 SUPPORTED_TASKS = frozenset(
-    {"morning", "evening", "priority_quotes", "intraday_quotes"}
+    {
+        "morning",
+        "close_account",
+        "evening",
+        "priority_quotes",
+        "intraday_quotes",
+    }
 )
 
 
@@ -50,6 +56,15 @@ class RuntimeServices:
 
 def _enabled(environment: Mapping[str, str], name: str) -> bool:
     return str(environment.get(name) or "").strip().lower() == "true"
+
+
+def _specific_write_enabled(
+    environment: Mapping[str, str],
+    name: str,
+) -> bool:
+    if name in environment:
+        return _enabled(environment, name)
+    return _enabled(environment, "CONGXI_YITAOJIN_WRITE_ENABLED")
 
 
 def _positive_number(
@@ -400,10 +415,15 @@ async def run_yitaojin_task(
         environment=effective_environment,
     )
     enabled = _enabled(effective_environment, "CONGXI_YITAOJIN_ENABLED")
-    write_enabled = _enabled(
+    account_write_enabled = _specific_write_enabled(
         effective_environment,
-        "CONGXI_YITAOJIN_WRITE_ENABLED",
+        "CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED",
     )
+    watchlist_write_enabled = _specific_write_enabled(
+        effective_environment,
+        "CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED",
+    )
+    write_enabled = account_write_enabled or watchlist_write_enabled
     if not enabled:
         disabled = {
             **previous,
@@ -461,10 +481,10 @@ async def run_yitaojin_task(
         )
         steps["probe"] = "ready"
 
-        if task in {"morning", "evening"}:
+        if task == "close_account":
             account_result = await _offload(
                 services.account.sync_account,
-                apply=write_enabled,
+                apply=account_write_enabled,
                 bootstrap=False,
                 timeout=timeout,
             )
@@ -473,9 +493,10 @@ async def run_yitaojin_task(
                 account_result,
                 {"validated", "applied"},
             )
+        if task in {"morning", "evening"}:
             watchlist_result = await _offload(
                 services.watchlist.sync_watchlist,
-                apply=write_enabled,
+                apply=watchlist_write_enabled,
                 bootstrap=False,
                 timeout=timeout,
             )

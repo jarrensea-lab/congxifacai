@@ -9,6 +9,9 @@ final class AXClient {
     static let snapshotMaxDepth = 24
     static let snapshotNodeBudget = 7_500
     static let rowChildLimit = 16
+    static let accountAssetNavigationAttempts = 2
+    static let accountHoldingsNavigationAttempts = 2
+    static let accountHoldingsPollCount = 5
     static let accountAssetNavigationStages = [
         ["我的"],
         ["资产全景"],
@@ -157,40 +160,66 @@ final class AXClient {
     }
 
     func snapshotForAccount() throws -> AXSnapshotNode {
-        var assets = try snapshotAfterNavigation(
-            stages: Self.accountAssetNavigationStages,
-            settleSeconds: 1.5
-        )
-        for _ in 0 ..< 3 where !assets.combinedText.contains("总资产")
-            && !assets.combinedText.contains("页面加载失败")
-        {
-            Thread.sleep(forTimeInterval: 1.0)
-            assets = try applicationSnapshot()
-        }
-        if assets.combinedText.contains("页面加载失败") {
-            let root = try applicationElement()
-            if let reload = safeNavigationAction(
-                in: root,
-                labels: ["重新加载"],
-                maxDepth: Self.snapshotMaxDepth,
-                maxNodes: Self.snapshotNodeBudget
-            ) {
-                try safetyPolicy.assertReadable(path: [reload.label])
-                try press(reload.target)
+        var assets: AXSnapshotNode?
+        for attempt in 0 ..< Self.accountAssetNavigationAttempts {
+            var candidate = try snapshotAfterNavigation(
+                stages: Self.accountAssetNavigationStages,
+                settleSeconds: attempt == 0 ? 1.5 : 2.5
+            )
+            for _ in 0 ..< 3 where !candidate.combinedText.contains("总资产")
+                && !candidate.combinedText.contains("页面加载失败")
+            {
+                Thread.sleep(forTimeInterval: 1.0)
+                candidate = try applicationSnapshot()
             }
-            Thread.sleep(forTimeInterval: 2.5)
-            assets = try applicationSnapshot()
+            if candidate.combinedText.contains("页面加载失败") {
+                let root = try applicationElement()
+                if let reload = safeNavigationAction(
+                    in: root,
+                    labels: ["重新加载"],
+                    maxDepth: Self.snapshotMaxDepth,
+                    maxNodes: Self.snapshotNodeBudget
+                ) {
+                    try safetyPolicy.assertReadable(path: [reload.label])
+                    try press(reload.target)
+                }
+                Thread.sleep(forTimeInterval: 2.5)
+                candidate = try applicationSnapshot()
+            }
+            assets = candidate
+            if candidate.combinedText.contains("总资产") {
+                break
+            }
         }
-        guard assets.combinedText.contains("总资产") else {
+        guard let assets, assets.combinedText.contains("总资产") else {
             throw BridgeFailure(
                 "account_page_incomplete",
                 "The read-only account overview did not expose required totals"
             )
         }
-        let holdings = try snapshotAfterNavigation(
-            stages: Self.accountHoldingsNavigationStages,
-            settleSeconds: 0.8
-        )
+        var holdings: AXSnapshotNode?
+        for attempt in 0 ..< Self.accountHoldingsNavigationAttempts {
+            var candidate = try snapshotAfterNavigation(
+                stages: Self.accountHoldingsNavigationStages,
+                settleSeconds: attempt == 0 ? 0.8 : 1.5
+            )
+            for _ in 0 ..< Self.accountHoldingsPollCount
+                where !Self.holdingsSnapshotReady(candidate)
+            {
+                Thread.sleep(forTimeInterval: 1.0)
+                candidate = try applicationSnapshot()
+            }
+            holdings = candidate
+            if Self.holdingsSnapshotReady(candidate) {
+                break
+            }
+        }
+        guard let holdings else {
+            throw BridgeFailure(
+                "account_holdings_incomplete",
+                "The read-only holdings page did not expose a snapshot"
+            )
+        }
         return AXSnapshotNode(
             summary: AXNodeSummary(
                 role: "AXGroup",
@@ -200,6 +229,18 @@ final class AXClient {
             ),
             children: [assets, holdings]
         )
+    }
+
+    private static func holdingsSnapshotReady(
+        _ snapshot: AXSnapshotNode
+    ) -> Bool {
+        let text = snapshot.combinedText
+        let populated = Self.safeHoldingsLoginLabels.allSatisfy(
+            text.contains
+        ) && !YitaojinReader.stockCodes(in: text).isEmpty
+        return populated
+            || text.contains("暂无持仓")
+            || text.contains("持仓数量 0")
     }
 
     private func navigateToWatchlist() throws -> (

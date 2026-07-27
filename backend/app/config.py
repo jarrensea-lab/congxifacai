@@ -151,6 +151,8 @@ class Settings(BaseSettings):
     # 广发易淘金：默认完全关闭，UI 写入还需第二个开关
     CONGXI_YITAOJIN_ENABLED: bool = False
     CONGXI_YITAOJIN_WRITE_ENABLED: bool = False
+    CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED: bool = False
+    CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED: bool = False
     CONGXI_YITAOJIN_APP_PATH: str = "/Applications/GF-Trader.app"
     CONGXI_YITAOJIN_TASK_TIMEOUT_SECONDS: int = 120
     CONGXI_YITAOJIN_APP_START_TIMEOUT_SECONDS: int = 30

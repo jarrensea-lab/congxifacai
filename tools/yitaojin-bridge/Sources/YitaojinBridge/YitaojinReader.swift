@@ -158,6 +158,9 @@ final class YitaojinReader {
             let currentPrice = numericValue(
                 labeledCurrentPrice,
                 fallback: positionValues[safe: 10]
+            ) ?? reconciledUnitPrice(
+                marketValue: marketValue,
+                shares: sharesText
             )
             guard
                 let name,
@@ -306,6 +309,26 @@ final class YitaojinReader {
             of: #"^-?\d+(?:\.\d+)?$"#,
             options: .regularExpression
         ) != nil
+    }
+
+    private static func reconciledUnitPrice(
+        marketValue: String?,
+        shares: String?
+    ) -> String? {
+        guard
+            let marketValue,
+            let shares,
+            let normalizedMarketValue = Decimal(
+                string: normalizedNumber(marketValue)
+            ),
+            let normalizedShares = Decimal(string: normalizedNumber(shares)),
+            normalizedShares > 0
+        else {
+            return nil
+        }
+        return NSDecimalNumber(
+            decimal: normalizedMarketValue / normalizedShares
+        ).stringValue
     }
 
     private static func exactCode(_ value: String) -> Bool {

@@ -1098,6 +1098,10 @@ async def _run_yitaojin_evening_with_status():
     return await _run_yitaojin_task_with_status("evening")
 
 
+async def _run_yitaojin_close_account_with_status():
+    return await _run_yitaojin_task_with_status("close_account")
+
+
 async def _run_yitaojin_quotes_with_status(task: str = "priority_quotes"):
     return await _run_yitaojin_task_with_status(task)
 
@@ -1149,6 +1153,19 @@ def register_yitaojin_jobs(target_scheduler) -> None:
         **job_options,
     )
     target_scheduler.add_job(
+        _run_yitaojin_close_account_with_status,
+        CronTrigger(
+            hour=15,
+            minute=10,
+            day_of_week="mon-fri",
+            timezone="Asia/Shanghai",
+        ),
+        id="yitaojin_close_account",
+        name="易淘金收盘账户快照",
+        misfire_grace_time=900,
+        **job_options,
+    )
+    target_scheduler.add_job(
         _run_yitaojin_evening_with_status,
         CronTrigger(
             hour=20,
@@ -1157,7 +1174,7 @@ def register_yitaojin_jobs(target_scheduler) -> None:
             timezone="Asia/Shanghai",
         ),
         id="yitaojin_evening",
-        name="易淘金晚间账户与自选同步",
+        name="易淘金晚间自选同步",
         misfire_grace_time=900,
         **job_options,
     )
