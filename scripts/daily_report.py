@@ -34,11 +34,63 @@ from app.services.strategy_profile import (
     get_strategy_profile,
 )
 from app.services.visible_decision_gate import (
+    ENTRY_ACTIONS,
     apply_visible_decision_gate,
     build_visible_decision_gate,
     format_visible_decision_reasons,
     write_visible_decision_gate,
 )
+
+
+def _load_yitaojin_quote_validation_for_decision(
+    decision: dict,
+    *,
+    now: datetime | None = None,
+) -> dict:
+    """Load the runtime quote snapshot and apply the 30-second action limit."""
+    critical_codes: set[str] = set()
+    for field in ("target_scores", "outside_pool_scan"):
+        rows = decision.get(field)
+        if not isinstance(rows, list):
+            continue
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            action = str(row.get("action") or row.get("status") or "").strip().lower()
+            is_entry = action in ENTRY_ACTIONS or row.get("actionable") is True
+            if field == "outside_pool_scan" and not action:
+                is_entry = bool(
+                    row.get("suggested_amount")
+                    or row.get("position_amount")
+                    or row.get("lot_value")
+                )
+            code = str(row.get("code") or row.get("stock_code") or "").strip()
+            if is_entry and len(code) == 6 and code.isdigit():
+                critical_codes.add(code)
+    try:
+        from app.config import resolve_runtime_yitaojin_paths
+        from app.integrations.yitaojin.quotes import (
+            load_quote_validation_summary,
+        )
+
+        return load_quote_validation_summary(
+            resolve_runtime_yitaojin_paths().quote_snapshot,
+            now=now,
+            critical_codes=critical_codes,
+        )
+    except Exception:
+        enabled = (
+            os.getenv("CONGXI_YITAOJIN_ENABLED", "").strip().lower()
+            == "true"
+        )
+        return {
+            "enabled": enabled,
+            "status": "unavailable" if enabled else "not_enabled",
+            "as_of": None,
+            "requested_codes": [],
+            "validations": {},
+            "reasons": ["quote_snapshot_unavailable"],
+        }
 
 
 def _read_iso_date_env(name: str):
@@ -1149,6 +1201,34 @@ def _project_status_section(
             f"- 统一入场闸门：{gate_state}；原因：{gate_reasons}；"
             "闸门只限制买入/加仓，卖出、止损和入场取消继续执行。"
         )
+        quote_validation = visible_decision_gate.get("quote_validation")
+        if isinstance(quote_validation, dict):
+            quote_status = str(
+                quote_validation.get("status") or "unavailable"
+            ).strip().lower()
+            quote_as_of = quote_validation.get("as_of") or "无有效时间"
+            if quote_validation.get("enabled") is not True:
+                lines.append(
+                    "- 易淘金行情校验：未启用（quote_status=not_enabled）；"
+                    "当前报告沿用原有行情链路，未声称已完成易淘金核价。"
+                )
+            elif quote_status == "ok":
+                lines.append(
+                    "- 易淘金行情校验：当前有限范围快照有效"
+                    f"（quote_status=ok；截至 {quote_as_of}）。"
+                )
+            elif quote_status == "blocked":
+                lines.append(
+                    "- 易淘金行情校验：存在过期、冲突、缺失或交易状态阻断"
+                    f"（quote_status=blocked；截至 {quote_as_of}）；"
+                    "新开仓关闭，持仓风险动作保留并需人工核价。"
+                )
+            else:
+                lines.append(
+                    "- 易淘金行情校验：读取不可用"
+                    f"（quote_status=unavailable；截至 {quote_as_of}）；"
+                    "新开仓关闭，持仓风险动作保留并需人工核价。"
+                )
     if quote_data_alarms:
         alarm_text = "；".join(
             f"{item['label']} {item['alarm']}，必须人工核验止损 {_money(item['stop_loss'])}"
@@ -2512,12 +2592,16 @@ async def main():
     stop_breaches = _holding_stop_breaches(positions, decision, target_date)
     gate_decision = dict(decision)
     gate_decision.setdefault("final_view", final_view)
+    quote_validation = _load_yitaojin_quote_validation_for_decision(
+        decision
+    )
     visible_gate = build_visible_decision_gate(
         report_date=today,
         target_date=target_date,
         decision=gate_decision,
         portfolio_truth=portfolio,
         stop_breaches=stop_breaches,
+        quote_validation=quote_validation,
     )
 
     # ===== 4. 构建综合Markdown报告 =====

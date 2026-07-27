@@ -45,6 +45,69 @@ def test_runtime_database_state_directory_override_sets_both_paths(monkeypatch, 
     assert Path(paths.scheduler) == state_dir / "scheduler_jobs.db"
 
 
+def test_runtime_yitaojin_defaults_use_local_state_directory(monkeypatch, tmp_path):
+    """Catches broker state leaking into the repository checkout."""
+    from app.config import resolve_runtime_yitaojin_paths
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("CONGXI_STATE_DIR", raising=False)
+    for name in (
+        "CONGXI_YITAOJIN_BRIDGE_PATH",
+        "CONGXI_YITAOJIN_ACCOUNT_SNAPSHOT_PATH",
+        "CONGXI_YITAOJIN_ACCOUNT_FINGERPRINT_SALT_PATH",
+        "CONGXI_YITAOJIN_ACCOUNT_AUDIT_PATH",
+        "CONGXI_YITAOJIN_WATCHLIST_STATE_PATH",
+        "CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH",
+        "CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH",
+        "CONGXI_YITAOJIN_RUNTIME_STATUS_PATH",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+    paths = resolve_runtime_yitaojin_paths()
+    root = tmp_path / "Library" / "Application Support" / "congxicai-v7"
+
+    assert paths.bridge == root / "bin" / "yitaojin-bridge"
+    assert paths.account_snapshot == root / "yitaojin" / "account_snapshot.json"
+    assert paths.account_fingerprint_salt == root / "yitaojin" / "account_fingerprint_salt"
+    assert paths.account_audit == root / "yitaojin" / "account_sync_audit.jsonl"
+    assert paths.watchlist_state == root / "yitaojin" / "watchlist_state.json"
+    assert paths.watchlist_audit == root / "yitaojin" / "watchlist_sync_audit.jsonl"
+    assert paths.quote_snapshot == root / "yitaojin" / "quote_snapshot.json"
+    assert paths.runtime_status == root / "yitaojin" / "runtime_status.json"
+    assert not root.exists()
+
+
+def test_runtime_yitaojin_individual_path_overrides_are_respected(monkeypatch, tmp_path):
+    """Catches one broker artifact ignoring an isolated test path."""
+    from app.config import resolve_runtime_yitaojin_paths
+
+    overrides = {
+        "CONGXI_YITAOJIN_BRIDGE_PATH": tmp_path / "bridge",
+        "CONGXI_YITAOJIN_ACCOUNT_SNAPSHOT_PATH": tmp_path / "account.json",
+        "CONGXI_YITAOJIN_ACCOUNT_FINGERPRINT_SALT_PATH": tmp_path / "salt",
+        "CONGXI_YITAOJIN_ACCOUNT_AUDIT_PATH": tmp_path / "account.jsonl",
+        "CONGXI_YITAOJIN_WATCHLIST_STATE_PATH": tmp_path / "watchlist.json",
+        "CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH": tmp_path / "watchlist.jsonl",
+        "CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH": tmp_path / "quotes.json",
+        "CONGXI_YITAOJIN_RUNTIME_STATUS_PATH": tmp_path / "runtime-status.json",
+    }
+    for name, path in overrides.items():
+        monkeypatch.setenv(name, str(path))
+
+    paths = resolve_runtime_yitaojin_paths()
+
+    assert paths.bridge == overrides["CONGXI_YITAOJIN_BRIDGE_PATH"]
+    assert paths.account_snapshot == overrides["CONGXI_YITAOJIN_ACCOUNT_SNAPSHOT_PATH"]
+    assert paths.account_fingerprint_salt == overrides[
+        "CONGXI_YITAOJIN_ACCOUNT_FINGERPRINT_SALT_PATH"
+    ]
+    assert paths.account_audit == overrides["CONGXI_YITAOJIN_ACCOUNT_AUDIT_PATH"]
+    assert paths.watchlist_state == overrides["CONGXI_YITAOJIN_WATCHLIST_STATE_PATH"]
+    assert paths.watchlist_audit == overrides["CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH"]
+    assert paths.quote_snapshot == overrides["CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH"]
+    assert paths.runtime_status == overrides["CONGXI_YITAOJIN_RUNTIME_STATUS_PATH"]
+
+
 def test_business_engine_and_scheduler_use_distinct_resolved_paths():
     database_source = Path("backend/app/database.py").read_text(encoding="utf-8")
     main_source = Path("backend/app/main.py").read_text(encoding="utf-8")

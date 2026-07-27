@@ -1,6 +1,7 @@
 """辩论质量追踪 — 记录五角色快照 + 回填实际收益 + 绩效摘要"""
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional
+
 from app.database import SessionLocal
 from app.models import DebateResult
 from app.utils.logger import logger
@@ -83,7 +84,7 @@ class DebateTracker:
             db.close()
 
     @staticmethod
-    def fill_pending(db) -> int:
+    async def fill_pending(db) -> int:
         """回填已到期的辩论实际收益
 
         在收盘复盘任务中调用。5天后回填短线收益，20天后回填中线收益。
@@ -94,6 +95,7 @@ class DebateTracker:
 
         now = datetime.now()
         filled = 0
+        changed = False
 
         for record in pending:
             if not record.debated_at:
@@ -102,26 +104,30 @@ class DebateTracker:
 
             # 5日短线回填
             if record.short_term_codes and record.short_term_return_5d is None and days_elapsed >= 5:
-                ret = DebateTracker._fetch_avg_return(record.short_term_codes)
-                record.short_term_return_5d = ret
-                # 方向正确性: 推荐买入且收益>0, 或推荐卖出且收益<0
-                jd = (record.judge_decision or "").lower()
-                is_buy = "买" in jd or "buy" in jd
-                is_sell = "卖" in jd or "sell" in jd
-                is_hold = "持有" in jd or "hold" in jd
-                if is_buy and ret > 0:
-                    record.judge_direction_correct = True
-                elif is_sell and ret < 0:
-                    record.judge_direction_correct = True
-                elif is_hold:
-                    record.judge_direction_correct = True  # 持有不判断
-                else:
-                    record.judge_direction_correct = False
+                ret = await DebateTracker._fetch_avg_return(record.short_term_codes)
+                if ret is not None:
+                    record.short_term_return_5d = ret
+                    changed = True
+                    # 方向正确性: 推荐买入且收益>0, 或推荐卖出且收益<0
+                    jd = (record.judge_decision or "").lower()
+                    is_buy = "买" in jd or "buy" in jd
+                    is_sell = "卖" in jd or "sell" in jd
+                    is_hold = "持有" in jd or "hold" in jd
+                    if is_buy and ret > 0:
+                        record.judge_direction_correct = True
+                    elif is_sell and ret < 0:
+                        record.judge_direction_correct = True
+                    elif is_hold:
+                        record.judge_direction_correct = True  # 持有不判断
+                    else:
+                        record.judge_direction_correct = False
 
             # 20日中线回填
             if record.mid_term_codes and record.mid_term_return_20d is None and days_elapsed >= 20:
-                ret = DebateTracker._fetch_avg_return(record.mid_term_codes)
-                record.mid_term_return_20d = ret
+                ret = await DebateTracker._fetch_avg_return(record.mid_term_codes)
+                if ret is not None:
+                    record.mid_term_return_20d = ret
+                    changed = True
 
             # 标记完成
             st_done = record.short_term_return_5d is not None or not record.short_term_codes
@@ -129,36 +135,33 @@ class DebateTracker:
             if st_done and mt_done:
                 record.result_filled_at = now
                 filled += 1
+                changed = True
 
-        if filled:
+        if changed:
             db.commit()
+        if filled:
             logger.info(f"辩论回填: {filled} 条")
         return filled
 
     @staticmethod
-    def _fetch_avg_return(stock_codes: List[str]) -> float:
+    async def _fetch_avg_return(stock_codes: list[str]) -> float | None:
         """获取推荐标的当前平均涨跌幅（腾讯实时行情, 简化为当日涨跌幅）"""
         if not stock_codes:
-            return 0.0
+            return None
         try:
             from app.data_sources.tencent_client import TencentDataSource
-            import asyncio
-            tc = TencentDataSource()
-            loop = asyncio.new_event_loop()
-            try:
-                batch = loop.run_until_complete(tc.fetch_batch(stock_codes))
-            finally:
-                loop.close()
+
+            batch = await TencentDataSource().fetch_batch(stock_codes)
             returns = []
             for code in stock_codes:
                 d = batch.get(code, {})
                 chg = d.get("change_pct")
                 if chg is not None:
                     returns.append(chg)
-            return (sum(returns) / len(returns)) if returns else 0.0
+            return (sum(returns) / len(returns)) if returns else None
         except Exception as e:
             logger.warning(f"获取推荐标的收益失败: {e}")
-            return 0.0
+            return None
 
     @staticmethod
     def get_performance_summary(db, market_condition: str = None) -> str:

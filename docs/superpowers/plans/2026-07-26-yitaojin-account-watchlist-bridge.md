@@ -600,7 +600,7 @@ git commit -m "feat: plan safe yitaojin watchlist changes"
 运行红灯：
 
 ```bash
-swift test --package-path tools/yitaojin-bridge
+./scripts/test-yitaojin-bridge.sh
 ```
 
 ### 4.2 实现只读命令
@@ -644,7 +644,7 @@ struct SafetyPolicy {
 ### 4.4 验证与提交
 
 ```bash
-swift test --package-path tools/yitaojin-bridge
+./scripts/test-yitaojin-bridge.sh
 ./scripts/build-yitaojin-bridge.sh
 printf '%s\n' '{"schemaVersion":1,"command":"probe","payload":{}}' \
   | "$HOME/Library/Application Support/congxicai-v7/bin/yitaojin-bridge"
@@ -822,7 +822,7 @@ case .addWatchlist, .removeWatchlist:
 运行红灯：
 
 ```bash
-swift test --package-path tools/yitaojin-bridge
+./scripts/test-yitaojin-bridge.sh
 ./.venv/bin/python -m pytest \
   backend/tests/test_yitaojin_service.py \
   backend/tests/test_yitaojin_planner.py \
@@ -850,7 +850,7 @@ CLI 只允许显式模式：
 ### 6.4 脱敏集成验证与提交
 
 ```bash
-swift test --package-path tools/yitaojin-bridge
+./scripts/test-yitaojin-bridge.sh
 ./.venv/bin/python -m pytest \
   backend/tests/test_yitaojin_service.py \
   backend/tests/test_yitaojin_planner.py \
@@ -1076,22 +1076,22 @@ git commit -m "feat: schedule disabled-by-default yitaojin sync"
 
 ### 9.1 文档必须包含
 
-- [ ] 系统边界：只读账户、有限行情和受控自选；永不自动交易。
-- [ ] 安装目标固定 `/Applications/GF-Trader.app`。
-- [ ] Swift bridge 构建和手工辅助功能授权步骤。
-- [ ] 环境变量和默认禁用状态。
-- [ ] `probe`、账户 dry-run、自选 dry-run、只新增、受控移除命令。
-- [ ] 状态和审计文件位置。
-- [ ] 未登录、账户不一致、空持仓、界面变化、候选池过期的排障。
-- [ ] 如何完全关闭功能：两个 enable 开关设为 false，不删除审计或登录态。
-- [ ] 明确说明服务重启和真实写验收必须由用户在场确认。
+- [x] 系统边界：只读账户、有限行情和受控自选；永不自动交易。
+- [x] 安装目标固定 `/Applications/GF-Trader.app`。
+- [x] Swift bridge 构建和手工辅助功能授权步骤。
+- [x] 环境变量和默认禁用状态。
+- [x] `probe`、账户 dry-run、自选 dry-run、只新增、受控移除命令。
+- [x] 状态和审计文件位置。
+- [x] 未登录、账户不一致、空持仓、界面变化、候选池过期的排障。
+- [x] 如何完全关闭功能：两个 enable 开关设为 false，不删除审计或登录态。
+- [x] 明确说明服务重启和真实写验收必须由用户在场确认。
 
 ### 9.2 全量自动验证
 
 先跑相关测试：
 
 ```bash
-swift test --package-path tools/yitaojin-bridge
+./scripts/test-yitaojin-bridge.sh
 ./.venv/bin/python -m pytest \
   backend/tests/test_debate_tracker.py \
   backend/tests/test_yitaojin_models.py \
@@ -1117,18 +1117,26 @@ swift test --package-path tools/yitaojin-bridge
 test_root="$(mktemp -d)"
 cp data/user_portfolio.json "$test_root/portfolio.json"
 cp data/candidate_pool.json "$test_root/candidate_pool.json"
-CONGXI_PORTFOLIO_PATH="$test_root/portfolio.json" \
-CONGXI_CANDIDATE_POOL_PATH="$test_root/candidate_pool.json" \
-CONGXI_REPORT_ARCHIVE_DIR="$test_root/reports" \
-CONGXI_STATE_DIR="$test_root/state" \
-CONGXI_YITAOJIN_ENABLED=false \
+cp data/position_watch.json "$test_root/position_watch.json"
+export CONGXI_PORTFOLIO_PATH="$test_root/portfolio.json"
+export CONGXI_CANDIDATE_POOL_PATH="$test_root/candidate_pool.json"
+export CONGXI_POSITION_WATCH_PATH="$test_root/position_watch.json"
+export CONGXI_VISIBLE_DECISION_GATE_PATH="$test_root/visible_decision_gate.json"
+export CONGXI_NOTIFICATION_STATE_PATH="$test_root/notification_state.json"
+export CONGXI_REPORT_ARCHIVE_DIR="$test_root/reports"
+export CONGXI_STATE_DIR="$test_root/state"
+export CONGXI_DATABASE_PATH="$test_root/state/stock_data.db"
+export CONGXI_YITAOJIN_ENABLED=false
+export CONGXI_YITAOJIN_WRITE_ENABLED=false
+export PYTHONPATH="backend:."
+./.venv/bin/python -c 'from app.database import init_db; init_db()'
 ./.venv/bin/python scripts/daily_report.py
 ```
 
-- [ ] 检查报告第一屏仍能回答持仓、买卖、不动和下一信号。
-- [ ] 检查未启用时不会声称易淘金行情已校验。
-- [ ] 记录所有未通过测试及其是否为基线问题。
-- [ ] 用 `rg` 扫描代码和 fixture，确认没有完整账号、手机号、密码、验证码或真实账户标识。
+- [x] 检查报告第一屏仍能回答持仓、买卖、不动和下一信号。
+- [x] 检查未启用时不会声称易淘金行情已校验。
+- [x] 记录所有未通过测试及其是否为基线问题。
+- [x] 用 `rg` 扫描代码和 fixture，确认没有完整账号、手机号、密码、验证码或真实账户标识。
 
 敏感信息扫描：
 
@@ -1141,9 +1149,9 @@ rg -n --hidden \
 
 ### 9.3 代码评审
 
-- [ ] 使用 `superpowers:requesting-code-review`。
-- [ ] 重点评审失败关闭、删除所有权、Swift 安全白名单、事件循环、敏感信息和默认开关。
-- [ ] 修复 P0/P1 问题并重跑对应测试。
+- [x] 使用 `superpowers:requesting-code-review`；按用户选择在当前会话内联执行，不委派子代理。
+- [x] 重点评审失败关闭、删除所有权、Swift 安全白名单、事件循环、敏感信息和默认开关。
+- [x] 修复 P0/P1 问题并重跑对应测试。
 
 ### 9.4 提交文档
 

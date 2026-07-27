@@ -50,7 +50,12 @@ def seed_breakout_contract(store, code, price):
     item["trigger_price"] = price
     item["kline"] = {
         "bars": [
-            {"open": price * 0.95, "close": price * 0.98, "high": price, "low": price * 0.9}
+            {
+                "open": price * 0.95,
+                "close": price * 0.98,
+                "high": price,
+                "low": price * 0.9,
+            }
             for _ in range(20)
         ]
     }
@@ -82,9 +87,13 @@ async def seed_active_breakout_signal(tmp_path):
             }
         }
     )
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     return store, quote_source
 
 
@@ -113,16 +122,18 @@ async def test_blocked_visible_gate_never_creates_pending_or_active_signal(tmp_p
         total_assets=6085.61,
     )
     seed_breakout_contract(store, "002123", 3.2)
-    quote_source = FakeQuoteSource({
-        "002123": {
-            "price": 3.2,
-            "change_pct": 4.2,
-            "vol_ratio": 2.6,
-            "amount_wan": 18000,
-            "quote_timestamp": "2026-07-20T09:45:00+08:00",
-            "freshness": "fresh",
+    quote_source = FakeQuoteSource(
+        {
+            "002123": {
+                "price": 3.2,
+                "change_pct": 4.2,
+                "vol_ratio": 2.6,
+                "amount_wan": 18000,
+                "quote_timestamp": "2026-07-20T09:45:00+08:00",
+                "freshness": "fresh",
+            }
         }
-    })
+    )
 
     first = await evaluate_candidate_pool(
         store,
@@ -147,7 +158,8 @@ async def test_blocked_visible_gate_never_creates_pending_or_active_signal(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_blocked_visible_gate_cancels_pending_before_second_confirmation(tmp_path):
+async def test_stale_yitaojin_validation_blocks_entry_signal(tmp_path):
+    """Catches lifecycle bypassing the structured broker quote validation."""
     store = TargetPoolStore(tmp_path / "candidate_pool.json")
     store.upsert_target(
         code="002123",
@@ -160,16 +172,69 @@ async def test_blocked_visible_gate_cancels_pending_before_second_confirmation(t
         total_assets=6085.61,
     )
     seed_breakout_contract(store, "002123", 3.2)
-    quote_source = FakeQuoteSource({
-        "002123": {
-            "price": 3.2,
-            "change_pct": 4.2,
-            "vol_ratio": 2.6,
-            "amount_wan": 18000,
-            "quote_timestamp": "2026-07-20T09:45:00+08:00",
-            "freshness": "fresh",
+    quote_source = FakeQuoteSource(
+        {
+            "002123": {
+                "price": 3.2,
+                "change_pct": 4.2,
+                "vol_ratio": 2.6,
+                "amount_wan": 18000,
+                "quote_timestamp": "2026-07-20T09:45:00+08:00",
+                "freshness": "fresh",
+            }
         }
-    })
+    )
+
+    result = await evaluate_candidate_pool(
+        store,
+        quote_source,
+        available_cash=6085.61,
+        total_assets=6085.61,
+        quote_validations={
+            "002123": {
+                "code": "002123",
+                "status": "stale",
+                "blocks_new_entry": True,
+                "requires_manual_price_check": True,
+                "reasons": ["quote_stale"],
+            }
+        },
+    )
+
+    assert result["alerts"] == []
+    signal = store.get("002123")["entry_signal"]
+    assert signal["state"] == "quote_validation_blocked"
+    assert signal["reason"] == "yitaojin_quote_stale"
+
+
+@pytest.mark.asyncio
+async def test_blocked_visible_gate_cancels_pending_before_second_confirmation(
+    tmp_path,
+):
+    store = TargetPoolStore(tmp_path / "candidate_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="低价突破",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    seed_breakout_contract(store, "002123", 3.2)
+    quote_source = FakeQuoteSource(
+        {
+            "002123": {
+                "price": 3.2,
+                "change_pct": 4.2,
+                "vol_ratio": 2.6,
+                "amount_wan": 18000,
+                "quote_timestamp": "2026-07-20T09:45:00+08:00",
+                "freshness": "fresh",
+            }
+        }
+    )
 
     await evaluate_candidate_pool(
         store,
@@ -235,8 +300,7 @@ async def test_dip_entry_uses_stable_setup_price_across_small_quote_moves(tmp_pa
     payload = store.load()
     payload["items"]["002123"]["kline"] = {
         "bars": [
-            {"open": 10.0, "close": 10.0, "high": 10.3, "low": 9.8}
-            for _ in range(5)
+            {"open": 10.0, "close": 10.0, "high": 10.3, "low": 9.8} for _ in range(5)
         ]
     }
     store.save(payload)
@@ -272,7 +336,9 @@ async def test_dip_entry_uses_stable_setup_price_across_small_quote_moves(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("second_timestamp", ["2026-07-20T09:44:00+08:00", "not-a-time"])
+@pytest.mark.parametrize(
+    "second_timestamp", ["2026-07-20T09:44:00+08:00", "not-a-time"]
+)
 async def test_entry_confirmation_requires_strictly_increasing_observation_time(
     tmp_path, second_timestamp
 ):
@@ -300,7 +366,9 @@ async def test_entry_confirmation_requires_strictly_increasing_observation_time(
             }
         }
     )
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
 
     quote_source.quotes["002123"]["quote_timestamp"] = second_timestamp
     result = await evaluate_candidate_pool(
@@ -432,7 +500,10 @@ def test_candidate_pool_record_scan_preserves_concurrent_updates(tmp_path):
 @pytest.mark.asyncio
 async def test_candidate_pool_marks_limit_up_candidate_blocked_but_alerts(tmp_path):
     store = CandidatePoolStore(tmp_path / "candidate_pool.json")
-    store.upsert_recommendations([{"code": "000629", "name": "钒钛股份", "reason": "钛白粉题材"}], source="manual")
+    store.upsert_recommendations(
+        [{"code": "000629", "name": "钒钛股份", "reason": "钛白粉题材"}],
+        source="manual",
+    )
 
     result = await evaluate_candidate_pool(
         store,
@@ -459,7 +530,9 @@ async def test_candidate_pool_marks_limit_up_candidate_blocked_but_alerts(tmp_pa
 @pytest.mark.asyncio
 async def test_watching_candidate_cannot_emit_actionable_entry(tmp_path):
     store = CandidatePoolStore(tmp_path / "candidate_pool.json")
-    store.upsert_recommendations([{"code": "002123", "name": "低价突破", "reason": "放量突破"}], source="manual")
+    store.upsert_recommendations(
+        [{"code": "002123", "name": "低价突破", "reason": "放量突破"}], source="manual"
+    )
     seed_breakout_contract(store, "002123", 3.2)
 
     result = await evaluate_candidate_pool(
@@ -536,8 +609,7 @@ async def test_candidate_pool_honors_evidence_trigger_price(tmp_path):
     payload["items"]["002131"]["trigger_price"] = "0"
     payload["items"]["002131"]["kline"] = {
         "bars": [
-            {"open": 3.8, "close": 3.9, "high": 4.2, "low": 3.6}
-            for _ in range(20)
+            {"open": 3.8, "close": 3.9, "high": 4.2, "low": 3.6} for _ in range(20)
         ]
     }
     store.save(payload)
@@ -583,8 +655,7 @@ async def test_candidate_pool_treats_non_dict_evidence_as_missing_trigger(tmp_pa
     item["evidence"] = "invalid-evidence"
     item["kline"] = {
         "bars": [
-            {"open": 3.8, "close": 3.9, "high": 4.2, "low": 3.6}
-            for _ in range(20)
+            {"open": 3.8, "close": 3.9, "high": 4.2, "low": 3.6} for _ in range(20)
         ]
     }
     store.save(payload)
@@ -611,7 +682,9 @@ async def test_candidate_pool_treats_non_dict_evidence_as_missing_trigger(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_target_pool_normalizes_dirty_evidence_before_upsert_and_trigger_scan(tmp_path):
+async def test_target_pool_normalizes_dirty_evidence_before_upsert_and_trigger_scan(
+    tmp_path,
+):
     store = TargetPoolStore(tmp_path / "candidate_pool.json")
     store.upsert_target(
         code="002131",
@@ -628,17 +701,20 @@ async def test_target_pool_normalizes_dirty_evidence_before_upsert_and_trigger_s
     payload["items"]["002131"]["evidence"] = "dirty-existing-evidence"
     store.save(payload)
 
-    assert store.upsert_target(
-        code="002131",
-        name="利欧股份",
-        status="executable",
-        source="target_scoring",
-        evidence="dirty-incoming-evidence",
-        scoring_decision=full_score_decision(),
-        current_price=3.97,
-        available_cash=5902.5,
-        total_assets=5902.5,
-    ) is True
+    assert (
+        store.upsert_target(
+            code="002131",
+            name="利欧股份",
+            status="executable",
+            source="target_scoring",
+            evidence="dirty-incoming-evidence",
+            scoring_decision=full_score_decision(),
+            current_price=3.97,
+            available_cash=5902.5,
+            total_assets=5902.5,
+        )
+        is True
+    )
     assert store.get("002131")["evidence"] == {}
 
     store.upsert_target(
@@ -655,8 +731,7 @@ async def test_target_pool_normalizes_dirty_evidence_before_upsert_and_trigger_s
     payload = store.load()
     payload["items"]["002131"]["kline"] = {
         "bars": [
-            {"open": 3.8, "close": 3.9, "high": 4.2, "low": 3.6}
-            for _ in range(20)
+            {"open": 3.8, "close": 3.9, "high": 4.2, "low": 3.6} for _ in range(20)
         ]
     }
     store.save(payload)
@@ -759,7 +834,9 @@ async def test_executable_candidate_requires_two_consecutive_confirmations(tmp_p
     assert active["entry_signal"]["confirmations"] == 2
     from app.services.execution_ledger import ExecutionLedger
 
-    audited = ExecutionLedger(tmp_path / "execution_ledger.jsonl").read_with_diagnostics()
+    audited = ExecutionLedger(
+        tmp_path / "execution_ledger.jsonl"
+    ).read_with_diagnostics()
     assert audited["ok"] is True
     assert [event["event_type"] for event in audited["events"]] == [
         "signal",
@@ -795,7 +872,9 @@ async def test_active_entry_signal_has_stable_identity_and_only_notifies_once(tm
         }
     )
 
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     pending_signal = store.get("002123")["entry_signal"]
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
     confirmed = await evaluate_candidate_pool(
@@ -809,7 +888,11 @@ async def test_active_entry_signal_has_stable_identity_and_only_notifies_once(tm
     observed_signal = store.get("002123")["entry_signal"]
 
     assert confirmed["alerts"][0]["signal_id"] == active_signal["signal_id"]
-    assert pending_signal["signal_id"] == active_signal["signal_id"] == observed_signal["signal_id"]
+    assert (
+        pending_signal["signal_id"]
+        == active_signal["signal_id"]
+        == observed_signal["signal_id"]
+    )
     assert repeated["alerts"] == []
     assert active_signal["first_scan_id"] == "2026-07-20T09:45:00+08:00"
     assert active_signal["created_at"] == "2026-07-20T09:45:00+08:00"
@@ -819,7 +902,9 @@ async def test_active_entry_signal_has_stable_identity_and_only_notifies_once(tm
 
 
 @pytest.mark.asyncio
-async def test_expired_active_entry_signal_is_cancelled_even_if_trigger_remains(tmp_path):
+async def test_expired_active_entry_signal_is_cancelled_even_if_trigger_remains(
+    tmp_path,
+):
     store = TargetPoolStore(tmp_path / "candidate_pool.json")
     store.upsert_target(
         code="002123",
@@ -844,12 +929,18 @@ async def test_expired_active_entry_signal_is_cancelled_even_if_trigger_remains(
             }
         }
     )
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     active_signal = store.get("002123")["entry_signal"]
     payload = store.load()
-    payload["items"]["002123"]["entry_signal"]["expires_at"] = "2026-07-20T09:51:00+08:00"
+    payload["items"]["002123"]["entry_signal"]["expires_at"] = (
+        "2026-07-20T09:51:00+08:00"
+    )
     store.save(payload)
 
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:55:00+08:00"
@@ -889,9 +980,13 @@ async def test_active_entry_signal_emits_cancellation_when_trigger_disappears(tm
             }
         }
     )
-    await evaluate_candidate_pool(store, triggered, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, triggered, available_cash=6085.61, total_assets=6085.61
+    )
     triggered.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, triggered, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, triggered, available_cash=6085.61, total_assets=6085.61
+    )
 
     cancelled = await evaluate_candidate_pool(
         store,
@@ -945,9 +1040,13 @@ async def test_active_entry_signal_is_cancelled_when_playbook_changes(tmp_path):
             }
         }
     )
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
 
     quote_source.quotes["002123"] = {
         "price": 3.0,
@@ -991,9 +1090,13 @@ async def test_active_entry_signal_is_cancelled_when_authorization_is_lost(tmp_p
             }
         }
     )
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     payload = store.load()
     payload["items"]["002123"]["status"] = "watching"
     store.save(payload)
@@ -1057,9 +1160,13 @@ async def test_active_entry_signal_is_cancelled_when_trigger_price_changes(tmp_p
             }
         }
     )
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     active_signal_id = store.get("002123")["entry_signal"]["signal_id"]
     payload = store.load()
     payload["items"]["002123"]["trigger_price"] = 3.1
@@ -1104,9 +1211,13 @@ async def test_active_entry_signal_is_cancelled_when_price_becomes_chasing(tmp_p
             }
         }
     )
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     quote_source.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, quote_source, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, quote_source, available_cash=6085.61, total_assets=6085.61
+    )
     active_signal_id = store.get("002123")["entry_signal"]["signal_id"]
 
     quote_source.quotes["002123"] = {
@@ -1131,7 +1242,9 @@ async def test_active_entry_signal_is_cancelled_when_price_becomes_chasing(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_legacy_actionable_status_is_migrated_to_watching_after_cancellation(tmp_path):
+async def test_legacy_actionable_status_is_migrated_to_watching_after_cancellation(
+    tmp_path,
+):
     store = CandidatePoolStore(tmp_path / "candidate_pool.json")
     store.upsert_recommendations(
         [{"code": "002123", "name": "旧版买入状态", "reason": "历史信号"}],
@@ -1196,9 +1309,13 @@ async def test_active_entry_signal_is_not_cancelled_when_quote_is_missing(tmp_pa
             }
         }
     )
-    await evaluate_candidate_pool(store, triggered, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, triggered, available_cash=6085.61, total_assets=6085.61
+    )
     triggered.quotes["002123"]["quote_timestamp"] = "2026-07-20T09:50:00+08:00"
-    await evaluate_candidate_pool(store, triggered, available_cash=6085.61, total_assets=6085.61)
+    await evaluate_candidate_pool(
+        store, triggered, available_cash=6085.61, total_assets=6085.61
+    )
 
     missing = await evaluate_candidate_pool(
         store,
@@ -1252,9 +1369,13 @@ async def test_stale_quote_cannot_start_entry_confirmation(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_candidate_pool_blocks_high_position_breakout_after_kline_enrichment(tmp_path):
+async def test_candidate_pool_blocks_high_position_breakout_after_kline_enrichment(
+    tmp_path,
+):
     store = CandidatePoolStore(tmp_path / "candidate_pool.json")
-    store.upsert_recommendations([{"code": "002123", "name": "高位突破", "reason": "放量突破"}], source="manual")
+    store.upsert_recommendations(
+        [{"code": "002123", "name": "高位突破", "reason": "放量突破"}], source="manual"
+    )
     payload = store.load()
     payload["items"]["002123"]["trigger_price"] = 6.8
     store.save(payload)
@@ -1295,7 +1416,10 @@ async def test_candidate_pool_blocks_high_position_breakout_after_kline_enrichme
 @pytest.mark.asyncio
 async def test_candidate_pool_alert_blocks_when_risk_budget_is_too_small(tmp_path):
     store = CandidatePoolStore(tmp_path / "candidate_pool.json")
-    store.upsert_recommendations([{"code": "002123", "name": "高波动低价", "reason": "放量突破"}], source="manual")
+    store.upsert_recommendations(
+        [{"code": "002123", "name": "高波动低价", "reason": "放量突破"}],
+        source="manual",
+    )
     seed_breakout_contract(store, "002123", 13.0)
 
     result = await evaluate_candidate_pool(
@@ -1405,7 +1529,9 @@ async def test_candidate_pool_distinguishes_existing_position_add_alert(tmp_path
 @pytest.mark.asyncio
 async def test_candidate_pool_marks_position_limit_reached_for_add(tmp_path):
     store = CandidatePoolStore(tmp_path / "candidate_pool.json")
-    store.upsert_recommendations([{"code": "300002", "name": "神州泰岳", "reason": "放量突破"}], source="manual")
+    store.upsert_recommendations(
+        [{"code": "300002", "name": "神州泰岳", "reason": "放量突破"}], source="manual"
+    )
     seed_breakout_contract(store, "300002", 7.8)
 
     result = await evaluate_candidate_pool(
@@ -1446,7 +1572,10 @@ def test_target_scoring_executable_requires_auditable_scorecard(tmp_path):
     item = store.get("002123")
     assert item["status"] == "watching"
     assert item["scoring_decision"]["authorization_valid"] is False
-    assert item["scoring_decision"]["authorization_reason"] == "scorecard_missing_or_incomplete"
+    assert (
+        item["scoring_decision"]["authorization_reason"]
+        == "scorecard_missing_or_incomplete"
+    )
 
 
 def test_alert_level_normalizes_medium_to_mid():
@@ -1465,13 +1594,26 @@ def test_lot_size_for_code_respects_board_rules():
 def test_target_pool_accepts_v8_blocking_statuses(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
 
-    assert store.upsert_target(code="000725", name="京东方A", status="risk_budget_too_small") is True
+    assert (
+        store.upsert_target(
+            code="000725", name="京东方A", status="risk_budget_too_small"
+        )
+        is True
+    )
     assert store.get("000725")["status"] == "risk_budget_too_small"
 
-    assert store.upsert_target(code="000100", name="TCL科技", status="regime_blocks_dip") is True
+    assert (
+        store.upsert_target(code="000100", name="TCL科技", status="regime_blocks_dip")
+        is True
+    )
     assert store.get("000100")["status"] == "regime_blocks_dip"
 
-    assert store.upsert_target(code="000725", name="京东方A", status="blocked_high_position") is True
+    assert (
+        store.upsert_target(
+            code="000725", name="京东方A", status="blocked_high_position"
+        )
+        is True
+    )
     assert store.get("000725")["status"] == "blocked_high_position"
 
 
@@ -1523,7 +1665,9 @@ def test_target_pool_cooldown_after_loss_is_durable_and_not_scan_active(tmp_path
     assert item["production_eligibility"]["reason"] == "cooldown_after_loss"
 
 
-def test_target_pool_routes_unaffordable_serenity_candidate_to_research_reference(tmp_path):
+def test_target_pool_routes_unaffordable_serenity_candidate_to_research_reference(
+    tmp_path,
+):
     store = TargetPoolStore(tmp_path / "target_pool.json")
 
     ok = store.upsert_target(

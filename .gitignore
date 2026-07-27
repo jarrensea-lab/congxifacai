@@ -69,6 +69,9 @@ frontend/dist/
 # Test cache
 .pytest_cache/
 
+# Swift Package Manager build artifacts
+.build/
+
 # Local isolated feature worktrees
 .worktrees/
 

@@ -1027,6 +1027,7 @@ async def evaluate_candidate_pool(
     total_assets: float = 0,
     positions: dict[str, dict[str, Any]] | None = None,
     entry_gate: dict[str, Any] | None = None,
+    quote_validations: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     items = store.active_items()
     codes = [item["code"] for item in items if item.get("code")]
@@ -1039,6 +1040,104 @@ async def evaluate_candidate_pool(
         quote = quotes.get(code) or {}
         prior_signal = _prior_entry_signal(item)
         prior_state = str(prior_signal.get("state") or "")
+        quote_validation = None
+        if quote_validations is not None:
+            raw_validation = quote_validations.get(code)
+            if hasattr(raw_validation, "to_dict"):
+                raw_validation = raw_validation.to_dict()
+            quote_validation = (
+                dict(raw_validation)
+                if isinstance(raw_validation, dict)
+                else {
+                    "code": code,
+                    "status": "missing",
+                    "blocks_new_entry": True,
+                    "requires_manual_price_check": True,
+                    "reasons": ["quote_missing"],
+                }
+            )
+        if (
+            isinstance(quote_validation, dict)
+            and quote_validation.get("blocks_new_entry") is True
+        ):
+            quote_status = str(
+                quote_validation.get("status") or "missing"
+            )
+            validation_audit = {
+                "status": quote_status,
+                "market_time": quote_validation.get("market_time"),
+                "requires_manual_price_check": (
+                    quote_validation.get("requires_manual_price_check") is True
+                ),
+                "reasons": list(quote_validation.get("reasons") or []),
+            }
+            signal_reason = f"yitaojin_quote_{quote_status}"
+            if prior_state == "active":
+                cancelled = _entry_cancelled_alert(
+                    item,
+                    quote,
+                    prior_signal,
+                    reason="易淘金行情不可执行，需人工核价",
+                )
+                cancelled.update(
+                    {
+                        "reason": signal_reason,
+                        "quote_status": quote_status,
+                        "requires_manual_price_check": True,
+                        "execution_blocked_reason": (
+                            "quote_validation_blocked"
+                        ),
+                    }
+                )
+                alerts.append(cancelled)
+                store.record_scan(
+                    code,
+                    status=(
+                        "watching"
+                        if item.get("status") in ENTRY_ACTIONS
+                        else None
+                    ),
+                    alert=cancelled,
+                    entry_signal={
+                        **_entry_signal_payload(
+                            cancelled,
+                            state="cancelled",
+                            confirmations=0,
+                            reason=signal_reason,
+                            prior=prior_signal,
+                        ),
+                        "quote_validation": validation_audit,
+                    },
+                )
+            elif prior_state == "pending":
+                store.record_scan(
+                    code,
+                    entry_signal={
+                        **prior_signal,
+                        "state": "cancelled",
+                        "confirmations": 0,
+                        "reason": signal_reason,
+                        "quote_validation": validation_audit,
+                    },
+                )
+            else:
+                store.record_scan(
+                    code,
+                    entry_signal={
+                        **prior_signal,
+                        "state": "quote_validation_blocked",
+                        "confirmations": 0,
+                        "last_price": _to_float(quote.get("price")),
+                        "scan_id": _quote_scan_id(quote),
+                        "observed_at": str(
+                            quote.get("quote_timestamp")
+                            or _quote_scan_id(quote)
+                        ),
+                        "reason": signal_reason,
+                        "quote_validation": validation_audit,
+                    },
+                )
+            continue
         if isinstance(entry_gate, dict) and entry_gate.get("entry_allowed") is False:
             gate_audit = {
                 "state": entry_gate.get("state"),

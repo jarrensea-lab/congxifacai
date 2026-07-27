@@ -91,6 +91,45 @@ def test_scheduler_main_report_runs_next_day_strategy_script_not_closing_placeho
 
 
 @pytest.mark.asyncio
+async def test_yitaojin_status_endpoint_exposes_health_without_account_material(
+    tmp_path,
+    monkeypatch,
+):
+    from app.main import get_yitaojin_runtime_status
+
+    status_path = tmp_path / "runtime-status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "enabled": True,
+                "write_enabled": False,
+                "state": "failed",
+                "task": "morning",
+                "updated_at": "2026-07-26T08:55:10+08:00",
+                "last_success_at": "2026-07-25T20:45:10+08:00",
+                "last_failure_reason": "not_logged_in",
+                "bridge_build_id": "sha256:test-build",
+                "steps": {"probe": "ready"},
+                "account_number": "SECRET",
+                "total_assets": "999999",
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONGXI_YITAOJIN_ENABLED", "true")
+    monkeypatch.setenv("CONGXI_YITAOJIN_RUNTIME_STATUS_PATH", str(status_path))
+
+    result = await get_yitaojin_runtime_status()
+
+    assert result["enabled"] is True
+    assert result["last_failure_reason"] == "not_logged_in"
+    assert result["bridge_build_id"] == "sha256:test-build"
+    assert "account_number" not in result
+    assert "total_assets" not in result
+
+
+@pytest.mark.asyncio
 async def test_get_review_logs_orders_by_review_date_without_created_at():
     """ReviewLog has review_date, not created_at."""
     from app.database import SessionLocal

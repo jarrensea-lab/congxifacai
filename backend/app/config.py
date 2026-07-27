@@ -21,12 +21,29 @@ class RuntimeDatabasePaths:
     scheduler: str
 
 
-def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
-    """Resolve mutable SQLite files onto the local home disk by default."""
-    state_dir = Path(
+@dataclass(frozen=True)
+class RuntimeYitaojinPaths:
+    bridge: Path
+    account_snapshot: Path
+    account_fingerprint_salt: Path
+    account_audit: Path
+    watchlist_state: Path
+    watchlist_audit: Path
+    quote_snapshot: Path
+    runtime_status: Path
+
+
+def resolve_runtime_state_dir() -> Path:
+    """Return the local mutable state root without creating it."""
+    return Path(
         os.getenv("CONGXI_STATE_DIR")
         or "~/Library/Application Support/congxicai-v7"
     ).expanduser()
+
+
+def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
+    """Resolve mutable SQLite files onto the local home disk by default."""
+    state_dir = resolve_runtime_state_dir()
     business = Path(
         os.getenv("CONGXI_DATABASE_PATH") or state_dir / "stock_data.db"
     ).expanduser()
@@ -34,6 +51,50 @@ def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
         os.getenv("CONGXI_SCHEDULER_DATABASE_PATH") or state_dir / "scheduler_jobs.db"
     ).expanduser()
     return RuntimeDatabasePaths(business=str(business), scheduler=str(scheduler))
+
+
+def resolve_runtime_yitaojin_paths() -> RuntimeYitaojinPaths:
+    """Resolve broker-integration artifacts onto the local state disk."""
+    state_dir = resolve_runtime_state_dir()
+    integration_dir = state_dir / "yitaojin"
+
+    def resolve(name: str, default: Path) -> Path:
+        return Path(os.getenv(name) or default).expanduser()
+
+    return RuntimeYitaojinPaths(
+        bridge=resolve(
+            "CONGXI_YITAOJIN_BRIDGE_PATH",
+            state_dir / "bin" / "yitaojin-bridge",
+        ),
+        account_snapshot=resolve(
+            "CONGXI_YITAOJIN_ACCOUNT_SNAPSHOT_PATH",
+            integration_dir / "account_snapshot.json",
+        ),
+        account_fingerprint_salt=resolve(
+            "CONGXI_YITAOJIN_ACCOUNT_FINGERPRINT_SALT_PATH",
+            integration_dir / "account_fingerprint_salt",
+        ),
+        account_audit=resolve(
+            "CONGXI_YITAOJIN_ACCOUNT_AUDIT_PATH",
+            integration_dir / "account_sync_audit.jsonl",
+        ),
+        watchlist_state=resolve(
+            "CONGXI_YITAOJIN_WATCHLIST_STATE_PATH",
+            integration_dir / "watchlist_state.json",
+        ),
+        watchlist_audit=resolve(
+            "CONGXI_YITAOJIN_WATCHLIST_AUDIT_PATH",
+            integration_dir / "watchlist_sync_audit.jsonl",
+        ),
+        quote_snapshot=resolve(
+            "CONGXI_YITAOJIN_QUOTE_SNAPSHOT_PATH",
+            integration_dir / "quote_snapshot.json",
+        ),
+        runtime_status=resolve(
+            "CONGXI_YITAOJIN_RUNTIME_STATUS_PATH",
+            integration_dir / "runtime_status.json",
+        ),
+    )
 
 
 _runtime_database_paths = resolve_runtime_database_paths()
@@ -86,6 +147,15 @@ class Settings(BaseSettings):
     # 服务配置
     SERVER_HOST: str = "0.0.0.0"
     SERVER_PORT: int = 8000
+
+    # 广发易淘金：默认完全关闭，UI 写入还需第二个开关
+    CONGXI_YITAOJIN_ENABLED: bool = False
+    CONGXI_YITAOJIN_WRITE_ENABLED: bool = False
+    CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED: bool = False
+    CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED: bool = False
+    CONGXI_YITAOJIN_APP_PATH: str = "/Applications/GF-Trader.app"
+    CONGXI_YITAOJIN_TASK_TIMEOUT_SECONDS: int = 120
+    CONGXI_YITAOJIN_APP_START_TIMEOUT_SECONDS: int = 30
 
     # 数据库
     DATABASE_PATH: str = _runtime_database_paths.business
