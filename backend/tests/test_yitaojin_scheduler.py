@@ -413,6 +413,23 @@ async def test_runtime_failure_is_sanitized_and_preserves_last_success(tmp_path)
     assert "total_assets" not in serialized
 
 
+def test_runtime_status_reports_specific_watchlist_write_enablement(tmp_path):
+    from app.integrations.yitaojin.runtime import load_yitaojin_runtime_status
+
+    status = load_yitaojin_runtime_status(
+        tmp_path / "missing.json",
+        environment={
+            "CONGXI_YITAOJIN_ENABLED": "true",
+            "CONGXI_YITAOJIN_WRITE_ENABLED": "false",
+            "CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED": "false",
+            "CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED": "true",
+        },
+    )
+
+    assert status["enabled"] is True
+    assert status["write_enabled"] is True
+
+
 @pytest.mark.asyncio
 async def test_main_wrapper_contains_runtime_failure_instead_of_aborting(monkeypatch):
     import app.integrations.yitaojin.runtime as runtime

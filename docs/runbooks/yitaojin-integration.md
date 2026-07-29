@@ -172,9 +172,23 @@ CONGXI_YITAOJIN_WRITE_ENABLED=false \
 
 检查 `plan.add`、`plan.remove`、`plan.keep`：
 
-- 目标集合只应包含持仓、`executable`、`watching` 和受保护手工自选。
-- `research_reference`、`removed`、`expired` 不得进入 `add`。
+- 用户可见的正式标的池只有两类：`short_term`（短线池）和
+  `mid_long_term`（中长线池）。
+- 目标集合只应包含两个正式池中 `pool_retained=true` 的标的、当前持仓和
+  受保护手工自选；内部 `executable/watching/research_reference` 状态不再单独决定
+  是否进入易淘金自选。
+- `pool_retained=false`、`removed`、`expired` 不得进入 `add`。
 - 持仓和手工自选不得进入 `remove`。
+
+每日 20:30 主报告会重算两个池：
+
+- 短线池新进/留池阈值为 55/50 分。
+- 中长线池新进/留池阈值为 60/55 分，并要求长期逻辑未处于
+  `broken/stale`。
+- 已在池内的标的如果本轮缺少关键数据，先保留并等待下一轮，不能因单次抓数失败
+  自动删除。
+- 完成评分后，20:45 自选同步读取同一份 `candidate_pool.json`，执行
+  add/remove/keep。
 
 ### 5.3 首次三轮强制只新增
 
@@ -187,6 +201,11 @@ CONGXI_YITAOJIN_WRITE_ENABLED=true \
 ```
 
 首次 bootstrap 后的前三个成功应用周期由状态机强制只新增，不会移除。每一只新增都要在 App 回读确认后才写入 `managed_codes`；任何新增失败都会跳过整轮移除。
+
+两池规则上线后，只有同时带有 `pool_kind` 和明确每日评分记录、且曾经
+`pool_retained=true` 的旧标的，才会从 `manual_protected_codes` 迁为
+`managed_codes`。这让系统能在后续低分时按规则退出；没有两池评分历史的真正
+手工自选不会被系统认领。
 
 ### 5.4 受控移除
 
@@ -217,7 +236,7 @@ CONGXI_YITAOJIN_WRITE_ENABLED=true \
 
 ## 6. 行情门与调度
 
-行情范围固定为当前持仓及 `executable`、`watching`，最多 32 个代码：
+行情范围固定为当前持仓及短线池、中长线池的留池标的，最多 32 个代码：
 
 - 常规快照年龄 `<=90s` 才是 fresh。
 - 新开仓/加仓动作前年龄 `<=30s`。
@@ -232,7 +251,8 @@ CONGXI_YITAOJIN_WRITE_ENABLED=true \
 08:55  账户验证/写回 → 自选 dry-run/应用 → 重点行情
 11:35  重点行情校验，与午间报告独立
 14:55  收盘前重点行情校验
-20:45  账户验证/写回 → 自选 dry-run/应用
+20:30  两个正式池每日评分、晋级与淘汰
+20:45  账户验证/写回 → 短线池 + 中长线池 + 持仓 自选 dry-run/应用
 盘中每 5 分钟 复用既有生命周期扫描，不启动第二套全市场扫描
 ```
 

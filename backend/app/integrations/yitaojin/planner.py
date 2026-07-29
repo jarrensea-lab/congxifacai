@@ -103,11 +103,43 @@ def build_desired_codes(
 ) -> set[str]:
     desired = {position.code for position in positions}
     for fallback_code, item in _pool_items(pool_payload):
+        scoring = (
+            item.get("scoring_decision")
+            if isinstance(item.get("scoring_decision"), Mapping)
+            else {}
+        )
+        retained = scoring.get("pool_retained")
+        if isinstance(retained, bool):
+            if retained:
+                desired.add(normalize_stock_code(item.get("code") or fallback_code))
+            continue
         status = str(item.get("status") or "").strip().lower()
         if status not in PRODUCTION_STATUSES:
             continue
         desired.add(normalize_stock_code(item.get("code") or fallback_code))
     return desired
+
+
+def build_managed_hint_codes(
+    pool_payload: Mapping[str, object],
+) -> set[str]:
+    """Return codes explicitly governed by the daily two-pool scoring policy."""
+    hints: set[str] = set()
+    for fallback_code, item in _pool_items(pool_payload):
+        scoring = (
+            item.get("scoring_decision")
+            if isinstance(item.get("scoring_decision"), Mapping)
+            else {}
+        )
+        retained = scoring.get("pool_retained")
+        previously_retained = scoring.get("pool_previously_retained")
+        if retained is not True and previously_retained is not True:
+            continue
+        pool_kind = str(item.get("pool_kind") or scoring.get("pool_kind") or "")
+        if pool_kind not in {"short_term", "mid_long_term"}:
+            continue
+        hints.add(normalize_stock_code(item.get("code") or fallback_code))
+    return hints
 
 
 def _normalized_codes(values: set[str]) -> set[str]:
@@ -122,6 +154,7 @@ def plan_watchlist_sync(
     state: WatchlistState,
     allow_removals: bool,
     source_valid: bool,
+    managed_hint_codes: set[str] | None = None,
 ) -> WatchlistPlanningResult:
     desired = _normalized_codes(desired_codes)
     current = _normalized_codes(current_codes)
@@ -146,6 +179,9 @@ def plan_watchlist_sync(
 
     observed_manual = current - managed
     protected.update(observed_manual)
+    adopted = _normalized_codes(managed_hint_codes or set()) & current
+    managed.update(adopted)
+    protected.difference_update(adopted)
     system_desired = desired | held
     add = system_desired - current
     removal_counts: dict[str, int] = {}
@@ -163,6 +199,7 @@ def plan_watchlist_sync(
     effective_desired = system_desired | (protected & current)
     next_state = replace(
         state,
+        managed_codes=tuple(sorted(managed)),
         manual_protected_codes=tuple(sorted(protected)),
         pending_removal_counts=removal_counts,
     )

@@ -250,7 +250,7 @@ def test_build_next_day_strategy_sections_is_concise_enough_for_feishu():
         assert heading in summary
     assert "京东方A(000725)" in summary
     assert "新鲜行情已跌破 ¥7.61，立即卖出100股/退出" in summary
-    assert "| 标的 | 状态 | 现价 | 触发价格 | 止损 | 止盈 | 入选原因 | 重点 |" in summary
+    assert "| 标的 | 状态 | 现价 | 触发价格 | 止损 | 止盈 | 入选原因 | 查看顺序 |" in summary
     assert "等待触发（未触发不买）" in summary
     assert "| 标的 | 现价 | 触发价格 | 止损 | 止盈 | 发展趋势 | 计划持有周期 | 入选原因 |" in summary
 

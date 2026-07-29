@@ -30,13 +30,30 @@ final class YitaojinReader {
         capturedAt: String
     ) throws -> QuotesData {
         let root = try client.snapshotForWatchlist()
+        return Self.parseQuotes(
+            from: root,
+            codes: codes,
+            capturedAt: capturedAt
+        )
+    }
+
+    static func parseQuotes(
+        from root: AXSnapshotNode,
+        codes: [String],
+        capturedAt: String
+    ) -> QuotesData {
         var quotes: [QuoteData] = []
         var found = Set<String>()
         for row in root.flattened where row.summary.role == "AXRow" {
+            let values = normalizedRowValues(row)
             guard
-                let code = Self.stockCodes(in: row.combinedText).first,
+                let codeIndex = values.firstIndex(where: exactCode),
+                let code = values[safe: codeIndex],
                 codes.contains(code),
-                let price = Self.firstValue(in: row, labels: ["现价", "最新价"])
+                let price = normalizedMarketNumber(
+                    Self.firstValue(in: row, labels: ["现价", "最新价"])
+                        ?? values[safe: codeIndex + 2]
+                )
             else {
                 continue
             }
@@ -50,12 +67,30 @@ final class YitaojinReader {
                         labels: ["行情时间", "时间"]
                     ) ?? capturedAt,
                     price: price,
-                    changePct: Self.firstValue(in: row, labels: ["涨跌幅"]),
-                    volume: Self.firstValue(in: row, labels: ["成交量"]),
-                    amount: Self.firstValue(in: row, labels: ["成交额"]),
-                    high: Self.firstValue(in: row, labels: ["最高"]),
-                    low: Self.firstValue(in: row, labels: ["最低"]),
-                    previousClose: Self.firstValue(in: row, labels: ["昨收"]),
+                    changePct: normalizedMarketNumber(
+                        Self.firstValue(in: row, labels: ["涨跌幅", "涨幅"])
+                            ?? values[safe: codeIndex + 1]
+                    ),
+                    volume: normalizedMarketNumber(
+                        Self.firstValue(in: row, labels: ["成交量"])
+                            ?? values[safe: codeIndex + 4]
+                    ),
+                    amount: normalizedMarketNumber(
+                        Self.firstValue(in: row, labels: ["成交额"])
+                            ?? values[safe: codeIndex + 5]
+                    ),
+                    high: normalizedMarketNumber(
+                        Self.firstValue(in: row, labels: ["最高"])
+                            ?? values[safe: codeIndex + 10]
+                    ),
+                    low: normalizedMarketNumber(
+                        Self.firstValue(in: row, labels: ["最低"])
+                            ?? values[safe: codeIndex + 11]
+                    ),
+                    previousClose: normalizedMarketNumber(
+                        Self.firstValue(in: row, labels: ["昨收"])
+                            ?? values[safe: codeIndex + 12]
+                    ),
                     status: Self.firstValue(in: row, labels: ["状态"]) ?? "normal"
                 )
             )
@@ -291,6 +326,30 @@ final class YitaojinReader {
 
     private static func normalizedNumber(_ value: String) -> String {
         value.replacingOccurrences(of: ",", with: "")
+    }
+
+    private static func normalizedMarketNumber(_ value: String?) -> String? {
+        guard var value else {
+            return nil
+        }
+        value = normalizedNumber(value)
+            .replacingOccurrences(of: "%", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var multiplier = Decimal(1)
+        if value.hasSuffix("万") {
+            value.removeLast()
+            multiplier = Decimal(10_000)
+        } else if value.hasSuffix("亿") {
+            value.removeLast()
+            multiplier = Decimal(100_000_000)
+        }
+        guard
+            let number = Decimal(string: value),
+            number.isFinite
+        else {
+            return nil
+        }
+        return NSDecimalNumber(decimal: number * multiplier).stringValue
     }
 
     private static func numericValue(

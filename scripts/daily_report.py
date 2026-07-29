@@ -1345,9 +1345,18 @@ def _holding_strategy_section(
 
 def _short_pool_rows(decision: dict, *, excluded_codes: set[str] | None = None) -> list[dict]:
     excluded = excluded_codes or set()
+    strict_two_pool_view = any(
+        item.get("pool_kind") or isinstance(item.get("pool_retained"), bool)
+        for item in _target_scores(decision)
+    )
     rows = []
     seen: set[str] = set()
     for item in _split_target_scores(decision)["executable"] + _split_target_scores(decision)["watching"]:
+        pool_kind = str(item.get("pool_kind") or "")
+        if pool_kind and pool_kind != "short_term":
+            continue
+        if item.get("pool_retained") is False:
+            continue
         if item.get("thesis_status") or item.get("long_quality_score"):
             continue
         code = _target_code(item)
@@ -1364,6 +1373,11 @@ def _short_pool_rows(decision: dict, *, excluded_codes: set[str] | None = None) 
         and item not in outside_rows
     )
     for item in outside_rows:
+        if strict_two_pool_view:
+            if item.get("pool_retained") is not True:
+                continue
+            if str(item.get("pool_kind") or "short_term") != "short_term":
+                continue
         code = _target_code(item)
         if not code or code in excluded or code in seen:
             continue
@@ -1372,12 +1386,26 @@ def _short_pool_rows(decision: dict, *, excluded_codes: set[str] | None = None) 
     return rows
 
 
+def build_pool_relationship_guide() -> list[str]:
+    """Explain the two formal pools and their broker-watchlist synchronization."""
+    return [
+        "> **只保留两个正式池：短线池和中长线池；重点关注 ≠ 可买。**",
+        "",
+        "- **门槛**：短线新进/留池 55/50 分；中长线 60/55 分且长期逻辑未破坏。",
+        "- **每日重新评分**：低于留池线退出；单次缺数不误删。易淘金自选股同步"
+        "“短线池 + 中长线池 + 当前持仓”，并保留人工自选。",
+        "- **边界**：易淘金只更新账户、行情和自选展示，不反向晋级、不自动下单。",
+        "",
+    ]
+
+
 def _short_pool_section(decision: dict, *, excluded_codes: set[str] | None = None) -> list[str]:
     rows = _short_pool_rows(decision, excluded_codes=excluded_codes)
     lines = [
         "## 三、短线关注标的池",
         "",
-        "| 标的 | 状态 | 现价 | 触发价格 | 止损 | 止盈 | 入选原因 | 重点 |",
+        *build_pool_relationship_guide(),
+        "| 标的 | 状态 | 现价 | 触发价格 | 止损 | 止盈 | 入选原因 | 查看顺序 |",
         "|---|---|---:|---:|---:|---:|---|---|",
     ]
     if not rows:
@@ -1386,7 +1414,7 @@ def _short_pool_section(decision: dict, *, excluded_codes: set[str] | None = Non
         return lines
     for idx, item in enumerate(rows[:6]):
         reason = _humanize_reason(item.get("decision_reason") or item.get("watch_reason") or item.get("reason"))
-        focus = "重点关注" if idx < 3 else "一般关注"
+        focus = "优先核验" if idx < 3 else "常规核验"
         action = str(item.get("action") or item.get("status") or "")
         research_only = item.get("research_only") is True
         if research_only:
@@ -1408,6 +1436,11 @@ def _short_pool_section(decision: dict, *, excluded_codes: set[str] | None = Non
 def _long_pool_rows(decision: dict) -> list[dict]:
     long_rows = []
     for item in _target_scores(decision):
+        pool_kind = str(item.get("pool_kind") or "")
+        if pool_kind:
+            if pool_kind == "mid_long_term" and item.get("pool_retained") is True:
+                long_rows.append(item)
+            continue
         if item.get("thesis_status") or item.get("long_quality_score") or str(item.get("action") or "") in {"research_only", "research_reference"}:
             long_rows.append(item)
     return long_rows
@@ -1972,15 +2005,22 @@ async def build_target_scores_for_report(
     total_assets: float,
     limit: int | None = None,
     market_source=None,
+    long_thesis_store=None,
 ) -> list[dict]:
     """Score current target-pool items with normalized data snapshots."""
     from app.ai.serenity_financial_evidence import fetch_financial_evidence
     from app.data_sources.akshare_market import AKShareMarketClient
     from app.data_sources.akshare_news import AKShareNewsClient
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
+    from app.services.long_thesis import LongThesisStore
     from app.services.quant_lifecycle import TargetPoolStore, target_production_eligibility
     from app.services.target_scoring import score_target
     from app.services.target_snapshot import build_target_snapshot
+    from app.services.target_pool_policy import (
+        decide_pool_membership,
+        infer_pool_kind,
+        was_previously_retained,
+    )
 
     class CachedMarketSource:
         def __init__(self):
@@ -2008,6 +2048,13 @@ async def build_target_scores_for_report(
 
     store = TargetPoolStore()
     payload = store.load()
+    resolved_long_thesis_store = long_thesis_store or LongThesisStore()
+    long_thesis_payload = resolved_long_thesis_store.load()
+    long_theses = (
+        long_thesis_payload.get("items")
+        if isinstance(long_thesis_payload.get("items"), dict)
+        else {}
+    )
     items = [
         item for item in payload.get("items", {}).values()
         if isinstance(item, dict)
@@ -2021,8 +2068,20 @@ async def build_target_scores_for_report(
     }
     items.sort(key=lambda item: str(item.get("updated_at") or ""), reverse=True)
     items.sort(key=lambda item: status_priority.get(str(item.get("status") or "watching"), 2))
-    max_items = limit or int(os.getenv("CONGXI_TARGET_SCORE_LIMIT", "12"))
-    items = items[:max_items]
+    max_items = limit or int(os.getenv("CONGXI_TARGET_SCORE_LIMIT", "24"))
+    mandatory_items = [
+        item
+        for item in items
+        if was_previously_retained(item)
+        or (
+            limit is None
+            and str(item.get("code") or "").strip() in long_theses
+        )
+    ]
+    mandatory_ids = {id(item) for item in mandatory_items}
+    optional_items = [item for item in items if id(item) not in mandatory_ids]
+    optional_slots = max(0, max_items - len(mandatory_items))
+    items = mandatory_items + optional_items[:optional_slots]
     if not items:
         return []
 
@@ -2054,11 +2113,35 @@ async def build_target_scores_for_report(
             None,
         )
         snapshot["production_eligibility"] = target_production_eligibility(item)
-        score = score_target(snapshot, available_cash=available_cash, total_assets=total_assets)
+        long_thesis = long_theses.get(code)
+        score = score_target(
+            snapshot,
+            available_cash=available_cash,
+            total_assets=total_assets,
+            long_thesis=long_thesis if isinstance(long_thesis, dict) else None,
+        )
         score["source_status"] = {
             key: (snapshot.get(key) or {}).get("status")
             for key in ("quote", "kline", "fund_flow", "northbound", "news", "financial", "sentinel", "serenity")
         }
+        pool_kind = infer_pool_kind(
+            item,
+            long_thesis=long_thesis if isinstance(long_thesis, dict) else None,
+        )
+        previously_retained = was_previously_retained(item)
+        membership = decide_pool_membership(
+            pool_kind=pool_kind,
+            scorecard=score,
+            previously_retained=previously_retained,
+        )
+        score.update({
+            "pool_kind": pool_kind,
+            "pool_retained": membership["retained"],
+            "pool_previously_retained": previously_retained,
+            "pool_retention_score": membership["score"],
+            "pool_retention_threshold": membership["threshold"],
+            "pool_retention_reason": membership["reason"],
+        })
         quote = snapshot.get("quote") if isinstance(snapshot.get("quote"), dict) else {}
         action = str(score.get("action") or "")
         next_status = {
@@ -2067,10 +2150,17 @@ async def build_target_scores_for_report(
             "research_only": "research_reference",
             "remove": "removed",
         }.get(action, "watching")
+        if not membership["retained"]:
+            next_status = (
+                "removed"
+                if previously_retained
+                else "research_reference"
+            )
         store.upsert_target(
             code=code,
             name=score.get("name") or item.get("name", code),
             status=next_status,
+            pool_kind=pool_kind,
             source="target_scoring",
             evidence=evidence,
             evidence_ids=item.get("evidence_ids") or [],
@@ -2084,6 +2174,14 @@ async def build_target_scores_for_report(
                 "missing_data": score.get("missing_data") or [],
                 "playbook": score.get("playbook", "watch"),
                 "source_status": score.get("source_status") or {},
+                "long_quality_score": score.get("long_quality_score", 0),
+                "thesis_status": score.get("thesis_status", ""),
+                "pool_kind": pool_kind,
+                "pool_retained": membership["retained"],
+                "pool_previously_retained": previously_retained,
+                "pool_retention_score": membership["score"],
+                "pool_retention_threshold": membership["threshold"],
+                "pool_retention_reason": membership["reason"],
                 "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             },
             current_price=quote.get("price"),

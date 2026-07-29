@@ -727,6 +727,66 @@ do {
             == ["000100"],
         "watchlist parser confused a six-digit quote value with the row code"
     )
+
+    let unlabeledQuoteRoot = AXSnapshotNode(
+        summary: AXNodeSummary(
+            role: "AXTable",
+            title: "基础行情",
+            label: nil,
+            value: nil
+        ),
+        children: [
+            AXSnapshotNode(
+                summary: AXNodeSummary(
+                    role: "AXRow",
+                    title: nil,
+                    label: nil,
+                    value: nil
+                ),
+                children: [
+                    .labeled("cell", value: "600900"),
+                    .labeled("cell", value: "2.54%"),
+                    .labeled("cell", value: "29.07"),
+                    .labeled("cell", value: "0.72"),
+                    .labeled("cell", value: "161.3万"),
+                    .labeled("cell", value: "46.4亿"),
+                    .labeled("cell", value: "0.24%"),
+                    .labeled("cell", value: "0.66%"),
+                    .labeled("cell", value: "1.04"),
+                    .labeled("cell", value: "28.45"),
+                    .labeled("cell", value: "29.07"),
+                    .labeled("cell", value: "28.31"),
+                    .labeled("cell", value: "28.35"),
+                ]
+            ),
+        ]
+    )
+    let unlabeledQuotes = YitaojinReader.parseQuotes(
+        from: unlabeledQuoteRoot,
+        codes: ["600900", "000100"],
+        capturedAt: "2026-07-28T15:00:05+08:00"
+    )
+    expect(
+        unlabeledQuotes.quotes.first?.code == "600900"
+            && unlabeledQuotes.quotes.first?.price == "29.07",
+        "unlabeled watchlist quote row did not yield the current price"
+    )
+    expect(
+        unlabeledQuotes.quotes.first?.changePct == "2.54"
+            && unlabeledQuotes.quotes.first?.volume == "1613000"
+            && unlabeledQuotes.quotes.first?.amount == "4640000000",
+        "unlabeled watchlist quote metrics were not normalized"
+    )
+    expect(
+        unlabeledQuotes.quotes.first?.high == "29.07"
+            && unlabeledQuotes.quotes.first?.low == "28.31"
+            && unlabeledQuotes.quotes.first?.previousClose == "28.35",
+        "unlabeled watchlist OHLC fields were not parsed by column position"
+    )
+    expect(
+        unlabeledQuotes.missingCodes == ["000100"],
+        "unlabeled watchlist quote parser lost explicit missing-code tracking"
+    )
 } catch {
     failures.append("unexpected self-test error: \(error)")
 }

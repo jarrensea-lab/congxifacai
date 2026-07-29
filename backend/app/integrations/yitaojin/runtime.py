@@ -86,13 +86,18 @@ def _now_text() -> str:
 def _default_status(
     environment: Mapping[str, str],
 ) -> dict[str, Any]:
+    account_write_enabled = _specific_write_enabled(
+        environment,
+        "CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED",
+    )
+    watchlist_write_enabled = _specific_write_enabled(
+        environment,
+        "CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED",
+    )
     return {
         "schema_version": 1,
         "enabled": _enabled(environment, "CONGXI_YITAOJIN_ENABLED"),
-        "write_enabled": _enabled(
-            environment,
-            "CONGXI_YITAOJIN_WRITE_ENABLED",
-        ),
+        "write_enabled": account_write_enabled or watchlist_write_enabled,
         "state": "unknown",
         "task": None,
         "updated_at": None,
