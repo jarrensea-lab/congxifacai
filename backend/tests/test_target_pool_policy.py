@@ -3,6 +3,7 @@ from app.services.target_pool_policy import (
     SHORT_TERM_POOL,
     decide_pool_membership,
     infer_pool_kind,
+    was_previously_retained,
 )
 
 
@@ -16,6 +17,10 @@ def test_infer_pool_kind_uses_only_short_and_mid_long_term_categories():
         == MID_LONG_TERM_POOL
     )
     assert infer_pool_kind({"pool_kind": "long_term"}) == MID_LONG_TERM_POOL
+
+
+def test_existing_long_horizon_status_counts_as_previously_retained():
+    assert was_previously_retained({"status": "long_watch"}) is True
 
 
 def test_short_pool_uses_hysteresis_and_evicts_an_existing_low_score_item():

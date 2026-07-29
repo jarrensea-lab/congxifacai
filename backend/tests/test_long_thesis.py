@@ -1,7 +1,15 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
-from app.services.long_thesis import LongThesisStore, evaluate_thesis_status
+import pytest
+
+from app.services.long_thesis import (
+    LongThesisStore,
+    LongThesisStoreInvalid,
+    evaluate_thesis_status,
+)
 
 
 def _sample_thesis():
@@ -67,6 +75,32 @@ def test_long_thesis_store_upserts_and_appends_review(tmp_path):
     assert store.load()["items"]["002123"]["valuation_anchor"]["accumulation_zone"] == [3.2, 3.8]
 
 
+def test_long_thesis_concurrent_different_symbols_do_not_lose_updates(
+    monkeypatch,
+    tmp_path,
+):
+    store = LongThesisStore(tmp_path / "long_thesis.json")
+    barrier = Barrier(2)
+    original_load = LongThesisStore.load
+
+    def synchronized_load(self):
+        payload = original_load(self)
+        barrier.wait(timeout=5)
+        return payload
+
+    monkeypatch.setattr(LongThesisStore, "load", synchronized_load)
+    first = {**_sample_thesis(), "symbol": "002123", "name": "并发一"}
+    second = {**_sample_thesis(), "symbol": "688001", "name": "并发二"}
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(store.upsert, (first, second)))
+
+    stored = original_load(store)["items"]
+    assert set(stored) == {"002123", "688001"}
+    assert stored["002123"]["name"] == "并发一"
+    assert stored["688001"]["name"] == "并发二"
+
+
 def test_evaluate_thesis_status_marks_red_line_as_broken():
     thesis = _sample_thesis()
     thesis["red_lines"][0]["status"] = "triggered"
@@ -99,3 +133,52 @@ def test_long_thesis_example_is_store_compatible(tmp_path):
     assert stored["assumptions"]
     assert stored["red_lines"]
     assert stored["valuation_anchor"]["method"]
+
+
+def test_long_thesis_strict_load_treats_missing_file_as_empty_store(tmp_path):
+    store = LongThesisStore(tmp_path / "missing-long-thesis.json")
+
+    strict_load = getattr(store, "load_strict", None)
+
+    assert callable(strict_load)
+    assert strict_load() == {
+        "version": 1,
+        "updated_at": "",
+        "items": {},
+    }
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{broken",
+        "[]",
+        '{"version": 1, "items": []}',
+        '{"version": 1, "items": {"002123": []}}',
+        '{"version": 1, "items": {"002123": {"quality_score": 88}}}',
+    ],
+)
+def test_long_thesis_strict_load_rejects_corrupted_store_shapes(
+    tmp_path,
+    content,
+):
+    path = tmp_path / "long_thesis.json"
+    path.write_text(content, encoding="utf-8")
+    store = LongThesisStore(path)
+    strict_load = getattr(store, "load_strict", None)
+
+    assert callable(strict_load)
+    with pytest.raises(RuntimeError, match="long_thesis_store_invalid"):
+        strict_load()
+
+
+def test_long_thesis_strict_load_wraps_invalid_utf8(tmp_path):
+    path = tmp_path / "long_thesis.json"
+    path.write_bytes(b"\xff\xfe\xfa")
+    store = LongThesisStore(path)
+
+    with pytest.raises(
+        LongThesisStoreInvalid,
+        match="long_thesis_store_invalid",
+    ):
+        store.load_strict()

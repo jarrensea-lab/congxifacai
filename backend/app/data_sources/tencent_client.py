@@ -4,6 +4,7 @@ import re
 from datetime import datetime, time, timedelta, timezone
 from typing import Optional, Dict, Any, List
 from app.data_sources.base import BaseDataSource
+from app.utils.market_instruments import resolve_tencent_market_instrument
 from app.utils.trading_calendar import is_trading_day, prev_trading_day
 
 
@@ -18,18 +19,8 @@ class TencentDataSource(BaseDataSource):
         super().__init__("tencent")
 
     def _resolve_code(self, code: str) -> str:
-        """股票代码转腾讯格式: sh600000 / sz000001 / bj8xxxxx
-        已带前缀的代码直接返回 (如 sh000001 上证指数, sz399001 深证成指)
-        """
-        if code.startswith(("sh", "sz", "bj")):
-            return code
-        code = code.replace("sh", "").replace("sz", "").replace("bj", "")
-        if code.startswith(("6", "9")):
-            return f"sh{code}"
-        elif code.startswith("8"):
-            return f"bj{code}"
-        else:
-            return f"sz{code}"
+        """股票代码转腾讯格式: sh600000 / sz000001 / bj920001。"""
+        return resolve_tencent_market_instrument(code)
 
     def _parse_one(
         self,

@@ -7,7 +7,7 @@ from app.services.market_regime import evaluate_market_regime
 from app.services.long_thesis import evaluate_thesis_status
 from app.services.playbook_engine import select_playbook
 from app.services.position_sizing import calculate_position_size
-from app.services.quant_lifecycle import lot_size_for_code
+from app.services.quant_lifecycle import LONG_HORIZON_STATUSES, lot_size_for_code
 from app.services.strategy_profile import (
     calculate_stop_loss_price,
     calculate_target_price,
@@ -16,6 +16,7 @@ from app.services.strategy_profile import (
 
 
 REQUIRED_SOURCES = ("quote", "kline", "fund_flow", "financial")
+LONG_WATCH_MIN_SCORE = 70
 
 
 def _to_float(value: Any, default: float = 0.0) -> float:
@@ -78,6 +79,17 @@ def _valuation_zone(price: float, valuation_anchor: dict[str, Any] | None) -> st
     return "unknown"
 
 
+def _current_long_evidence_ids(thesis: dict[str, Any]) -> list[str]:
+    values = thesis.get("current_long_evidence_ids")
+    if not isinstance(values, list):
+        return []
+    return list(dict.fromkeys(
+        str(value).strip()
+        for value in values
+        if str(value).strip()
+    ))
+
+
 def score_long_quality(snapshot: dict[str, Any], thesis: dict[str, Any] | None) -> dict[str, Any]:
     """Return long-horizon quality fields without creating a buy signal."""
     price = _to_float((snapshot.get("quote") or {}).get("price"))
@@ -88,11 +100,22 @@ def score_long_quality(snapshot: dict[str, Any], thesis: dict[str, Any] | None) 
             "valuation_zone": "unknown",
             "red_line_status": "",
             "long_horizon_reason": "",
+            "verification_status": "",
+            "current_long_evidence_ids": [],
         }
     status = evaluate_thesis_status(thesis)
     raw_quality = _to_float(thesis.get("quality_score") or thesis.get("score"))
-    thesis_status = str(status.get("status") or thesis.get("thesis_status") or "")
-    if thesis_status == "broken":
+    evaluated_status = str(status.get("status") or "")
+    declared_status = str(thesis.get("thesis_status") or "")
+    if evaluated_status == "broken" or declared_status == "broken":
+        thesis_status = "broken"
+    elif declared_status == "forming":
+        thesis_status = "forming"
+    elif evaluated_status in {"stale", "weakened"}:
+        thesis_status = evaluated_status
+    else:
+        thesis_status = declared_status or evaluated_status
+    if thesis_status in {"broken", "unknown"}:
         quality = 0
     elif thesis_status == "stale":
         quality = min(raw_quality, 40)
@@ -100,13 +123,78 @@ def score_long_quality(snapshot: dict[str, Any], thesis: dict[str, Any] | None) 
         quality = min(raw_quality, 60)
     else:
         quality = raw_quality
+    verification_status = str(thesis.get("verification_status") or "")
+    missing_verification = thesis.get("missing_verification")
+    if thesis_status == "unknown":
+        reason = "thesis_status_unknown"
+    elif thesis_status == "forming" or verification_status == "incomplete":
+        missing = (
+            [str(value) for value in missing_verification if str(value)]
+            if isinstance(missing_verification, list)
+            else []
+        )
+        reason = "verification_incomplete"
+        if missing:
+            reason += ":" + ",".join(missing)
+    elif declared_status == "broken" and evaluated_status != "broken":
+        reason = str(thesis.get("status_reason") or "thesis_marked_broken")
+    else:
+        reason = str(status.get("reason") or "")
     return {
         "long_quality_score": round(max(0, min(100, quality)), 1),
         "thesis_status": thesis_status,
         "valuation_zone": _valuation_zone(price, thesis.get("valuation_anchor")),
         "red_line_status": str(status.get("red_line_status") or ""),
-        "long_horizon_reason": str(status.get("reason") or ""),
+        "long_horizon_reason": reason,
+        "verification_status": verification_status,
+        "current_long_evidence_ids": _current_long_evidence_ids(thesis),
     }
+
+
+def next_target_status(
+    current_status: str,
+    action: str,
+    long_view: dict[str, Any] | None,
+    authorization_valid: bool = False,
+) -> str:
+    """Return the next lifecycle state without treating long quality as a buy gate."""
+    current = str(current_status or "watching")
+    normalized_action = str(action or "watch").strip().lower()
+    view = long_view if isinstance(long_view, dict) else {}
+    thesis_status = str(view.get("thesis_status") or "").strip().lower()
+    red_line_status = str(view.get("red_line_status") or "").strip().lower()
+    verification_status = str(
+        view.get("verification_status") or ""
+    ).strip().lower()
+    missing_verification = view.get("missing_verification")
+    verification_missing = (
+        verification_status == "incomplete"
+        or isinstance(missing_verification, list) and bool(missing_verification)
+    )
+
+    if normalized_action in {"remove", "removed", "exit", "sell"}:
+        return "removed"
+    if normalized_action == "exit_candidate":
+        return "exit_candidate"
+    if thesis_status == "broken" or red_line_status == "triggered":
+        return "thesis_review"
+    if thesis_status == "forming" or verification_missing:
+        return "long_research"
+    if normalized_action in {"buy", "add"}:
+        if authorization_valid:
+            return "executable"
+        return current if current in LONG_HORIZON_STATUSES else "watching"
+    if (
+        current == "long_research"
+        and thesis_status == "healthy"
+        and _to_float(view.get("long_quality_score")) >= LONG_WATCH_MIN_SCORE
+    ):
+        return "long_watch"
+    if current in LONG_HORIZON_STATUSES:
+        return current
+    if normalized_action == "research_only":
+        return "research_reference"
+    return "watching"
 
 
 def score_target(

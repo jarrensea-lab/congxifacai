@@ -290,6 +290,1161 @@ async def test_run_analysis_and_debate_propagate_growth_sprint_profile(monkeypat
     assert "现金底线: 10%" in captured["holdings_data"]
 
 
+@pytest.mark.asyncio
+async def test_run_debate_passes_active_strategy_profile_to_account_constraints(monkeypatch):
+    import app.ai.debate as debate_module
+    import app.engine.workshop as workshop_module
+
+    profile = {
+        "mode": "growth_sprint",
+        "title": "高收益试验模式",
+        "cash_reserve_pct": 10,
+        "single_position_limit_pct": 50,
+    }
+    captured = {}
+
+    class FakeEngine:
+        async def debate(self, market_data, holdings_data, news, role_performance=""):
+            return {
+                "final": {
+                    "final_decision": "观望",
+                    "confidence": 6,
+                    "short_term": {},
+                    "mid_low_freq": {},
+                    "position_plan": {"entries": []},
+                },
+                "debate": {},
+            }
+
+    real_apply = workshop_module._apply_account_constraints
+
+    def capture_profile(*args, **kwargs):
+        captured["strategy_profile"] = kwargs.get("strategy_profile")
+        return real_apply(*args, **kwargs)
+
+    monkeypatch.setattr(debate_module, "AIDebateEngine", FakeEngine)
+    monkeypatch.setattr(workshop_module, "_apply_account_constraints", capture_profile)
+
+    await workshop_module.run_debate({
+        "available_cash": 3000,
+        "total_assets": 3000,
+        "holdings_str": "空仓",
+        "strategy_profile": profile,
+        "news": [],
+    })
+
+    assert captured["strategy_profile"] is profile
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("engine_runtime_status", "expected_status", "expected_reason"),
+    [
+        (
+            {
+                "status": "success",
+                "providers": ["DeepSeek", "Qwen"],
+                "calls": [{
+                    "role": "输出校验",
+                    "provider": "DeepSeek",
+                    "attempted_provider": "DeepSeek",
+                    "requested_provider": "DeepSeek",
+                    "status": "success",
+                    "output_usable": True,
+                }],
+                "degradation_reasons": [],
+            },
+            "success",
+            None,
+        ),
+        (
+            {
+                "status": "degraded",
+                "providers": ["DeepSeek"],
+                "calls": [{
+                    "role": "输出校验",
+                    "provider": "DeepSeek",
+                    "attempted_provider": "DeepSeek",
+                    "requested_provider": "Qwen",
+                    "status": "degraded",
+                    "fallback_reason": "qwen_api_key_missing",
+                    "output_usable": True,
+                }],
+                "degradation_reasons": ["qwen_api_key_missing"],
+            },
+            "degraded",
+            "qwen_api_key_missing",
+        ),
+        (None, "unavailable", "runtime_status_unavailable"),
+    ],
+)
+async def test_run_debate_exposes_structured_model_runtime_status(
+    monkeypatch,
+    engine_runtime_status,
+    expected_status,
+    expected_reason,
+):
+    import app.ai.debate as debate_module
+    from app.engine.workshop import run_debate
+
+    class FakeEngine:
+        async def debate(
+            self,
+            market_data,
+            holdings_data,
+            news,
+            role_performance="",
+        ):
+            result = {
+                "final": {
+                    "final_decision": "观望",
+                    "confidence": 6,
+                    "short_term": {},
+                    "mid_low_freq": {},
+                    "position_plan": {"entries": []},
+                },
+                "debate": {},
+                "quality": {"pass": True, "score": 80},
+            }
+            if engine_runtime_status is not None:
+                result["model_runtime_status"] = engine_runtime_status
+            return result
+
+    monkeypatch.setattr(debate_module, "AIDebateEngine", FakeEngine)
+
+    result = await run_debate(
+        {
+            "available_cash": 3000,
+            "total_assets": 3000,
+            "holdings_str": "空仓",
+            "news": [],
+        }
+    )
+
+    runtime = result["model_runtime_status"]
+    assert runtime["status"] == expected_status
+    if expected_reason:
+        assert expected_reason in runtime["degradation_reasons"]
+
+
+def test_runtime_builder_cannot_report_success_without_usable_provider_output():
+    from app.ai.debate import build_model_runtime_status
+
+    unusable = build_model_runtime_status([{
+        "role": "输出校验",
+        "provider": "DeepSeek",
+        "attempted_provider": "DeepSeek",
+        "requested_provider": "DeepSeek",
+        "model": "validator-model",
+        "status": "success",
+        "output_usable": False,
+    }])
+    provider_missing = build_model_runtime_status([{
+        "role": "输出校验",
+        "provider": "",
+        "attempted_provider": "DeepSeek",
+        "requested_provider": "DeepSeek",
+        "model": "validator-model",
+        "status": "success",
+        "output_usable": True,
+    }])
+
+    assert unusable["status"] == "degraded"
+    assert unusable["providers"] == []
+    assert "required_output_unusable" in unusable["degradation_reasons"]
+    assert provider_missing["status"] == "degraded"
+    assert provider_missing["providers"] == []
+    assert "successful_provider_missing" in provider_missing[
+        "degradation_reasons"
+    ]
+
+
+def test_runtime_normalizer_reconciles_contradictory_success_claims():
+    from app.engine.workshop import normalize_model_runtime_status
+
+    runtime = normalize_model_runtime_status({
+        "status": "success",
+        "providers": ["DeepSeek"],
+        "calls": [{
+            "role": "输出校验",
+            "provider": "DeepSeek",
+            "attempted_provider": "DeepSeek",
+            "requested_provider": "DeepSeek",
+            "status": "success",
+            "output_usable": False,
+        }],
+        "degradation_reasons": [],
+    })
+    no_calls = normalize_model_runtime_status({
+        "status": "success",
+        "providers": ["DeepSeek"],
+        "calls": [],
+        "degradation_reasons": [],
+    })
+
+    assert runtime["status"] == "degraded"
+    assert runtime["providers"] == []
+    assert "required_output_unusable" in runtime["degradation_reasons"]
+    assert no_calls["status"] == "unavailable"
+    assert no_calls["providers"] == []
+    assert "runtime_status_unavailable" in no_calls["degradation_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_cloud_client_marks_qwen_missing_key_fallback_as_degraded_route(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudClient
+    from app.config import settings
+
+    client = CloudClient.__new__(CloudClient)
+
+    async def fake_deepseek(
+        model_name,
+        messages,
+        model_key="",
+        **kwargs,
+    ):
+        return {
+            "content": "{}",
+            "model": model_name,
+            "provider": "DeepSeek",
+        }
+
+    monkeypatch.setattr(settings, "QWEN_API_KEY", "")
+    monkeypatch.setattr(client, "_call_deepseek", fake_deepseek)
+
+    result = await client.chat(
+        "qwen_judge",
+        [{"role": "user", "content": "test"}],
+    )
+
+    assert result["provider"] == "DeepSeek"
+    assert result["requested_provider"] == "Qwen"
+    assert result["fallback_reason"] == "qwen_api_key_missing"
+
+
+@pytest.mark.asyncio
+async def test_qwen_missing_key_preserves_deepseek_route_when_fallback_fails(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudClient
+    from app.config import settings
+
+    client = CloudClient.__new__(CloudClient)
+
+    async def failed_deepseek(*args, **kwargs):
+        raise RuntimeError("authorization=SECRET-DO-NOT-REPORT")
+
+    monkeypatch.setattr(settings, "QWEN_API_KEY", "")
+    monkeypatch.setattr(client, "_call_deepseek", failed_deepseek)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.chat(
+            "qwen_judge",
+            [{"role": "user", "content": "test"}],
+        )
+
+    error = exc_info.value
+    assert error.provider == ""
+    assert error.attempted_provider == "DeepSeek"
+    assert error.requested_provider == "Qwen"
+    assert error.fallback_reason == "qwen_api_key_missing"
+    assert error.degradation_reason == "cloud_call_failed"
+    assert "SECRET" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_ai_role_keeps_failed_qwen_fallback_route_in_runtime_truth(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudRouteError, cloud
+    from app.ai.debate import AIDebateEngine, build_model_runtime_status
+
+    async def failed_chat(*args, **kwargs):
+        raise CloudRouteError(
+            attempted_provider="DeepSeek",
+            requested_provider="Qwen",
+            model="deepseek-chat",
+            fallback_reason="qwen_api_key_missing",
+            degradation_reason="cloud_call_failed",
+        )
+
+    monkeypatch.setattr(cloud, "chat", failed_chat)
+
+    call = await AIDebateEngine()._call_role(
+        "裁判",
+        "test",
+        "cloud-judge",
+    )
+    runtime = build_model_runtime_status([
+        {"role": "裁判", **call},
+    ])
+
+    assert call["provider"] == ""
+    assert call["attempted_provider"] == "DeepSeek"
+    assert call["requested_provider"] == "Qwen"
+    assert call["fallback_reason"] == "qwen_api_key_missing"
+    assert call["degradation_reason"] == "cloud_call_failed"
+    assert runtime["status"] == "degraded"
+    assert runtime["providers"] == []
+    assert runtime["degradation_reasons"] == [
+        "qwen_api_key_missing",
+        "cloud_call_failed",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("qwen_fallback", "expected_status", "expected_providers"),
+    [
+        (False, "success", ["DeepSeek", "Qwen"]),
+        (True, "degraded", ["DeepSeek"]),
+    ],
+)
+async def test_ai_debate_engine_collects_actual_provider_routes(
+    monkeypatch,
+    qwen_fallback,
+    expected_status,
+    expected_providers,
+):
+    from app.ai.debate import AIDebateEngine
+
+    engine = AIDebateEngine()
+
+    async def fake_call_role(
+        name,
+        prompt,
+        model,
+        num_predict=0,
+        retries=1,
+        timeout=120.0,
+    ):
+        requested_qwen = model in {"qwen-researcher", "cloud-judge"}
+        provider = (
+            "DeepSeek"
+            if requested_qwen and qwen_fallback
+            else ("Qwen" if requested_qwen else "DeepSeek")
+        )
+        payload = (
+            {
+                "final_decision": "观望",
+                "confidence": 6,
+                "short_term": {},
+                "mid_low_freq": {},
+            }
+            if name == "裁判"
+            else {"analysis": f"{name}观点"}
+        )
+        return {
+            "content": json.dumps(payload, ensure_ascii=False),
+            "thinking": "",
+            "provider": provider,
+            "requested_provider": (
+                "Qwen" if requested_qwen else "DeepSeek"
+            ),
+            "model": "test-model",
+            "status": (
+                "degraded"
+                if requested_qwen and qwen_fallback
+                else "success"
+            ),
+            "fallback_reason": (
+                "qwen_api_key_missing"
+                if requested_qwen and qwen_fallback
+                else ""
+            ),
+        }
+
+    async def fake_validate_with_route(content):
+        return (
+            {"pass": True, "score": 90, "issues": []},
+            {
+                "provider": "DeepSeek",
+                "attempted_provider": "DeepSeek",
+                "requested_provider": "DeepSeek",
+                "model": "validator-model",
+                "status": "success",
+                "fallback_reason": "",
+                "degradation_reason": "",
+                "output_usable": True,
+            },
+        )
+
+    monkeypatch.setattr(engine, "_call_role", fake_call_role)
+    monkeypatch.setattr(
+        engine,
+        "validate_output_with_route",
+        fake_validate_with_route,
+    )
+
+    result = await engine.debate("{}", "空仓", "[]")
+    runtime = result["model_runtime_status"]
+
+    assert runtime["status"] == expected_status
+    assert runtime["providers"] == expected_providers
+    assert [call["role"] for call in runtime["calls"]] == [
+        "猎手",
+        "账房",
+        "守夜人",
+        "Serenity·研究员",
+        "裁判",
+        "输出校验",
+    ]
+    if qwen_fallback:
+        assert "qwen_api_key_missing" in runtime["degradation_reasons"]
+
+
+@pytest.mark.asyncio
+async def test_validator_failure_degrades_runtime_and_production_gate(monkeypatch):
+    from app.ai.debate import AIDebateEngine
+    from app.engine.workshop import build_production_gate
+
+    engine = AIDebateEngine()
+
+    async def successful_role(
+        name,
+        prompt,
+        model,
+        num_predict=0,
+        retries=1,
+        timeout=120.0,
+    ):
+        payload = (
+            {
+                "final_decision": "观望",
+                "confidence": 6,
+                "short_term": {},
+                "mid_low_freq": {},
+            }
+            if name == "裁判"
+            else {"analysis": f"{name}观点"}
+        )
+        provider = "Qwen" if model in {"qwen-researcher", "cloud-judge"} else "DeepSeek"
+        return {
+            "content": json.dumps(payload, ensure_ascii=False),
+            "thinking": "",
+            "provider": provider,
+            "attempted_provider": provider,
+            "requested_provider": provider,
+            "model": "test-model",
+            "status": "success",
+            "fallback_reason": "",
+            "degradation_reason": "",
+            "output_usable": True,
+        }
+
+    async def failed_validator(content):
+        return (
+            {
+                "pass": False,
+                "score": 0,
+                "issues": ["validator_call_failed"],
+                "summary": "校验失败，禁止进入生产池",
+            },
+            {
+                "provider": "",
+                "attempted_provider": "DeepSeek",
+                "requested_provider": "DeepSeek",
+                "model": "validator-model",
+                "status": "degraded",
+                "fallback_reason": "",
+                "degradation_reason": "validator_call_failed",
+                "output_usable": False,
+            },
+        )
+
+    monkeypatch.setattr(engine, "_call_role", successful_role)
+    monkeypatch.setattr(
+        engine,
+        "validate_output_with_route",
+        failed_validator,
+    )
+
+    result = await engine.debate("{}", "空仓", "[]")
+    runtime = result["model_runtime_status"]
+    validator_calls = [
+        call for call in runtime["calls"] if call["role"] == "输出校验"
+    ]
+    gate = build_production_gate(result)
+
+    assert len(validator_calls) == 1
+    assert validator_calls[0]["attempted_provider"] == "DeepSeek"
+    assert validator_calls[0]["provider"] == ""
+    assert "validator_call_failed" in runtime["degradation_reasons"]
+    assert runtime["status"] == "degraded"
+    assert gate["allowed"] is False
+    assert "validator_route_degraded" in gate["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_validator_route_supports_successful_fallback_metadata(monkeypatch):
+    from app.ai.cloud_client import cloud
+    from app.ai.debate import AIDebateEngine, build_model_runtime_status
+
+    async def fallback_validator(*args, **kwargs):
+        return {
+            "content": json.dumps(
+                {"pass": True, "score": 9, "issues": []},
+                ensure_ascii=False,
+            ),
+            "provider": "DeepSeek",
+            "requested_provider": "Qwen",
+            "model": "deepseek-chat",
+            "fallback_reason": "qwen_api_key_missing",
+        }
+
+    monkeypatch.setattr(cloud, "chat", fallback_validator)
+
+    quality, route = await AIDebateEngine().validate_output_with_route("{}")
+    runtime = build_model_runtime_status([
+        {"role": "输出校验", **route},
+    ])
+
+    assert quality["pass"] is True
+    assert route["provider"] == "DeepSeek"
+    assert route["attempted_provider"] == "DeepSeek"
+    assert route["output_usable"] is True
+    assert runtime["providers"] == ["DeepSeek"]
+    assert runtime["status"] == "degraded"
+    assert runtime["degradation_reasons"] == ["qwen_api_key_missing"]
+
+
+@pytest.mark.asyncio
+async def test_validator_exception_is_sanitized_from_result_and_logs(
+    monkeypatch,
+    caplog,
+):
+    from app.ai.cloud_client import cloud
+    from app.ai.debate import AIDebateEngine
+
+    secret = "authorization=SECRET&provider_response=PRIVATE"
+
+    async def failed_validator(*args, **kwargs):
+        raise RuntimeError(secret)
+
+    monkeypatch.setattr(cloud, "chat", failed_validator)
+
+    with caplog.at_level("ERROR"):
+        quality, route = await AIDebateEngine().validate_output_with_route(
+            '{"final_decision":"观望"}'
+        )
+
+    artifact = json.dumps(
+        {"quality": quality, "route": route},
+        ensure_ascii=False,
+    ) + caplog.text
+    assert quality["issues"] == ["validator_call_failed"]
+    assert route["degradation_reason"] == "validator_call_failed"
+    assert "SECRET" not in artifact
+    assert "provider_response" not in artifact
+    assert "authorization=" not in artifact
+
+
+def test_debate_prompts_defer_cash_and_position_limits_to_injected_profile():
+    source = Path("backend/app/ai/debate.py").read_text(encoding="utf-8")
+
+    for stale_rule in (
+        "留足30%现金",
+        "至少保留 30% 总资产",
+        "单票不超20%",
+        "单票不超过 10%",
+        "单票不超过10%",
+    ):
+        assert stale_rule not in source
+    assert source.count("服从【持仓情况】中注入的【当前策略模式】") >= 6
+
+
+@pytest.mark.asyncio
+async def test_cloud_client_deepseek_400_fails_closed_without_response_body_leak(
+    monkeypatch,
+):
+    from app.ai.cloud_client import CloudClient
+    from app.config import settings
+
+    class FailedResponse:
+        status_code = 400
+        text = "authorization=SECRET-DO-NOT-LEAK"
+
+    class FakeHttpClient:
+        async def post(self, *args, **kwargs):
+            return FailedResponse()
+
+    client = CloudClient.__new__(CloudClient)
+    client._client = FakeHttpClient()
+    monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", "test-key")
+
+    with pytest.raises(RuntimeError) as exc_info:
+        await client.chat(
+            "reporter",
+            [{"role": "user", "content": "ping"}],
+            max_tokens=10,
+        )
+
+    assert "DeepSeek API 400" in str(exc_info.value)
+    assert "SECRET" not in str(exc_info.value)
+    assert await client.is_available() is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_fails_closed_when_all_index_sources_fail(
+    monkeypatch,
+):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def no_primary_quote(code):
+        return None
+
+    async def failed_fallback(codes):
+        raise RuntimeError("authorization=SECRET-DO-NOT-REPORT")
+
+    monkeypatch.setattr(main_module.data_router, "fetch", no_primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", failed_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] == "failed"
+    assert result["market_source_status"]["provider"] == "data_router+tencent"
+    assert result["market_source_status"]["data_cutoff"] is None
+    assert result["market_source_status"]["error"]
+    assert "SECRET" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("quotes", "raises", "expected_status"),
+    [
+        ({}, True, "failed"),
+        (
+            {
+                "sh000001": {
+                    "price": 4012.3,
+                    "change_pct": 0.4,
+                    "source": "test_provider",
+                    "quote_timestamp": datetime.now().astimezone().isoformat(),
+                    "freshness": "fresh",
+                }
+            },
+            False,
+            "degraded",
+        ),
+    ],
+)
+async def test_legacy_premarket_entry_never_substitutes_fixed_index_values(
+    quotes,
+    raises,
+    expected_status,
+):
+    from scripts.run_premarket import build_premarket_market_data
+
+    class FakeMarketSource:
+        name = "test_provider"
+
+        async def fetch_batch(self, codes):
+            if raises:
+                raise RuntimeError("provider unavailable")
+            return quotes
+
+    result = await build_premarket_market_data(
+        {
+            "holdings": [],
+            "holdings_str": "空仓",
+            "available_cash": 6000,
+        },
+        market_source=FakeMarketSource(),
+    )
+
+    assert result["market_source_status"]["status"] == expected_status
+    index_prices = [
+        value.get("price") if isinstance(value, dict) else value
+        for value in result["indices"].values()
+    ]
+    assert 3350 not in index_prices
+    assert 10800 not in index_prices
+    if expected_status == "failed":
+        assert result["indices"] == {}
+    else:
+        assert list(result["indices"]) == ["sh000001"]
+
+
+def test_run_premarket_import_preserves_cwd_and_resolves_absolute_project_paths(
+    tmp_path,
+):
+    project_root = Path.cwd().resolve()
+    probe_cwd = tmp_path / "independent-cwd"
+    probe_cwd.mkdir()
+    env = os.environ.copy()
+    python_path = [
+        str(project_root),
+        str(project_root / "backend"),
+    ]
+    if env.get("PYTHONPATH"):
+        python_path.append(env["PYTHONPATH"])
+    env["PYTHONPATH"] = os.pathsep.join(python_path)
+    probe = """
+import os
+from pathlib import Path
+
+before = Path.cwd()
+from scripts import run_premarket
+
+assert Path.cwd() == before
+assert Path(run_premarket.PROJECT_ROOT).resolve() == Path(os.environ["EXPECTED_ROOT"])
+assert Path(os.environ["DOTENV_PATH"]).resolve() == Path(os.environ["EXPECTED_ROOT"]) / ".env.local"
+"""
+    env["EXPECTED_ROOT"] = str(project_root)
+
+    result = subprocess.run(
+        [sys.executable, "-c", probe],
+        cwd=probe_cwd,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=15,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.asyncio
+async def test_manual_strategy_analysis_passes_failed_market_truth_without_placeholders(
+    monkeypatch,
+):
+    from app.routers import strategy
+
+    captured = {}
+
+    class FakeDb:
+        def commit(self):
+            pass
+
+    class FakeInstance:
+        id = 17
+        analysis_report = None
+        status = "created"
+
+    class FakeLifecycle:
+        def __init__(self):
+            self.db = FakeDb()
+            self.instance = FakeInstance()
+
+        def create_instance(self):
+            return self.instance
+
+        def close(self):
+            pass
+
+    async def failed_market_snapshot(*args, **kwargs):
+        return {
+            "indices": {},
+            "market_source_status": {
+                "status": "failed",
+                "provider": "fast_realtime_market_data",
+                "data_cutoff": None,
+                "freshness_status": "failed",
+                "error": "market_index_fetch_failed",
+                "missing_sources": ["sh000001", "sz399001", "sz399006"],
+                "rejected_sources": [],
+                "coverage": {"expected": 3, "verified": 0},
+            },
+        }
+
+    async def capture_analysis(market_data):
+        captured["market_data"] = market_data
+        return {"overall_bias": "neutral"}
+
+    monkeypatch.setattr(strategy, "StrategyLifecycle", FakeLifecycle)
+    monkeypatch.setattr(
+        strategy,
+        "_get_holdings_data_fn",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "空仓",
+            "available_cash": 6000,
+            "total_assets": 6000,
+        },
+    )
+    monkeypatch.setattr(
+        strategy,
+        "fetch_market_index_snapshot",
+        failed_market_snapshot,
+        raising=False,
+    )
+    monkeypatch.setattr(strategy, "run_analysis", capture_analysis)
+
+    response = await strategy.trigger_analysis()
+
+    market_data = captured["market_data"]
+    assert response["strategy_id"] == 17
+    assert market_data["indices"] == {}
+    assert market_data["market_source_status"]["status"] == "failed"
+    assert 3350 not in market_data["indices"].values()
+    assert 10800 not in market_data["indices"].values()
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_fallback_requires_all_three_indices(monkeypatch):
+    import app.main as main_module
+
+    requested_codes = []
+    fresh_cutoff = datetime.now().astimezone().isoformat()
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def no_primary_quote(code):
+        return None
+
+    async def partial_fallback(codes):
+        requested_codes.extend(codes)
+        return {
+            code: {
+                "price": 4000,
+                "source": "tencent",
+                "quote_timestamp": fresh_cutoff,
+                "freshness": "fresh",
+            }
+            for code in codes
+            if code != "sz399006"
+        }
+
+    monkeypatch.setattr(main_module.data_router, "fetch", no_primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", partial_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert requested_codes == ["sh000001", "sz399001", "sz399006"]
+    assert list(result["indices"]) == ["sh000001", "sz399001"]
+    assert result["market_source_status"]["status"] == "degraded"
+    assert result["market_source_status"]["coverage"] == {
+        "expected": 3,
+        "verified": 2,
+    }
+    assert result["market_source_status"]["missing_sources"] == ["sz399006"]
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_reports_real_index_source_and_cutoff(monkeypatch):
+    import app.main as main_module
+
+    fresh_cutoff = datetime.now().astimezone().isoformat()
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "change_pct": 1.2,
+            "source": "tencent",
+            "quote_timestamp": fresh_cutoff,
+            "freshness": "fresh",
+        }
+
+    async def unexpected_fallback(codes):
+        raise AssertionError("fallback should not be called after real quotes")
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", unexpected_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert len(result["indices"]) == 3
+    assert result["market_source_status"] == {
+        "status": "ok",
+        "provider": "tencent",
+        "data_cutoff": fresh_cutoff,
+        "freshness_status": "fresh",
+        "error": "",
+        "missing_sources": [],
+        "rejected_sources": [],
+        "coverage": {"expected": 3, "verified": 3},
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("freshness", ["stale", "conflict", "unknown", "failed"])
+async def test_fetch_market_data_rejects_unfresh_source_quotes(
+    monkeypatch,
+    freshness,
+):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "change_pct": 1.2,
+            "source": "tencent",
+            "quote_timestamp": datetime.now().astimezone().isoformat(),
+            "freshness": freshness,
+        }
+
+    async def empty_fallback(codes):
+        return {}
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", empty_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] != "ok"
+    assert result["market_source_status"]["freshness_status"] != "fresh"
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_rejects_captured_at_as_data_cutoff(monkeypatch):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "source": "tencent",
+            "captured_at": datetime.now().astimezone().isoformat(),
+            "freshness": "fresh",
+        }
+
+    async def empty_fallback(codes):
+        return {}
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", empty_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] != "ok"
+    assert result["market_source_status"]["data_cutoff"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_rejects_expired_data_cutoff(monkeypatch):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "source": "tencent",
+            "quote_timestamp": (
+                datetime.now().astimezone() - timedelta(hours=1)
+            ).isoformat(),
+            "freshness": "fresh",
+        }
+
+    async def empty_fallback(codes):
+        return {}
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", empty_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert result["indices"] == {}
+    assert result["market_source_status"]["status"] != "ok"
+    assert result["market_source_status"]["data_cutoff"] is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_market_data_does_not_mark_mixed_freshness_ok(monkeypatch):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    async def primary_quote(code):
+        return {
+            "price": 4000,
+            "source": "tencent",
+            "quote_timestamp": datetime.now().astimezone().isoformat(),
+            "freshness": "fresh" if code == "sh000001" else "stale",
+        }
+
+    async def unexpected_fallback(codes):
+        raise AssertionError("partial primary data should be classified, not replaced")
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", unexpected_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+
+    assert list(result["indices"]) == ["sh000001"]
+    assert result["market_source_status"]["status"] == "degraded"
+    assert result["market_source_status"]["freshness_status"] == "degraded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "partial_kind",
+    [
+        "none",
+        "exception",
+        "empty",
+        "price_zero",
+        "price_nan",
+        "price_inf",
+        "price_negative_inf",
+    ],
+)
+async def test_fetch_market_data_degrades_incomplete_index_coverage(
+    monkeypatch,
+    partial_kind,
+):
+    import app.main as main_module
+
+    class FakeDb:
+        def close(self):
+            pass
+
+    def fresh_quote():
+        return {
+            "price": 4000,
+            "source": "tencent",
+            "quote_timestamp": datetime.now().astimezone().isoformat(),
+            "freshness": "fresh",
+        }
+
+    async def primary_quote(code):
+        if code != "sz399001":
+            return fresh_quote()
+        if partial_kind == "none":
+            return None
+        if partial_kind == "exception":
+            raise RuntimeError("index source failed")
+        if partial_kind == "empty":
+            return {}
+        invalid_prices = {
+            "price_zero": 0,
+            "price_nan": float("nan"),
+            "price_inf": float("inf"),
+            "price_negative_inf": float("-inf"),
+        }
+        return {**fresh_quote(), "price": invalid_prices[partial_kind]}
+
+    async def unexpected_fallback(codes):
+        raise AssertionError("partial primary data should be classified, not replaced")
+
+    monkeypatch.setattr(main_module.data_router, "fetch", primary_quote)
+    monkeypatch.setattr(main_module.tencent_client, "fetch_batch", unexpected_fallback)
+    monkeypatch.setattr(main_module, "SessionLocal", FakeDb)
+    monkeypatch.setattr(
+        main_module,
+        "_get_holdings_data",
+        lambda db: {
+            "holdings": [],
+            "holdings_str": "无持仓",
+            "available_cash": 3000,
+            "total_assets": 3000,
+        },
+    )
+
+    result = await main_module._fetch_market_data()
+    source_status = result["market_source_status"]
+
+    assert list(result["indices"]) == ["sh000001", "sz399006"]
+    assert source_status["status"] == "degraded"
+    assert source_status["freshness_status"] == "degraded"
+    assert "sz399001" in (
+        source_status["missing_sources"] + source_status["rejected_sources"]
+    )
+
+
 def test_repair_final_decision_uses_roles_when_judge_json_invalid():
     """If judge output is unparsable, synthesize a usable conservative decision."""
     from app.engine.workshop import _repair_final_decision

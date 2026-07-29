@@ -5,6 +5,7 @@ import pytest
 
 from app.services.quant_lifecycle import (
     CandidatePoolStore,
+    LONG_HORIZON_STATUSES,
     PositionWatchStore,
     TargetPoolStore,
     evaluate_candidate_pool,
@@ -1634,6 +1635,193 @@ def test_target_pool_long_horizon_states_are_not_intraday_scan_active(tmp_path):
     assert store.get("000003")["status"] == "accumulation_zone"
 
 
+@pytest.mark.parametrize(
+    "long_status",
+    sorted(LONG_HORIZON_STATUSES),
+)
+@pytest.mark.parametrize("requested_status", ["watching", "research_reference"])
+def test_target_scoring_cannot_downgrade_long_horizon_status(
+    tmp_path,
+    long_status,
+    requested_status,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status=long_status,
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v2"],
+    )
+
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status=requested_status,
+        source="target_scoring",
+        scoring_decision={
+            "action": "watch",
+            "score": 88,
+            "source_status": {
+                "quote": "ok",
+                "kline": "ok",
+                "fund_flow": "ok",
+                "financial": "ok",
+            },
+            "current_long_evidence_ids": ["long-thesis:002123:v2"],
+        },
+        current_long_evidence_ids=["long-thesis:002123:v2"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    item = store.get("002123")
+    assert item["status"] == long_status
+    assert item["current_long_evidence_ids"] == ["long-thesis:002123:v2"]
+    assert item["scoring_decision"]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2"
+    ]
+
+
+@pytest.mark.parametrize(
+    "long_status",
+    sorted(LONG_HORIZON_STATUSES),
+)
+def test_target_scoring_cannot_promote_long_horizon_without_production_approval(
+    tmp_path,
+    long_status,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status=long_status,
+        source="long_horizon",
+    )
+    assert store.get("002123")["production_eligibility"]["eligible"] is False
+
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(action="buy"),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    assert store.get("002123")["status"] == long_status
+
+
+def test_target_scoring_can_explicitly_remove_long_horizon_target(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status="long_watch",
+        source="long_horizon",
+    )
+
+    store.upsert_target(
+        code="002123",
+        name="长期标的",
+        status="removed",
+        source="target_scoring",
+        scoring_decision={"action": "remove"},
+    )
+
+    assert store.get("002123")["status"] == "removed"
+
+
+def test_target_pool_batch_upsert_reuses_preloaded_map_without_reloading(
+    monkeypatch,
+    tmp_path,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="批量评分一",
+        status="watching",
+        source="manual",
+    )
+    store.upsert_target(
+        code="000001",
+        name="批量评分二",
+        status="watching",
+        source="manual",
+    )
+    payload = store.load()
+    load_calls = 0
+    original_load = store.load
+
+    def counting_load():
+        nonlocal load_calls
+        load_calls += 1
+        return original_load()
+
+    monkeypatch.setattr(store, "load", counting_load)
+    batch_upsert = getattr(store, "upsert_targets", None)
+
+    assert callable(batch_upsert)
+    assert batch_upsert(
+        [
+            {
+                "code": "002123",
+                "name": "批量评分一",
+                "status": "watching",
+                "source": "target_scoring",
+                "scoring_decision": full_score_decision(action="watch"),
+            },
+            {
+                "code": "000001",
+                "name": "批量评分二",
+                "status": "watching",
+                "source": "target_scoring",
+                "scoring_decision": full_score_decision(action="watch"),
+            },
+        ],
+        payload=payload,
+    ) == 2
+    assert load_calls == 0
+    assert original_load()["items"]["002123"]["source"] == "target_scoring"
+    assert original_load()["items"]["000001"]["source"] == "target_scoring"
+
+
+def test_target_pool_batch_upsert_persists_pool_kind(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    payload = store.load()
+
+    assert store.upsert_targets(
+        [
+            {
+                "code": "600000",
+                "name": "中长线标的",
+                "status": "research_reference",
+                "pool_kind": "mid_long_term",
+                "source": "target_scoring",
+                "scoring_decision": full_score_decision(action="research_only"),
+            }
+        ],
+        payload=payload,
+    ) == 1
+    assert store.get("600000")["pool_kind"] == "mid_long_term"
+
+
+def test_long_horizon_upsert_defaults_to_mid_long_pool(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+
+    store.upsert_target(
+        code="600000",
+        name="中长线论文标的",
+        status="long_watch",
+        source="long_horizon",
+    )
+
+    assert store.get("600000")["pool_kind"] == "mid_long_term"
+
+
 def test_target_pool_cooldown_after_loss_is_durable_and_not_scan_active(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
     store.upsert_target(
@@ -1690,6 +1878,43 @@ def test_target_pool_routes_unaffordable_serenity_candidate_to_research_referenc
     assert item["execution"]["block_reason"] == "lot_size_exceeded"
 
 
+def test_target_pool_research_overlay_entry_is_fail_closed_for_new_target(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    merge_overlay = getattr(store, "merge_research_overlay", None)
+
+    assert callable(merge_overlay)
+    outcome = merge_overlay(
+        code="688008",
+        name="澜起科技",
+        overlay_name="sentinel_serenity",
+        status="research_reference",
+        source="sentinel_serenity",
+        evidence_ids=["ev_test"],
+        evidence={
+            "stage": "shadow_only",
+            "boundary": "research_only",
+            "research_only": True,
+        },
+        serenity={"score": 62.5},
+    )
+
+    item = store.get("688008")
+    assert outcome["accepted"] is True
+    assert outcome["changed"] is True
+    assert item["status"] == "research_reference"
+    assert item["source"] == "sentinel_serenity"
+    assert item["production_eligibility"]["eligible"] is False
+    assert item["provenance"]["research_only"] is True
+    assert item["evidence"].get("stage") is None
+    assert item["evidence"].get("boundary") is None
+    assert item["evidence"].get("research_only") is None
+    assert item["research_overlays"]["sentinel_serenity"]["evidence"] == {
+        "stage": "shadow_only",
+        "boundary": "research_only",
+        "research_only": True,
+    }
+
+
 def test_target_pool_source_rewrite_cannot_promote_research_only_item(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
     store.upsert_target(
@@ -1707,6 +1932,7 @@ def test_target_pool_source_rewrite_cannot_promote_research_only_item(tmp_path):
         name="梦网科技",
         status="executable",
         source="target_scoring",
+        scoring_decision=full_score_decision(),
         current_price=3.2,
         available_cash=6085.61,
         total_assets=6085.61,
@@ -1718,6 +1944,222 @@ def test_target_pool_source_rewrite_cannot_promote_research_only_item(tmp_path):
     assert item["provenance"]["original_source"] == "sentinel_serenity"
     assert item["provenance"]["research_only"] is True
     assert item["production_eligibility"]["eligible"] is False
+
+
+def test_full_score_reauthorization_recovers_legacy_polluted_production_item(
+    tmp_path,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="历史污染标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    payload = store.load()
+    polluted = payload["items"]["002123"]
+    polluted["status"] = "research_reference"
+    polluted["source"] = "long_horizon"
+    polluted["provenance"] = {
+        "original_status": "executable",
+        "original_source": "target_scoring",
+        "research_only": True,
+    }
+    polluted["production_eligibility"] = {
+        "eligible": False,
+        "research_only": True,
+        "approved": False,
+        "original_status": "executable",
+        "original_source": "target_scoring",
+        "reason": "research_only_provenance",
+        "approval": {},
+    }
+    polluted["research_overlays"] = {
+        "long_horizon": {
+            "status": "long_research",
+            "source": "long_horizon",
+            "research_only": True,
+        }
+    }
+    store.save(payload)
+
+    store.upsert_target(
+        code="002123",
+        name="历史污染标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    restored = store.get("002123")
+    assert restored["status"] == "executable"
+    assert restored["source"] == "target_scoring"
+    assert restored["production_eligibility"]["eligible"] is True
+    assert restored["production_eligibility"]["research_only"] is False
+    assert restored["provenance"] == {
+        "original_status": "executable",
+        "original_source": "target_scoring",
+        "research_only": False,
+    }
+    assert restored["scoring_decision"]["authorization_valid"] is True
+    assert {item["code"] for item in store.active_items()} == {"002123"}
+
+
+def test_full_score_reauthorization_recovers_legacy_watching_item_without_prior_authorization(
+    tmp_path,
+):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    store.upsert_target(
+        code="002123",
+        name="历史观察标的",
+        status="watching",
+        source="target_scoring",
+        scoring_decision=full_score_decision(action="hold"),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    payload = store.load()
+    polluted = payload["items"]["002123"]
+    assert polluted["scoring_decision"]["authorization_valid"] is False
+    polluted["status"] = "research_reference"
+    polluted["source"] = "long_horizon"
+    polluted["provenance"] = {
+        "original_status": "watching",
+        "original_source": "target_scoring",
+        "research_only": True,
+    }
+    polluted["production_eligibility"] = {
+        "eligible": False,
+        "research_only": True,
+        "approved": False,
+        "original_status": "watching",
+        "original_source": "target_scoring",
+        "reason": "research_only_provenance",
+        "approval": {},
+    }
+    store.save(payload)
+
+    store.upsert_target(
+        code="002123",
+        name="历史观察标的",
+        status="executable",
+        source="target_scoring",
+        scoring_decision=full_score_decision(),
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    restored = store.get("002123")
+    assert restored["status"] == "executable"
+    assert restored["source"] == "target_scoring"
+    assert restored["production_eligibility"]["eligible"] is True
+    assert restored["production_eligibility"]["reason"] == "full_score_reauthorization"
+    assert restored["scoring_decision"]["authorization_valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("case", "current_patch", "prior_gate_patch", "prior_provenance_patch"),
+    [
+        ("wrong_current_source", {"source": "manual"}, {}, {}),
+        ("wrong_current_status", {"status": "watching"}, {}, {}),
+        (
+            "current_authorization_false",
+            {"scoring_decision": {"authorization_valid": False}},
+            {},
+            {},
+        ),
+        ("prior_gate_not_blocked", {}, {"eligible": True}, {}),
+        (
+            "prior_gate_wrong_reason",
+            {},
+            {"reason": "production_eligible"},
+            {},
+        ),
+        (
+            "prior_not_research_only",
+            {},
+            {},
+            {"research_only": False},
+        ),
+        (
+            "ordinary_manual_target",
+            {"source": "manual_production_approval"},
+            {},
+            {"original_source": "manual"},
+        ),
+        (
+            "ordinary_sentinel_target",
+            {},
+            {},
+            {"original_source": "sentinel_serenity"},
+        ),
+        (
+            "ordinary_long_horizon_target",
+            {},
+            {},
+            {"original_source": "long_horizon"},
+        ),
+        (
+            "nonproduction_original_status",
+            {},
+            {},
+            {"original_status": "research_reference"},
+        ),
+    ],
+)
+def test_full_score_reauthorization_rejects_nonlegacy_or_incomplete_provenance(
+    case,
+    current_patch,
+    prior_gate_patch,
+    prior_provenance_patch,
+):
+    current = {
+        "status": "executable",
+        "source": "target_scoring",
+        "scoring_decision": {"authorization_valid": True},
+        "production_approval": {
+            "state": "approved",
+            "approved_by": "self_declared",
+        },
+    }
+    current.update(current_patch)
+    prior_gate = {
+        "eligible": False,
+        "reason": "research_only_provenance",
+    }
+    prior_gate.update(prior_gate_patch)
+    prior_provenance = {
+        "research_only": True,
+        "original_source": "target_scoring",
+        "original_status": "watching",
+    }
+    prior_provenance.update(prior_provenance_patch)
+    prior = {
+        "status": "research_reference",
+        "source": "long_horizon",
+        "scoring_decision": {"authorization_valid": False},
+        "production_eligibility": prior_gate,
+        "provenance": prior_provenance,
+    }
+
+    eligibility = TargetPoolStore.production_eligibility_for(
+        current,
+        previous=prior,
+    )
+
+    assert eligibility["eligible"] is False, case
+    assert eligibility["research_only"] is True, case
+    assert eligibility["approved"] is False, case
+    assert eligibility["reason"] == "research_only_provenance", case
 
 
 def test_target_pool_rejects_self_declared_approval_for_research_only_item(tmp_path):

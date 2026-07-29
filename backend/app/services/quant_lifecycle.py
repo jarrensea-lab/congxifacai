@@ -1,6 +1,7 @@
 """Production candidate/position lifecycle for scheduled trading assistance."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -12,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from functools import wraps
 from pathlib import Path
 from threading import RLock
+from threading import local
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -20,6 +22,11 @@ from app.services.strategy_profile import (
     calculate_stop_loss_price,
     calculate_target_price,
     get_strategy_profile,
+)
+from app.services.long_horizon_transaction import (
+    transaction_journal_path_for_store,
+    transaction_lock_path_for_store,
+    writer_transaction_guard,
 )
 
 
@@ -169,25 +176,50 @@ ENTRY_SIGNAL_TTL_MINUTES = 30
 REQUIRED_SCORING_SOURCES = {"quote", "kline", "fund_flow", "financial"}
 MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _PROCESS_POOL_LOCK = RLock()
+_POOL_LOCK_CONTEXT = local()
 
 
 @contextmanager
 def _pool_lock(path: Path):
     lock_path = path.with_name(f".{path.name}.lock")
+    key = str(lock_path.resolve())
+    held = getattr(_POOL_LOCK_CONTEXT, "held", None)
+    if held is None:
+        held = set()
+        _POOL_LOCK_CONTEXT.held = held
+    if key in held:
+        yield
+        return
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with _PROCESS_POOL_LOCK, lock_path.open("a+", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        held.add(key)
         try:
             yield
         finally:
+            held.discard(key)
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def _locked_store_mutation(method):
     @wraps(method)
     def wrapped(self, *args, **kwargs):
-        with _pool_lock(self.path):
-            return method(self, *args, **kwargs)
+        transaction_lock_path = getattr(
+            self,
+            "transaction_lock_path",
+            transaction_lock_path_for_store(self.path),
+        )
+        transaction_journal_path = getattr(
+            self,
+            "transaction_journal_path",
+            transaction_journal_path_for_store(self.path),
+        )
+        with writer_transaction_guard(
+            transaction_lock_path,
+            transaction_journal_path,
+        ):
+            with _pool_lock(self.path):
+                return method(self, *args, **kwargs)
 
     return wrapped
 
@@ -225,8 +257,18 @@ class CandidatePoolStore:
         path: str | Path | None = None,
         *,
         execution_ledger_path: str | Path | None = None,
+        transaction_lock_path: str | Path | None = None,
+        transaction_journal_path: str | Path | None = None,
     ):
         self.path = Path(path) if path is not None else default_candidate_pool_path()
+        self.transaction_lock_path = transaction_lock_path_for_store(
+            self.path,
+            transaction_lock_path,
+        )
+        self.transaction_journal_path = transaction_journal_path_for_store(
+            self.path,
+            transaction_journal_path,
+        )
         if execution_ledger_path is not None:
             self.execution_ledger_path = Path(execution_ledger_path)
         elif path is not None:
@@ -245,6 +287,17 @@ class CandidatePoolStore:
             payload["items"] = {}
         return payload
 
+    @contextmanager
+    def exclusive_pool_guard(self):
+        """Hold the target-pool write lock across a caller read-modify-write."""
+        with writer_transaction_guard(
+            self.transaction_lock_path,
+            self.transaction_journal_path,
+        ):
+            with _pool_lock(self.path):
+                yield
+
+    @_locked_store_mutation
     def save(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = _now()
         _write_json(self.path, payload)
@@ -376,10 +429,18 @@ def target_production_eligibility(
         if payload.get("research_only") is True or provenance.get("research_only") is True:
             return True
         status = str(payload.get("status") or "").strip().lower().replace("-", "_")
-        if status in {"research_only", "research_reference", "long_research", "hypothesis", "shadow"}:
+        if status in {
+            "research_only",
+            "research_reference",
+            "hypothesis",
+            "shadow",
+        } or status in LONG_HORIZON_STATUSES:
             return True
         source = str(payload.get("source") or "").strip().lower()
-        if any(marker in source for marker in ("gbrain", "sentinel", "serenity")):
+        if any(
+            marker in source
+            for marker in ("gbrain", "sentinel", "serenity", "long_horizon")
+        ):
             return True
         evidence = payload.get("evidence") if isinstance(payload.get("evidence"), dict) else {}
         stage_values = [
@@ -399,7 +460,24 @@ def target_production_eligibility(
         }
         return bool(normalized_stages & {"hypothesis", "shadow", "shadow_mode", "paper_only", "unpromoted"})
 
-    research_only = (
+    current_scoring = (
+        current.get("scoring_decision")
+        if isinstance(current.get("scoring_decision"), dict)
+        else {}
+    )
+    legacy_full_score_reauthorization = (
+        str(current.get("source") or "").strip().lower() == "target_scoring"
+        and str(current.get("status") or "").strip().lower() == "executable"
+        and current_scoring.get("authorization_valid") is True
+        and prior_gate.get("eligible") is False
+        and prior_gate.get("reason") == "research_only_provenance"
+        and prior_provenance.get("research_only") is True
+        and str(prior_provenance.get("original_source") or "").strip().lower()
+        == "target_scoring"
+        and str(prior_provenance.get("original_status") or "").strip().lower()
+        in {"watching", "executable", "actionable"}
+    )
+    research_only = False if legacy_full_score_reauthorization else (
         prior_gate.get("eligible") is False
         or research_only_marker(prior)
         or research_only_marker(current)
@@ -432,6 +510,8 @@ def target_production_eligibility(
         "reason": (
             "auditable_production_approval"
             if approval
+            else "full_score_reauthorization"
+            if legacy_full_score_reauthorization
             else "cooldown_after_loss"
             if cooldown_after_loss
             else "research_only_provenance"
@@ -486,6 +566,271 @@ class TargetPoolStore(CandidatePoolStore):
         pool_kind: str | None = None,
         source: str = "manual",
         evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+        sentinel: dict[str, Any] | None = None,
+        serenity: dict[str, Any] | None = None,
+        production_approval: dict[str, Any] | None = None,
+        scoring_decision: dict[str, Any] | None = None,
+        current_price: float | None = None,
+        available_cash: float = 0,
+        total_assets: float = 0,
+    ) -> bool:
+        payload = self.load()
+        written = self._upsert_target_in_payload(
+            payload,
+            code=code,
+            name=name,
+            status=status,
+            pool_kind=pool_kind,
+            source=source,
+            evidence_ids=evidence_ids,
+            current_long_evidence_ids=current_long_evidence_ids,
+            evidence=evidence,
+            sentinel=sentinel,
+            serenity=serenity,
+            production_approval=production_approval,
+            scoring_decision=scoring_decision,
+            current_price=current_price,
+            available_cash=available_cash,
+            total_assets=total_assets,
+        )
+        if written:
+            self.save(payload)
+        return written
+
+    @_locked_store_mutation
+    def upsert_targets(
+        self,
+        targets: list[dict[str, Any]],
+        *,
+        payload: dict[str, Any] | None = None,
+    ) -> int:
+        """Apply a target batch to one preloaded map and persist it once."""
+        working = payload if isinstance(payload, dict) else self.load()
+        written = 0
+        for target in targets:
+            if isinstance(target, dict) and self._upsert_target_in_payload(
+                working,
+                **target,
+            ):
+                written += 1
+        if written:
+            self.save(working)
+        return written
+
+    @_locked_store_mutation
+    def merge_research_overlay(
+        self,
+        *,
+        code: str,
+        name: str,
+        overlay_name: str,
+        status: str,
+        source: str,
+        evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+        sentinel: dict[str, Any] | None = None,
+        serenity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Merge inert research without replacing a production lifecycle."""
+        payload = self.load()
+        outcome = self._merge_research_overlay_in_payload(
+            payload,
+            code=code,
+            name=name,
+            overlay_name=overlay_name,
+            status=status,
+            source=source,
+            evidence_ids=evidence_ids,
+            current_long_evidence_ids=current_long_evidence_ids,
+            evidence=evidence,
+            sentinel=sentinel,
+            serenity=serenity,
+        )
+        if outcome["changed"]:
+            self.save(payload)
+        return outcome
+
+    def _merge_research_overlay_in_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        code: str,
+        name: str,
+        overlay_name: str,
+        status: str,
+        source: str,
+        evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
+        evidence: dict[str, Any] | None = None,
+        sentinel: dict[str, Any] | None = None,
+        serenity: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean = _clean_code(code)
+        namespace = str(overlay_name or source or "").strip()
+        if not clean or not namespace:
+            return {
+                "accepted": False,
+                "changed": False,
+                "production_preserved": False,
+            }
+        items = payload.setdefault("items", {})
+        raw_existing = items.get(clean)
+        existing = (
+            copy.deepcopy(raw_existing)
+            if isinstance(raw_existing, dict)
+            else {}
+        )
+
+        def normalized_ids(values: Any) -> list[str]:
+            if not isinstance(values, (list, tuple)):
+                return []
+            return list(dict.fromkeys(
+                str(value).strip()
+                for value in values
+                if str(value).strip()
+            ))
+
+        incoming_ids = normalized_ids(evidence_ids)
+        incoming_long_ids = (
+            normalized_ids(current_long_evidence_ids)
+            if current_long_evidence_ids is not None
+            else None
+        )
+        incoming_evidence = evidence if isinstance(evidence, dict) else {}
+        incoming_sentinel = sentinel if isinstance(sentinel, dict) else {}
+        incoming_serenity = serenity if isinstance(serenity, dict) else {}
+        saved_gate = (
+            existing.get("production_eligibility")
+            if isinstance(existing.get("production_eligibility"), dict)
+            else self.production_eligibility_for(existing)
+        )
+        production_preserved = bool(existing) and saved_gate.get("eligible") is True
+
+        if production_preserved:
+            candidate = copy.deepcopy(existing)
+            candidate["evidence_ids"] = list(dict.fromkeys([
+                *normalized_ids(candidate.get("evidence_ids")),
+                *incoming_ids,
+            ]))
+            if incoming_long_ids is not None:
+                candidate["current_long_evidence_ids"] = incoming_long_ids
+            existing_sentinel = (
+                candidate.get("sentinel")
+                if isinstance(candidate.get("sentinel"), dict)
+                else {}
+            )
+            existing_serenity = (
+                candidate.get("serenity")
+                if isinstance(candidate.get("serenity"), dict)
+                else {}
+            )
+            candidate["sentinel"] = {
+                **existing_sentinel,
+                **incoming_sentinel,
+            }
+            candidate["serenity"] = {
+                **existing_serenity,
+                **incoming_serenity,
+            }
+        else:
+            self._upsert_target_in_payload(
+                payload,
+                code=clean,
+                name=name,
+                status=status,
+                source=source,
+                evidence_ids=incoming_ids,
+                current_long_evidence_ids=incoming_long_ids,
+                evidence=None,
+                sentinel=incoming_sentinel,
+                serenity=incoming_serenity,
+            )
+            candidate = copy.deepcopy(items[clean])
+            if existing:
+                candidate["updated_at"] = existing.get("updated_at", "")
+
+        research_overlays = (
+            copy.deepcopy(candidate.get("research_overlays"))
+            if isinstance(candidate.get("research_overlays"), dict)
+            else {}
+        )
+        existing_overlay = (
+            research_overlays.get(namespace)
+            if isinstance(research_overlays.get(namespace), dict)
+            else {}
+        )
+        overlay_evidence = (
+            existing_overlay.get("evidence")
+            if isinstance(existing_overlay.get("evidence"), dict)
+            else {}
+        )
+        overlay_sentinel = (
+            existing_overlay.get("sentinel")
+            if isinstance(existing_overlay.get("sentinel"), dict)
+            else {}
+        )
+        overlay_serenity = (
+            existing_overlay.get("serenity")
+            if isinstance(existing_overlay.get("serenity"), dict)
+            else {}
+        )
+        overlay = {
+            **existing_overlay,
+            "status": status,
+            "source": source,
+            "research_only": True,
+            "evidence_ids": list(dict.fromkeys([
+                *normalized_ids(existing_overlay.get("evidence_ids")),
+                *incoming_ids,
+            ])),
+            "evidence": {
+                **overlay_evidence,
+                **incoming_evidence,
+            },
+            "sentinel": {
+                **overlay_sentinel,
+                **incoming_sentinel,
+            },
+            "serenity": {
+                **overlay_serenity,
+                **incoming_serenity,
+            },
+        }
+        if incoming_long_ids is not None:
+            overlay["current_long_evidence_ids"] = incoming_long_ids
+        research_overlays[namespace] = overlay
+        candidate["research_overlays"] = research_overlays
+
+        if existing and candidate == existing:
+            return {
+                "accepted": True,
+                "changed": False,
+                "production_preserved": production_preserved,
+            }
+        candidate["updated_at"] = _now()
+        candidate.setdefault("created_at", _now())
+        candidate.setdefault("decision_history", [])
+        items[clean] = candidate
+        return {
+            "accepted": True,
+            "changed": True,
+            "production_preserved": production_preserved,
+        }
+
+    def _upsert_target_in_payload(
+        self,
+        payload: dict[str, Any],
+        *,
+        code: str,
+        name: str,
+        status: str = "candidate",
+        pool_kind: str | None = None,
+        source: str = "manual",
+        evidence_ids: list[str] | None = None,
+        current_long_evidence_ids: list[str] | None = None,
         evidence: dict[str, Any] | None = None,
         sentinel: dict[str, Any] | None = None,
         serenity: dict[str, Any] | None = None,
@@ -498,7 +843,6 @@ class TargetPoolStore(CandidatePoolStore):
         clean = _clean_code(code)
         if not clean:
             return False
-        payload = self.load()
         items = payload.setdefault("items", {})
         existing = items.get(clean, {})
         existing_evidence = existing.get("evidence") if isinstance(existing.get("evidence"), dict) else {}
@@ -533,6 +877,7 @@ class TargetPoolStore(CandidatePoolStore):
                 "source": source,
                 "evidence": incoming_evidence,
                 "production_approval": production_approval or {},
+                "scoring_decision": normalized_scoring,
             },
             previous=existing,
         )
@@ -540,19 +885,40 @@ class TargetPoolStore(CandidatePoolStore):
             normalized_status = "cooldown_after_loss"
         elif not gate["eligible"] and normalized_status in {"candidate", "watching", "executable", "actionable"}:
             normalized_status = "research_reference"
+        if (
+            source == "target_scoring"
+            and existing.get("status") in LONG_HORIZON_STATUSES
+            and normalized_status in {"watching", "research_reference"}
+        ):
+            normalized_status = str(existing["status"])
         merged_evidence_ids = list(dict.fromkeys([
             *(existing.get("evidence_ids") or []),
             *(evidence_ids or []),
         ]))
+        resolved_pool_kind = (
+            pool_kind
+            or existing.get("pool_kind")
+            or (
+                "mid_long_term"
+                if source == "long_horizon"
+                or normalized_status in LONG_HORIZON_STATUSES
+                else "short_term"
+            )
+        )
         item = {
             **existing,
             "code": clean,
             "name": name or existing.get("name") or clean,
             "status": normalized_status,
-            "pool_kind": pool_kind or existing.get("pool_kind") or "short_term",
+            "pool_kind": resolved_pool_kind,
             "source": source,
             "evidence": {**existing_evidence, **incoming_evidence},
             "evidence_ids": merged_evidence_ids,
+            "current_long_evidence_ids": (
+                list(dict.fromkeys(current_long_evidence_ids))
+                if current_long_evidence_ids is not None
+                else existing.get("current_long_evidence_ids") or []
+            ),
             "sentinel": {**(existing.get("sentinel") or {}), **(sentinel or {})},
             "serenity": {**(existing.get("serenity") or {}), **(serenity or {})},
             "execution": {**(existing.get("execution") or {}), **execution},
@@ -569,15 +935,28 @@ class TargetPoolStore(CandidatePoolStore):
         item.setdefault("created_at", _now())
         item.setdefault("decision_history", [])
         items[clean] = item
-        self.save(payload)
         return True
 
 
 class PositionWatchStore:
     """File-backed stop-loss/take-profit plan store for real positions."""
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        transaction_lock_path: str | Path | None = None,
+        transaction_journal_path: str | Path | None = None,
+    ):
         self.path = Path(path) if path is not None else default_position_watch_path()
+        self.transaction_lock_path = transaction_lock_path_for_store(
+            self.path,
+            transaction_lock_path,
+        )
+        self.transaction_journal_path = transaction_journal_path_for_store(
+            self.path,
+            transaction_journal_path,
+        )
 
     def load(self) -> dict[str, Any]:
         payload = _read_json(self.path, {"version": 1, "updated_at": "", "items": {}})
@@ -586,6 +965,7 @@ class PositionWatchStore:
         payload.setdefault("items", {})
         return payload
 
+    @_locked_store_mutation
     def save(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = _now()
         _write_json(self.path, payload)

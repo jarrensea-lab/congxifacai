@@ -55,6 +55,7 @@ def test_financial_evidence_adjusts_scores_and_flags_weak_transmission():
     evidence = build_financial_evidence({"name": "测试公司", "code": "300001"}, snapshot)
     adjusted = adjust_scores_with_financial_evidence(_base_scores(), evidence)
 
+    assert evidence["status"] == "success"
     assert evidence["strength"] == "strong"
     assert adjusted["red_flag_signals"]["inventory_receivable_growth"] is True
     assert adjusted["red_flag_signals"]["margin_not_improving"] is True

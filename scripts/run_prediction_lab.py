@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -16,6 +17,11 @@ sys.path.insert(0, str(PROJECT_ROOT / "backend"))
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
+from app.data_sources.offline_market_data import (
+    OfflineMinuteDataSource,
+    classify_offline_history_error,
+    validate_offline_kline_response,
+)
 from app.data_sources.tushare_client import TushareDataSource
 from app.services.prediction_lab import (
     PredictionLedger,
@@ -28,6 +34,9 @@ from app.services.quant_lifecycle import CandidatePoolStore
 
 BACKFILL_KLINE_PROVIDER_LIMIT = 2000
 BACKFILL_KLINE_SAFETY_DAYS = 10
+OFFLINE_COVERAGE_REASONS = frozenset(
+    {"prediction_date_not_in_bars", "horizon_not_due"}
+)
 
 
 def _today() -> str:
@@ -248,12 +257,22 @@ async def backfill_due_predictions(
     args: argparse.Namespace,
     *,
     quote_source: FastRealtimeMarketDataSource | None = None,
+    offline_source=None,
 ) -> dict:
     """Evaluate every unfinished prediction while reusing one K-line fetch per code."""
     as_of = args.as_of or _today()
     ledger = PredictionLedger(args.output_root)
     predictions = ledger.due_predictions(as_of=as_of, limit=args.limit)
     source = quote_source or FastRealtimeMarketDataSource()
+    offline_initialization_invalid = False
+    if offline_source is None and quote_source is None:
+        try:
+            offline_source = OfflineMinuteDataSource.from_default_registry()
+        except FileNotFoundError:
+            offline_source = None
+        except (OSError, ValueError):
+            offline_source = None
+            offline_initialization_invalid = True
     by_code: dict[str, list[dict]] = {}
     for prediction in predictions:
         by_code.setdefault(str(prediction.get("code") or ""), []).append(prediction)
@@ -262,6 +281,9 @@ async def backfill_due_predictions(
     bars_by_code: dict[str, list[dict]] = {}
     code_errors: list[dict] = []
     history_overflow_count = 0
+    offline_history_code_count = 0
+    offline_history_insufficient_coverage_count = 0
+    offline_coverage_fallback_reasons: Counter[str] = Counter()
     for code, code_predictions in by_code.items():
         prediction_dates = [
             date.fromisoformat(str(item.get("prediction_date"))[:10])
@@ -297,8 +319,139 @@ async def backfill_due_predictions(
                 for prediction in code_predictions
             )
             continue
+        if offline_initialization_invalid:
+            code_errors.append(
+                {"code": code, "reason": "offline_history_invalid"}
+            )
+            outcomes.extend(
+                {
+                    **evaluate_prediction_record(
+                        prediction,
+                        bars=[],
+                        as_of=as_of,
+                    ),
+                    "status": "unavailable",
+                    "reason": "offline_history_invalid",
+                }
+                for prediction in code_predictions
+            )
+            continue
         try:
-            kline = await source.fetch_kline(code, "day", count=required_count)
+            kline = {}
+            if offline_source is not None:
+                try:
+                    kline = await offline_source.fetch_kline(
+                        code,
+                        "day",
+                        count=required_count,
+                        adjustment="qfq",
+                        as_of=as_of,
+                    )
+                except (OSError, ValueError):
+                    kline = {"status": "error", "reason": "source_error"}
+                if kline.get("status") == "ok":
+                    validated_bars, validation_error = (
+                        validate_offline_kline_response(
+                            kline,
+                            as_of=as_of,
+                        )
+                    )
+                    if validation_error:
+                        code_errors.append(
+                            {
+                                "code": code,
+                                "reason": "offline_history_invalid",
+                            }
+                        )
+                        outcomes.extend(
+                            {
+                                **evaluate_prediction_record(
+                                    prediction,
+                                    bars=[],
+                                    as_of=as_of,
+                                ),
+                                "status": "unavailable",
+                                "reason": "offline_history_invalid",
+                            }
+                            for prediction in code_predictions
+                        )
+                        continue
+                    coverage_outcomes = [
+                        evaluate_prediction_record(
+                            prediction,
+                            bars=validated_bars,
+                            as_of=as_of,
+                        )
+                        for prediction in code_predictions
+                    ]
+                    incomplete_reasons = {
+                        (
+                            str(outcome.get("reason"))
+                            if outcome.get("reason")
+                            in OFFLINE_COVERAGE_REASONS
+                            else "coverage_incomplete"
+                        )
+                        for outcome in coverage_outcomes
+                        if outcome.get("status") != "verified"
+                    }
+                    if incomplete_reasons:
+                        offline_history_insufficient_coverage_count += 1
+                        offline_coverage_fallback_reasons.update(
+                            incomplete_reasons
+                        )
+                        kline = {}
+                    else:
+                        kline = {**kline, "bars": validated_bars}
+                        offline_history_code_count += 1
+                elif kline.get("status") == "error":
+                    if (
+                        classify_offline_history_error(kline)
+                        == "offline_history_unavailable"
+                    ):
+                        kline = {}
+                    else:
+                        code_errors.append(
+                            {
+                                "code": code,
+                                "reason": "offline_history_invalid",
+                            }
+                        )
+                        outcomes.extend(
+                            {
+                                **evaluate_prediction_record(
+                                    prediction,
+                                    bars=[],
+                                    as_of=as_of,
+                                ),
+                                "status": "unavailable",
+                                "reason": "offline_history_invalid",
+                            }
+                            for prediction in code_predictions
+                        )
+                        continue
+                else:
+                    code_errors.append(
+                        {"code": code, "reason": "offline_history_invalid"}
+                    )
+                    outcomes.extend(
+                        {
+                            **evaluate_prediction_record(
+                                prediction,
+                                bars=[],
+                                as_of=as_of,
+                            ),
+                            "status": "unavailable",
+                            "reason": "offline_history_invalid",
+                        }
+                        for prediction in code_predictions
+                    )
+                    continue
+            if not kline:
+                kline = await source.fetch_kline(
+                    code,
+                    "day",
+                    count=required_count,
+                )
             bars = kline.get("bars") or []
             bars_by_code[code] = bars
             outcomes.extend(
@@ -346,6 +499,13 @@ async def backfill_due_predictions(
         "code_count": len(by_code),
         "code_error_count": len(code_errors),
         "history_overflow_count": history_overflow_count,
+        "offline_history_code_count": offline_history_code_count,
+        "offline_history_insufficient_coverage_count": (
+            offline_history_insufficient_coverage_count
+        ),
+        "offline_coverage_fallback_reasons": dict(
+            sorted(offline_coverage_fallback_reasons.items())
+        ),
         "code_errors": code_errors,
         "evaluated_count": len(outcomes),
         "verified_count": sum(item.get("status") == "verified" for item in outcomes),

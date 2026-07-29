@@ -15,5 +15,15 @@ let package = Package(
                 .linkedFramework("AppKit"),
             ]
         ),
+        .testTarget(
+            name: "YitaojinBridgeTests",
+            plugins: [
+                .plugin(name: "YitaojinSafetyCheckPlugin"),
+            ]
+        ),
+        .plugin(
+            name: "YitaojinSafetyCheckPlugin",
+            capability: .buildTool()
+        ),
     ]
 )

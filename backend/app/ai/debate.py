@@ -15,7 +15,7 @@ HUNTER_PROMPT = """你是「猎手」— 短线交易专家 (持股1-5天)。
 ⚠️ 铁律：每支推荐股票的 buy_range（买入区间）必须标注**现价相对于区间的位**（上沿/下沿/区间内），如"现价42.50元处于区间下沿"。
 ⚠️ 铁律：止损/止盈必须给出基于技术面的具体价格数字（如"止损: 15.20元，即5日均线下方2%"），或给出分层级别（如"第一止损位: 15.50，第二止损位: 14.80"），绝对不允许只讲原则性建议。买入区间也必须是具体价格范围。
 ⚠️ 铁律：股票代码必须是6位数字的真实A股代码（沪市60xxxx/688xxx/689xxx，深市00xxxx/30xxxx），不允许编造代码。如果不确定代码，请从新闻和市场数据中搜索确认。九号公司代码是689009（不是900090），中芯国际代码是688981。
-⚠️ 现金纪律：账户总资产越小，越要控制仓位。¥5,000以下账户单票不超过10%，必须留足30%现金。
+⚠️ 策略纪律：必须服从【持仓情况】中注入的【当前策略模式】，现金底线、单票上限和止损幅度不得另设静态比例。
 ⚠️ 数据来源：请在analysis末尾用一行注明所依据的主要数据来源（如：腾讯行情/东财板块/财联社新闻等）。
 
 【今日要闻】
@@ -50,7 +50,7 @@ ACCOUNTANT_PROMPT = """你是「账房」— 中低频波段交易专家 (持股
 ⚠️ 铁律：每支推荐股票的 buy_range 必须标注现价相对于区间的位。如"现价12.80元接近区间上沿，建议等待回调"。
 ⚠️ 铁律：止损/止盈必须给出基于技术面的具体价格数字或分层级别（如"止损位: 14.30元，即MA20均线支撑位"），绝对不允许只讲原则性建议。买入区间也必须是具体价格范围。
 ⚠️ 铁律：股票代码必须是6位真实A股代码（沪市60/688/689开头，深市00/30开头），不确定时从市场数据中搜索确认，严禁编造。
-⚠️ 现金纪律：账户总资产越小，越要控制仓位。¥5,000以下账户单票不超过10%，必须留足30%现金。
+⚠️ 策略纪律：必须服从【持仓情况】中注入的【当前策略模式】，现金底线、单票上限和止损幅度不得另设静态比例。
 ⚠️ 数据来源：请在analysis末尾用一行注明所依据的主要数据来源。
 
 【今日要闻】
@@ -81,7 +81,7 @@ GUARDIAN_PROMPT = """你是「守夜人」— 风控专家 (短线+中低频双�
 分析重点: 短线止损位/仓位上限/涨跌停风险 + 中低频估值泡沫/趋势破坏/系统性风险。
 
 ⚠️ 重要：用通俗语言解释风险，新手能理解。
-⚠️ 现金纪律：账户总资产越小，越要控制仓位。¥5,000以下账户单票不超过10%，必须留足30%现金。
+⚠️ 策略纪律：必须服从【持仓情况】中注入的【当前策略模式】，现金底线、单票上限和止损幅度不得另设静态比例。
 ⚠️ 铁律：必须同时给出**需要规避的标的**（短线+中低频各至少1支）和**可以关注的标的**。
 ⚠️ 铁律：止损建议必须给出具体价格数字（如"短线止损: 15.20元，中低频止损: 14.50元"），不允许只说"注意风险"之类的空话。
 ⚠️ 铁律：股票代码必须是6位真实A股代码，严禁编造。
@@ -130,7 +130,7 @@ SERENITY_PROMPT = """你是「Serenity·研究员」— 产业链深度分析专
 ⚠️ 铁律：必须指出产业链中**真实稀缺**的环节 vs **已被炒作过度**的环节。
 ⚠️ 铁律：推荐股票必须给出 6 位真实 A 股代码。不确定就空着，不编造。
 ⚠️ 铁律：同时覆盖**真稀缺环节标的**（买入关注）和**被炒作过度的标的**（规避）。
-⚠️ 现金纪律：小账户（¥5,000以下）需更谨慎。
+⚠️ 策略纪律：必须服从【持仓情况】中注入的【当前策略模式】，现金底线、单票上限和止损幅度不得另设静态比例。
 ⚠️ 数据来源：分析末尾注明主要数据依据（东财/同花顺/财联社研报等）。
 
 【今日要闻】
@@ -166,18 +166,18 @@ AGGREGATOR_PROMPT = """你是「裁判」— AI 辩论聚合器。
 
 ⚠️ 重要：受众是股票交易新手。最终决策要包含通俗易懂的解释。
 
-⚠️⚠️⚠️ 现金与仓位铁律（必须严格遵守）：⚠️⚠️⚠️
-1. **现金为王，永不满仓**：每笔交易完成后，账户必须至少保留 30% 总资产的现金。如果账户总资产仅¥3,000，则至少保留¥900现金。
-2. **单票不超20%**：单只股票仓位不得超过总资产的 20%（科创板上限 50%）。
+⚠️⚠️⚠️ 当前策略约束（必须严格遵守）：⚠️⚠️⚠️
+1. **策略模式是唯一口径**：必须服从【持仓情况】中注入的【当前策略模式】，现金底线、单票上限和止损幅度不得另设静态比例。
+2. **现金与单票上限**：交易计划必须同时满足当前策略模式给出的现金底线和单票上限。
 3. **分批建仓，禁止一把梭**：建仓必须分 2-3 批入场，不能一次性满仓买入。
-4. **先保本，再盈利**：如果推荐了股票，必须同步给出明确的止损价和目标价，止损幅度不超过买入价的 8%。
+4. **先保本，再盈利**：如果推荐了股票，必须同步给出明确的止损价和目标价，止损幅度服从当前策略模式。
 5. **空仓也是策略**：没有高确定性机会时，果断建议"空仓观望"，不是必须推荐股票。
-6. **小账户更需谨慎**：对于¥5,000以下的小账户，单笔仓位不超过 10%，且只推荐低波动蓝筹股。
+6. **账户可执行性**：账户规模只影响能否下单和仓位大小，不得覆盖当前策略模式的明确约束。
 
 ⚠️ 铁律：所有推荐股票的 stop_loss（止损价）、target（目标价）、buy_range（买入区间）必须是基于技术面的具体价格数字或分层价位，绝不允许给出"待观察"、"视情况而定"等模糊表述。如果没有足够数据给出具体价位，请在对应字段填写"数据不足，建议观望"，并在 reason 中说明原因。
 ⚠️ 铁律：不要把"现金太少"作为唯一结论。即使账户现金少，也必须继续给出大盘状态、产业链逻辑、数据质量、风险等级和可观察条件；现金不足只能影响"能不能下单/仓位大小"，不能替代研究判断。
 ⚠️ 风险定级：数据不足、证据不可验证、题材博弈、小账户仍建议入场时，应主动提高到 R4/R5；若只是现金不足但机会质量一般，应明确建议观望而不是硬凑交易。
-⚠️ A股交易单位：新增买入至少按一手100股计算；小账户如果买不起一手，就只能列为观察，不得写成可执行买入建议。减仓数量必须自洽，不能出现“卖50股但保留20股”这种数学矛盾。
+⚠️ A股交易单位：主板/创业板新增买入按100股、科创板按200股校验；买不起最小交易单位只能列为观察，不得写成可执行买入建议。减仓数量必须自洽，不能出现“卖50股但保留20股”这种数学矛盾。
 ⚠️ 方向区分：short_term 和 mid_low_freq 中必须分别列出**关注标的**和**规避标的**。即使当前判断是空仓观望，也至少各给出1支"可以关注的标的"和"需要规避的标的"，帮助新手了解当前市场结构。
 ⚠️ 现价比对：每支推荐必须注明当前价相对于建议买入区间的位（上沿/下沿/区间内）。
 ⚠️ 现价比对字段格式示例：在描述中加入"现价XX元处于XX"。
@@ -230,7 +230,7 @@ AGGREGATOR_PROMPT = """你是「裁判」— AI 辩论聚合器。
     "top_sectors": ["最看好的板块"],
     "position_plan": {{
         "total_capital": "账户总资金(元)",
-        "suggested_cash_pct": "建议保留现金比例(%), 如20%",
+        "suggested_cash_pct": "按当前策略模式给出的建议保留现金比例(%)",
         "entries": [
             {{
                 "code": "股票代码",
@@ -274,6 +274,113 @@ AGGREGATOR_PROMPT = """你是「裁判」— AI 辩论聚合器。
     "knowledge_corner": "【知识角】用3-5句话向新手解释今天分析中最关键的一个交易概念"
 }}
 """
+
+
+def build_model_runtime_status(calls: list[dict]) -> dict:
+    """Summarize sanitized, actually observed model routes for this debate."""
+    sanitized_calls: list[dict] = []
+    degradation_reasons: list[str] = []
+    providers: list[str] = []
+    for call in calls:
+        if not isinstance(call, dict):
+            continue
+        fallback_reason = str(call.get("fallback_reason") or "")
+        degradation_reason = str(call.get("degradation_reason") or "")
+        content = str(call.get("content") or "")
+        explicit_usable = call.get("output_usable")
+        output_usable = (
+            explicit_usable is True
+            if isinstance(explicit_usable, bool)
+            else bool(content) and not degradation_reason
+        )
+        raw_provider = str(call.get("provider") or "")
+        provider = raw_provider if output_usable else ""
+        attempted_provider = str(
+            call.get("attempted_provider") or raw_provider
+        )
+        sanitized = {
+            key: str(call.get(key) or "")
+            for key in (
+                "role",
+                "requested_provider",
+                "model",
+                "status",
+            )
+        }
+        sanitized.update({
+            "provider": provider,
+            "attempted_provider": attempted_provider,
+            "fallback_reason": fallback_reason,
+            "degradation_reason": degradation_reason,
+            "output_usable": output_usable,
+        })
+        sanitized_calls.append(sanitized)
+        if provider and provider not in providers:
+            providers.append(provider)
+        if fallback_reason and fallback_reason not in degradation_reasons:
+            degradation_reasons.append(fallback_reason)
+        reason = degradation_reason
+        if not reason and sanitized["status"] != "success" and not fallback_reason:
+            reason = "cloud_call_failed"
+        if not output_usable and not reason and not fallback_reason:
+            reason = "required_output_unusable"
+        if output_usable and not provider and not reason and not fallback_reason:
+            reason = "successful_provider_missing"
+        if reason:
+            if reason not in degradation_reasons:
+                degradation_reasons.append(reason)
+
+    provider_order = {"DeepSeek": 0, "Qwen": 1}
+    providers.sort(key=lambda provider: (provider_order.get(provider, 99), provider))
+    if not sanitized_calls:
+        return {
+            "status": "unavailable",
+            "providers": [],
+            "calls": [],
+            "degradation_reasons": ["runtime_status_unavailable"],
+        }
+    return {
+        "status": "degraded" if degradation_reasons else "success",
+        "providers": providers,
+        "calls": sanitized_calls,
+        "degradation_reasons": degradation_reasons,
+    }
+
+
+def reconcile_model_runtime_status(value) -> dict:
+    """Rebuild route truth from observed calls; declared summaries are hints."""
+    if not isinstance(value, dict):
+        return build_model_runtime_status([])
+    observed = build_model_runtime_status(value.get("calls") or [])
+    reasons = list(dict.fromkeys([
+        *observed["degradation_reasons"],
+        *(
+            str(reason)
+            for reason in value.get("degradation_reasons") or []
+            if str(reason).strip()
+        ),
+    ]))
+    declared_status = str(value.get("status") or "").strip().lower()
+    if observed["status"] == "success" and declared_status in {
+        "degraded",
+        "unavailable",
+    }:
+        marker = (
+            "runtime_marked_degraded"
+            if declared_status == "degraded"
+            else "runtime_status_unavailable"
+        )
+        if marker not in reasons:
+            reasons.append(marker)
+    status = observed["status"]
+    if reasons and status == "success":
+        status = "degraded"
+    return {
+        "status": status,
+        "providers": observed["providers"],
+        "calls": observed["calls"],
+        "degradation_reasons": reasons,
+    }
 
 
 class AIDebateEngine:
@@ -324,6 +431,11 @@ class AIDebateEngine:
     async def _call_role(self, name: str, prompt: str, model: str, num_predict: int = 0, retries: int = 1, timeout: float = 120.0) -> Dict[str, Any]:
         """V6: 调用 AI 角色 — cloud-* 走云端 API (DeepSeek/Qwen), 其他走 llama.cpp 本地"""
         import json as _json
+        requested_provider = (
+            "Qwen"
+            if model.startswith("qwen-") or model == "cloud-judge"
+            else "DeepSeek"
+        )
         try:
             # === DeepSeek/Qwen 云端路由 ===
             if model.startswith("cloud-") or model.startswith("qwen-"):
@@ -342,21 +454,131 @@ class AIDebateEngine:
                     result = await cloud.chat(cloud_role, [{"role": "user", "content": prompt}],
                                              max_tokens=min(num_predict or 4096, 4096))
                     content = result.get("content", "")
+                    provider = str(
+                        result.get("provider") or requested_provider
+                    )
+                    fallback_reason = str(
+                        result.get("fallback_reason") or ""
+                    )
+                    route_metadata = {
+                        "provider": provider,
+                        "attempted_provider": provider,
+                        "requested_provider": str(
+                            result.get("requested_provider")
+                            or requested_provider
+                        ),
+                        "model": str(result.get("model") or model),
+                        "status": (
+                            "degraded" if fallback_reason else "success"
+                        ),
+                        "fallback_reason": fallback_reason,
+                        "degradation_reason": "",
+                        "output_usable": bool(content),
+                    }
                     if content:
-                        logger.info(f"DeepSeek {name} → 成功 ({len(content)} chars)")
-                        return {"content": content, "thinking": ""}
+                        logger.info(
+                            f"{provider} {name} → 成功 ({len(content)} chars)"
+                        )
+                        return {
+                            "content": content,
+                            "thinking": "",
+                            **route_metadata,
+                        }
                     else:
-                        logger.warning(f"DeepSeek {name} → 空内容, 返回降级")
-                        return {"content": _json.dumps({"error": "AI返回空内容", "degraded": True}, ensure_ascii=False), "thinking": ""}
+                        logger.warning(
+                            f"{provider} {name} → 空内容, 返回降级"
+                        )
+                        return {
+                            "content": _json.dumps(
+                                {
+                                    "error": "AI返回空内容",
+                                    "degraded": True,
+                                },
+                                ensure_ascii=False,
+                            ),
+                            "thinking": "",
+                            **route_metadata,
+                            "provider": "",
+                            "status": "degraded",
+                            "degradation_reason": "empty_model_output",
+                            "output_usable": False,
+                        }
                 except Exception as ce:
-                    logger.warning(f"DeepSeek 调用不可用({name}): {ce}")
-                    return {"content": _json.dumps({"error": "AI服务暂不可用", "degraded": True, "reason": str(ce)[:200]}, ensure_ascii=False), "thinking": ""}
+                    attempted_provider = str(
+                        getattr(ce, "attempted_provider", "")
+                        or getattr(ce, "provider", "")
+                        or requested_provider
+                    )
+                    routed_requested_provider = str(
+                        getattr(ce, "requested_provider", "")
+                        or requested_provider
+                    )
+                    fallback_reason = str(
+                        getattr(ce, "fallback_reason", "") or ""
+                    )
+                    degradation_reason = str(
+                        getattr(ce, "degradation_reason", "")
+                        or "cloud_call_failed"
+                    )
+                    logger.warning(
+                        f"{attempted_provider} 调用不可用({name})"
+                    )
+                    return {
+                        "content": _json.dumps(
+                            {
+                                "error": "AI服务暂不可用",
+                                "degraded": True,
+                                "reason": degradation_reason,
+                            },
+                            ensure_ascii=False,
+                        ),
+                        "thinking": "",
+                        "provider": "",
+                        "attempted_provider": attempted_provider,
+                        "requested_provider": routed_requested_provider,
+                        "model": str(
+                            getattr(ce, "model", "") or model
+                        ),
+                        "status": "degraded",
+                        "fallback_reason": fallback_reason,
+                        "degradation_reason": degradation_reason,
+                        "output_usable": False,
+                    }
 
             # === llama.cpp 本地模型 ===
-            return await self._call_llamacpp(name, prompt, timeout=timeout)
-        except Exception as e:
-            logger.error(f"{name} 调用异常: {e}")
-            return {"content": "", "thinking": ""}
+            result = await self._call_llamacpp(
+                name,
+                prompt,
+                timeout=timeout,
+            )
+            content = result.get("content", "")
+            return {
+                **result,
+                "provider": "llama.cpp",
+                "attempted_provider": "llama.cpp",
+                "requested_provider": "llama.cpp",
+                "model": model,
+                "status": "success" if content else "degraded",
+                "fallback_reason": "",
+                "degradation_reason": (
+                    "" if content else "empty_model_output"
+                ),
+                "output_usable": bool(content),
+            }
+        except Exception:
+            logger.error(f"{name} 调用异常")
+            return {
+                "content": "",
+                "thinking": "",
+                "provider": "",
+                "attempted_provider": requested_provider,
+                "requested_provider": requested_provider,
+                "model": model,
+                "status": "degraded",
+                "fallback_reason": "",
+                "degradation_reason": "cloud_call_failed",
+                "output_usable": False,
+            }
 
     async def _call_llamacpp(self, name: str, prompt: str, timeout: float = 120.0) -> Dict[str, Any]:
         """调用 llama.cpp 本地模型 (通过 local_client.py)"""
@@ -406,6 +628,12 @@ class AIDebateEngine:
         serenity_prompt = SERENITY_PROMPT.format(market_data=market_data, holdings_data=holdings_data, news_context=nc)
         researcher_task = self._call_role("Serenity·研究员", serenity_prompt, self._researcher_model(), timeout=180.0)
         hunter_res, accountant_res, guardian_res, researcher_res = await asyncio.gather(hunter_task, accountant_task, guardian_task, researcher_task)
+        runtime_calls = [
+            {"role": "猎手", **hunter_res},
+            {"role": "账房", **accountant_res},
+            {"role": "守夜人", **guardian_res},
+            {"role": "Serenity·研究员", **researcher_res},
+        ]
 
         hunter_view = hunter_res["content"]
         accountant_view = accountant_res["content"]
@@ -414,7 +642,29 @@ class AIDebateEngine:
 
         if not any([hunter_view, accountant_view, guardian_view, researcher_view]):
             logger.error("所有角色调用均失败")
-            return {"debate": {}, "final": {"final_decision": "AI 服务暂时不可用", "confidence": 0, "reasoning": "所有 AI 角色调用失败"}, "judge_thinking": ""}
+            runtime_calls.append({
+                "role": "裁判",
+                "provider": "",
+                "attempted_provider": "",
+                "requested_provider": "Qwen",
+                "model": self._aggregator_model(),
+                "status": "degraded",
+                "fallback_reason": "",
+                "degradation_reason": "judge_not_called",
+                "output_usable": False,
+            })
+            return {
+                "debate": {},
+                "final": {
+                    "final_decision": "AI 服务暂时不可用",
+                    "confidence": 0,
+                    "reasoning": "所有 AI 角色调用失败",
+                },
+                "judge_thinking": "",
+                "model_runtime_status": build_model_runtime_status(
+                    runtime_calls
+                ),
+            }
         logger.info("辩论引擎: 4个角色全部并行调用完成")
 
         # 裁判聚合 — 使用推理模型 (R1 需要更多 token 用于内部推理)
@@ -429,6 +679,7 @@ class AIDebateEngine:
         agg_num_predict = 8192 if self._is_reasoning(agg_model) else 0
 
         judge_thinking = ""
+        agg_res: dict = {}
         try:
             logger.info(f"裁判(盘前/复盘) → 模型: {agg_model} (timeout=180s)")
             agg_kwargs = {}
@@ -442,9 +693,35 @@ class AIDebateEngine:
             else:
                 logger.warning("裁判聚合返回空内容")
                 final_decision = ""
-        except Exception as e:
-            logger.error(f"裁判聚合异常: {e}")
+        except Exception:
+            logger.error("裁判聚合异常")
             final_decision = ""
+            agg_res = {
+                "provider": "",
+                "attempted_provider": "Qwen",
+                "requested_provider": "Qwen",
+                "model": self._aggregator_model(),
+                "status": "degraded",
+                "fallback_reason": "",
+                "degradation_reason": "cloud_call_failed",
+                "output_usable": False,
+            }
+        runtime_calls.append({"role": "裁判", **agg_res})
+        if final_decision:
+            quality, validator_route = (
+                await self.validate_output_with_route(final_decision)
+            )
+            runtime_calls.append({
+                "role": "输出校验",
+                **validator_route,
+            })
+        else:
+            quality = {
+                "pass": False,
+                "score": 0,
+                "issues": ["裁判未产出"],
+                "summary": "无输出可校验",
+            }
 
         return {
             "debate": {
@@ -455,7 +732,8 @@ class AIDebateEngine:
             },
             "final": self._parse_json(final_decision) if final_decision else {"final_decision": "聚合失败", "confidence": 0, "reasoning": "AI 裁判未返回有效结果"},
             "judge_thinking": judge_thinking,
-            "quality": (await self.validate_output(final_decision) if final_decision else {"pass": False, "score": 0, "issues": ["裁判未产出"], "summary": "无输出可校验"}) or {},
+            "quality": quality or {},
+            "model_runtime_status": build_model_runtime_status(runtime_calls),
         }
 
     def _extract_content(self, result: Dict) -> str:
@@ -495,7 +773,7 @@ class AIDebateEngine:
 【风险告警】
 {alerts_data}
 
-⚠️ 现金纪律：账户总资产越小，越要控制仓位。留足30%现金，单票不超20%。
+⚠️ 策略纪律：必须服从【持仓情况】中注入的【当前策略模式】，现金底线、单票上限和止损幅度不得另设静态比例。
 请精简输出 (JSON格式，不要code fence，不要长篇大论):
 {{{{
     "market_snapshot": "大盘一句话概括",
@@ -530,8 +808,11 @@ class AIDebateEngine:
             "judge_thinking": "",
         }
 
-    async def validate_output(self, content: str) -> Dict[str, Any]:
-        """用云端模型校验 AI 输出是否包含具体投资建议"""
+    async def validate_output_with_route(
+        self,
+        content: str,
+    ) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        """Return validator quality plus sanitized per-call route truth."""
         validator_prompt = f"""你是AI输出质量校验员。请检查以下AI投资建议是否包含具体的投资建议。
 检查标准：
 1. 是否推荐了具体的行业板块？
@@ -548,12 +829,92 @@ class AIDebateEngine:
             from app.ai.cloud_client import cloud
             result = await cloud.chat("reporter", [{"role": "user", "content": validator_prompt}], max_tokens=512)
             text = result.get("content", "")
+            attempted_provider = str(
+                result.get("provider") or "DeepSeek"
+            )
+            requested_provider = str(
+                result.get("requested_provider") or "DeepSeek"
+            )
+            fallback_reason = str(
+                result.get("fallback_reason") or ""
+            )
             if text:
-                return self._parse_json(text)
-            return {"pass": False, "score": 0, "issues": ["校验调用失败"], "summary": "未能校验，禁止进入生产池"}
-        except Exception as e:
-            logger.error(f"输出校验异常: {e}")
-            return {"pass": False, "score": 0, "issues": [str(e)], "summary": "校验异常，禁止进入生产池"}
+                quality = self._parse_json(text)
+                usable = isinstance(quality.get("pass"), bool)
+                degradation_reason = (
+                    "" if usable else "validator_call_failed"
+                )
+                return quality, {
+                    "provider": (
+                        attempted_provider if usable else ""
+                    ),
+                    "attempted_provider": attempted_provider,
+                    "requested_provider": requested_provider,
+                    "model": str(
+                        result.get("model") or self._validator_model()
+                    ),
+                    "status": (
+                        "degraded"
+                        if fallback_reason or not usable
+                        else "success"
+                    ),
+                    "fallback_reason": fallback_reason,
+                    "degradation_reason": degradation_reason,
+                    "output_usable": usable,
+                }
+            return {
+                "pass": False,
+                "score": 0,
+                "issues": ["validator_call_failed"],
+                "summary": "未能校验，禁止进入生产池",
+            }, {
+                "provider": "",
+                "attempted_provider": attempted_provider,
+                "requested_provider": requested_provider,
+                "model": str(
+                    result.get("model") or self._validator_model()
+                ),
+                "status": "degraded",
+                "fallback_reason": fallback_reason,
+                "degradation_reason": "validator_call_failed",
+                "output_usable": False,
+            }
+        except Exception as error:
+            attempted_provider = str(
+                getattr(error, "attempted_provider", "")
+                or getattr(error, "provider", "")
+                or "DeepSeek"
+            )
+            requested_provider = str(
+                getattr(error, "requested_provider", "")
+                or "DeepSeek"
+            )
+            logger.error("输出校验异常: validator_call_failed")
+            return {
+                "pass": False,
+                "score": 0,
+                "issues": ["validator_call_failed"],
+                "summary": "校验异常，禁止进入生产池",
+            }, {
+                "provider": "",
+                "attempted_provider": attempted_provider,
+                "requested_provider": requested_provider,
+                "model": str(
+                    getattr(error, "model", "")
+                    or self._validator_model()
+                ),
+                "status": "degraded",
+                "fallback_reason": str(
+                    getattr(error, "fallback_reason", "") or ""
+                ),
+                "degradation_reason": "validator_call_failed",
+                "output_usable": False,
+            }
+
+    async def validate_output(self, content: str) -> Dict[str, Any]:
+        """Compatibility quality-only validator API."""
+        quality, _route = await self.validate_output_with_route(content)
+        return quality
 
     def _parse_json(self, text: str) -> Dict:
         text = text.strip()

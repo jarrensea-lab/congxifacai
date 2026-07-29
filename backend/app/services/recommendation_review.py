@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -197,6 +198,7 @@ def _empty_review(system_gap: str, *, diagnostics: list[str] | None = None) -> d
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "executed": {
             "count": 0,
+            "execution_evidence_count": 0,
             "attributed_count": 0,
             "unattributed_count": 0,
             "metric_scope": "portfolio_behavior_not_strategy_attribution",
@@ -352,6 +354,41 @@ def _sync_portfolio_execution_events(
     return diagnostics
 
 
+def _sanitize_sync_diagnostics(diagnostics: list[str]) -> dict[str, int]:
+    allowed = {"fill_sync_failed", "outcome_sync_failed"}
+    counts = Counter(
+        category
+        for item in diagnostics
+        for category in [str(item).partition(":")[0]]
+        if category in allowed
+    )
+    return dict(sorted(counts.items()))
+
+
+def _execution_evidence_ids(
+    portfolio: dict[str, Any],
+    attribution: dict[str, Any],
+) -> set[str]:
+    fill_ids: set[str] = set()
+    for event in portfolio.get("trade_events", []):
+        fill_id = event.get("fill_id") if isinstance(event, dict) else None
+        if isinstance(fill_id, str) and fill_id.strip():
+            fill_ids.add(fill_id.strip())
+    for collection in ("positions", "closed_positions"):
+        for position in portfolio.get(collection, []):
+            if not isinstance(position, dict):
+                continue
+            for item in position.get("trade_history", []):
+                fill_id = item.get("fill_id") if isinstance(item, dict) else None
+                if isinstance(fill_id, str) and fill_id.strip():
+                    fill_ids.add(fill_id.strip())
+    for chain in attribution.get("chains", []):
+        fill_id = chain.get("fill_id") if isinstance(chain, dict) else None
+        if isinstance(fill_id, str) and fill_id.strip():
+            fill_ids.add(fill_id.strip())
+    return fill_ids
+
+
 async def build_recommendation_review(
     *,
     portfolio_path: str | None = None,
@@ -389,7 +426,7 @@ async def build_recommendation_review(
     if resolved_ledger_path is None and portfolio_path is not None:
         resolved_ledger_path = str(Path(portfolio_path).parent / "execution_ledger.jsonl")
     ledger = ExecutionLedger(resolved_ledger_path)
-    _sync_portfolio_execution_events(portfolio, ledger)
+    sync_diagnostics = _sync_portfolio_execution_events(portfolio, ledger)
     attribution = ledger.join_attribution(
         portfolio_trade_events=portfolio_trade_events,
     )
@@ -454,10 +491,30 @@ async def build_recommendation_review(
     avg_score = round(sum(row["behavior_score"] for row in reviewed) / executed_count, 1) if executed_count else 0.0
     attributed_count = sum(row["attribution"]["status"] == "attributed" for row in reviewed)
     problem_flags = sorted({flag for row in reviewed for flag in row["flags"]})
-    return {
+    attribution_history_invalid = (
+        not attribution.get("ok")
+        and attribution.get("error") == "execution_ledger_history_invalid"
+    ) or "execution_ledger_history_invalid" in sync_diagnostics
+    complete_chain_count = sum(
+        item.get("status") in {"attributed", "pending"}
+        for item in attribution.get("chains", [])
+    )
+    execution_evidence_count = len(
+        _execution_evidence_ids(portfolio, attribution)
+    )
+    if attribution_history_invalid:
+        system_gap = "execution_ledger_history_invalid"
+    elif execution_evidence_count == 0:
+        system_gap = "no_executed_samples"
+    elif complete_chain_count == 0:
+        system_gap = "execution_chain_missing"
+    else:
+        system_gap = ""
+    review = {
         "generated_at": datetime.now().isoformat(timespec="seconds"),
         "executed": {
             "count": executed_count,
+            "execution_evidence_count": execution_evidence_count,
             "attributed_count": attributed_count,
             "unattributed_count": executed_count - attributed_count,
             "metric_scope": "portfolio_behavior_not_strategy_attribution",
@@ -475,8 +532,14 @@ async def build_recommendation_review(
         },
         "items": reviewed,
         "strategy_attribution": attribution.get("strategy_metrics") or _empty_review("")["strategy_attribution"],
-        "system_gap": "sentinel_advice_performance_has_no_executed_samples",
+        "system_gap": system_gap,
     }
+    if attribution_history_invalid:
+        review["diagnostics"] = ["execution_ledger_history_invalid"]
+    sanitized_sync_diagnostics = _sanitize_sync_diagnostics(sync_diagnostics)
+    if sanitized_sync_diagnostics:
+        review["sync_diagnostics"] = sanitized_sync_diagnostics
+    return review
 
 
 def render_recommendation_review_markdown(review: dict[str, Any]) -> str:
@@ -487,14 +550,21 @@ def render_recommendation_review_markdown(review: dict[str, Any]) -> str:
     elif review.get("system_gap") == "portfolio_invalid":
         diagnostics = ", ".join(review.get("diagnostics") or [])
         gap_conclusion = f"- 持仓文件结构无效，已拒绝计算：{diagnostics or '未知结构错误'}。"
+    elif review.get("system_gap") == "execution_ledger_history_invalid":
+        gap_conclusion = "- 执行账本历史无效，策略归因已失败关闭；持仓行为指标仍单独展示。"
+    elif review.get("system_gap") == "no_executed_samples":
+        gap_conclusion = "- 当前没有真实执行样本，暂不能计算策略归因。"
+    elif review.get("system_gap") == "execution_chain_missing":
+        gap_conclusion = "- 已有真实执行，但推荐、授权决策与成交链路不完整，不能归因到策略。"
     else:
-        gap_conclusion = "- 项目原有 Sentinel advice_performance 未记录本轮真实执行样本，导致推荐行为没有进入绩效闭环。"
+        gap_conclusion = "- 至少一笔真实执行具备完整归因链，策略绩效仅统计完整链样本。"
     lines = [
         f"# 推荐执行复盘评分 - {review.get('generated_at', '')[:10]}",
         "",
         "## 总分",
         "",
         f"- 执行样本数：{executed.get('count', 0)}",
+        f"- 成交证据数：{executed.get('execution_evidence_count', 0)}",
         f"- 完整归因：{executed.get('attributed_count', 0)}",
         f"- 未归因：{executed.get('unattributed_count', 0)}",
         f"- 平均收益率：{executed.get('avg_return_pct', 0):+.2f}%",

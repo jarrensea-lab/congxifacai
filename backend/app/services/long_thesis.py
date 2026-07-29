@@ -3,11 +3,30 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+from contextlib import contextmanager
 from datetime import date, datetime
+from fcntl import LOCK_EX, LOCK_SH, LOCK_UN, flock
 from pathlib import Path
+from threading import RLock
 from typing import Any
 
 from app.config import PROJECT_ROOT
+from app.services.long_horizon_transaction import (
+    transaction_journal_path_for_store,
+    transaction_lock_path_for_store,
+    writer_transaction_guard,
+)
+
+_LONG_THESIS_PROCESS_LOCK = RLock()
+
+
+class LongThesisStoreInvalid(RuntimeError):
+    """Raised when an existing long-thesis file cannot be trusted."""
+
+    def __init__(self, reason: str):
+        self.reason = reason
+        super().__init__(f"long_thesis_store_invalid: {reason}")
 
 
 def default_long_thesis_path() -> Path:
@@ -39,9 +58,25 @@ def _read_json(path: Path, default: dict[str, Any]) -> dict[str, Any]:
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    fd, temp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+    )
+    tmp_path = Path(temp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp_path, path)
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def _parse_day(value: Any) -> date | None:
@@ -100,10 +135,35 @@ class LongThesisStore:
     target lifecycle state still lives in TargetPoolStore.
     """
 
-    def __init__(self, path: str | Path | None = None):
+    def __init__(
+        self,
+        path: str | Path | None = None,
+        *,
+        transaction_lock_path: str | Path | None = None,
+        transaction_journal_path: str | Path | None = None,
+    ):
         self.path = Path(path) if path is not None else default_long_thesis_path()
+        self.transaction_lock_path = transaction_lock_path_for_store(
+            self.path,
+            transaction_lock_path,
+        )
+        self.transaction_journal_path = transaction_journal_path_for_store(
+            self.path,
+            transaction_journal_path,
+        )
 
-    def load(self) -> dict[str, Any]:
+    @contextmanager
+    def _store_lock(self, *, exclusive: bool):
+        lock_path = self.path.with_name(f".{self.path.name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with _LONG_THESIS_PROCESS_LOCK, lock_path.open("a+", encoding="utf-8") as lock_file:
+            flock(lock_file.fileno(), LOCK_EX if exclusive else LOCK_SH)
+            try:
+                yield
+            finally:
+                flock(lock_file.fileno(), LOCK_UN)
+
+    def _load_unlocked(self) -> dict[str, Any]:
         payload = _read_json(self.path, {"version": 1, "updated_at": "", "items": {}})
         payload.setdefault("version", 1)
         payload.setdefault("updated_at", "")
@@ -112,9 +172,54 @@ class LongThesisStore:
             payload["items"] = {}
         return payload
 
-    def save(self, payload: dict[str, Any]) -> None:
+    def _load_strict_unlocked(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"version": 1, "updated_at": "", "items": {}}
+        try:
+            payload = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise LongThesisStoreInvalid(
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise LongThesisStoreInvalid("root_not_object")
+        items = payload.get("items")
+        if not isinstance(items, dict):
+            raise LongThesisStoreInvalid("items_not_object")
+        for raw_symbol, item in items.items():
+            symbol = _clean_symbol(raw_symbol)
+            if not symbol or not isinstance(item, dict):
+                raise LongThesisStoreInvalid("item_not_object")
+            item_symbol = _clean_symbol(item.get("symbol") or item.get("code"))
+            if item_symbol != symbol:
+                raise LongThesisStoreInvalid(
+                    f"item_symbol_mismatch:{symbol}"
+                )
+        normalized = dict(payload)
+        normalized.setdefault("version", 1)
+        normalized.setdefault("updated_at", "")
+        return normalized
+
+    def _save_unlocked(self, payload: dict[str, Any]) -> None:
         payload["updated_at"] = _now()
         _write_json(self.path, payload)
+
+    def load(self) -> dict[str, Any]:
+        with self._store_lock(exclusive=False):
+            return self._load_unlocked()
+
+    def load_strict(self) -> dict[str, Any]:
+        """Load one validated map; missing is empty, corruption is explicit."""
+        with self._store_lock(exclusive=False):
+            return self._load_strict_unlocked()
+
+    def save(self, payload: dict[str, Any]) -> None:
+        with writer_transaction_guard(
+            self.transaction_lock_path,
+            self.transaction_journal_path,
+        ):
+            with self._store_lock(exclusive=True):
+                self._save_unlocked(payload)
 
     def get(self, symbol: str) -> dict[str, Any] | None:
         return self.load().get("items", {}).get(_clean_symbol(symbol))
@@ -123,37 +228,54 @@ class LongThesisStore:
         symbol = _clean_symbol(thesis.get("symbol") or thesis.get("code"))
         if not symbol:
             raise ValueError("long thesis requires symbol")
-        payload = self.load()
-        items = payload.setdefault("items", {})
-        existing = items.get(symbol, {})
-        merged = {
-            **existing,
-            **thesis,
-            "symbol": symbol,
-            "name": thesis.get("name") or existing.get("name") or symbol,
-            "updated_at": _now(),
-        }
-        merged.setdefault("created_at", existing.get("created_at") or _now())
-        merged.setdefault("reviews", existing.get("reviews") or [])
-        status = evaluate_thesis_status(merged)
-        merged["thesis_status"] = thesis.get("thesis_status") or status["status"]
-        items[symbol] = merged
-        self.save(payload)
-        return merged
+        with writer_transaction_guard(
+            self.transaction_lock_path,
+            self.transaction_journal_path,
+        ):
+            with self._store_lock(exclusive=True):
+                payload = self._load_unlocked()
+                items = payload.setdefault("items", {})
+                existing = items.get(symbol, {})
+                merged = {
+                    **existing,
+                    **thesis,
+                    "symbol": symbol,
+                    "name": thesis.get("name") or existing.get("name") or symbol,
+                    "updated_at": _now(),
+                }
+                merged.setdefault(
+                    "created_at",
+                    existing.get("created_at") or _now(),
+                )
+                merged.setdefault("reviews", existing.get("reviews") or [])
+                status = evaluate_thesis_status(merged)
+                merged["thesis_status"] = (
+                    thesis.get("thesis_status") or status["status"]
+                )
+                items[symbol] = merged
+                self._save_unlocked(payload)
+                return merged
 
     def append_review(self, symbol: str, review: dict[str, Any]) -> dict[str, Any] | None:
         clean = _clean_symbol(symbol)
-        payload = self.load()
-        item = payload.setdefault("items", {}).get(clean)
-        if not isinstance(item, dict):
-            return None
-        entry = {"created_at": _now(), **review}
-        item.setdefault("reviews", []).append(entry)
-        item["reviews"] = item["reviews"][-50:]
-        if review.get("status"):
-            item["thesis_status"] = str(review["status"])
-        else:
-            item["thesis_status"] = evaluate_thesis_status(item)["status"]
-        item["updated_at"] = _now()
-        self.save(payload)
-        return item
+        with writer_transaction_guard(
+            self.transaction_lock_path,
+            self.transaction_journal_path,
+        ):
+            with self._store_lock(exclusive=True):
+                payload = self._load_unlocked()
+                item = payload.setdefault("items", {}).get(clean)
+                if not isinstance(item, dict):
+                    return None
+                entry = {"created_at": _now(), **review}
+                item.setdefault("reviews", []).append(entry)
+                item["reviews"] = item["reviews"][-50:]
+                if review.get("status"):
+                    item["thesis_status"] = str(review["status"])
+                else:
+                    item["thesis_status"] = evaluate_thesis_status(item)[
+                        "status"
+                    ]
+                item["updated_at"] = _now()
+                self._save_unlocked(payload)
+                return item

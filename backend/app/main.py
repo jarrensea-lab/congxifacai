@@ -1,4 +1,4 @@
-"""FastAPI 主应用 — V7: DeepSeek云端AI + 飞书全通道 + 定时调度"""
+"""FastAPI 主应用 — 多源研究、风控、报告与受控券商桥接。"""
 import asyncio
 import json
 import os
@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from sqlalchemy.orm import Session
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-from apscheduler.triggers.cron import CronTrigger
 
 from app.config import settings
 from app.database import init_db, SessionLocal
@@ -41,17 +40,26 @@ from app.services.quant_lifecycle import (
     evaluate_position_watch,
     normalize_alert_level,
 )
-from app.services.evidence_ledger import (
-    build_sentinel_evidence_context,
-    upsert_sentinel_evidence_to_target_pool,
-)
 from app.services.schedule_policy import (
     schedule_reason,
     should_run_main_report,
     should_run_premarket_calibration,
 )
+from app.services.scheduler_service import (
+    SchedulerJobHandlers,
+    start_scheduler_service,
+)
 from app.services.feishu_pusher import send_feishu_card, send_feishu_card_sync
+from app.services.market_data_health import (
+    EXPECTED_MARKET_INDEX_CODES,
+    aggregate_market_quote_truth,
+)
 from app.services.notification_gate import NotificationGate, build_alert_digest
+from app.services.sentinel_input_gate import (
+    inject_active_sentinel_evidence,
+    load_recent_sentinel_package,
+    sentinel_audit_only_message,
+)
 from app.services.visible_decision_gate import (
     build_runtime_blocked_gate,
     filter_alerts_by_visible_decision_gate,
@@ -88,7 +96,7 @@ class FeishuNotifier:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("恭喜发财 V7 应用启动中...")
+    logger.info("恭喜发财 v8.2.0-dev 应用启动中...")
     init_db()
     logger.info("数据库初始化完成")
 
@@ -101,84 +109,26 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("飞书 Webhook 已配置")
 
-    # ============================================================
-    # V7.5-dev 定时任务注册（盈利策略管线 feature 分支）
-    # ============================================================
-    scheduler.add_job(
-        _run_premarket_with_status,
-        CronTrigger(hour=8, minute=50, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='premarket', name='盘前短策略校准', replace_existing=True,
-        misfire_grace_time=3600,  # 错过1小时内自动补跑
+    start_scheduler_service(
+        scheduler,
+        SchedulerJobHandlers(
+            premarket=_run_premarket_with_status,
+            midday=_run_midday_with_status,
+            afternoon=_run_afternoon_with_status,
+            intraday_alert_scan=_run_intraday_alert_scan_with_status,
+            review=_run_review_with_status,
+            prediction_lab=_run_prediction_lab_with_status,
+            sentinel_research=_run_sentinel_research_with_status,
+            main_report=_run_daily_report_with_status,
+            sentinel_review=_run_sentinel_review_with_status,
+            bot_poll=_poll_bot_messages,
+            yitaojin_morning=_run_yitaojin_morning_with_status,
+            yitaojin_quotes=_run_yitaojin_quotes_with_status,
+            yitaojin_close_account=_run_yitaojin_close_account_with_status,
+            yitaojin_evening=_run_yitaojin_evening_with_status,
+        ),
+        logger=logger,
     )
-    scheduler.add_job(
-        _run_midday_with_status,
-        CronTrigger(hour=11, minute=35, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='midday', name='午盘快速分析', replace_existing=True,
-        misfire_grace_time=2700,  # 错过45分钟内自动补跑
-    )
-    scheduler.add_job(
-        _run_afternoon_with_status,
-        CronTrigger(hour=14, minute=0, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='afternoon', name='午后风险检查', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_intraday_alert_scan_with_status,
-        CronTrigger(hour='9-11,13-14', minute='*/5', day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='intraday_alert_scan', name='盘中事件触发扫描', replace_existing=True,
-        misfire_grace_time=120,
-    )
-    scheduler.add_job(
-        _run_review_with_status,
-        CronTrigger(hour=15, minute=5, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='review', name='收盘复盘', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_prediction_lab_with_status,
-        CronTrigger(hour=15, minute=25, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='prediction_lab', name='预测账本采集与到期评估', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_sentinel_research_with_status,
-        CronTrigger(hour=20, minute=0, day_of_week='mon-fri,sun', timezone='Asia/Shanghai'),
-        id='sentinel_research', name='Sentinel研究包与Serenity深挖', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_daily_report_with_status,
-        CronTrigger(hour=20, minute=30, day_of_week='mon-fri', timezone='Asia/Shanghai'),
-        id='main_report', name='次日投资策略主报告', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_daily_report_with_status,
-        CronTrigger(hour=20, minute=30, day_of_week='sun', timezone='Asia/Shanghai'),
-        id='sunday_main_report', name='周日晚次日投资策略主报告', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _run_sentinel_review_with_status,
-        CronTrigger(hour=21, minute=0, timezone='Asia/Shanghai'),
-        id='sentinel_review', name='Sentinel绩效回看与归档', replace_existing=True,
-        misfire_grace_time=3600,
-    )
-    scheduler.add_job(
-        _poll_bot_messages,
-        'interval', seconds=30,
-        id='bot_poll', name='飞书Bot消息轮询', replace_existing=True,
-    )
-    register_yitaojin_jobs(scheduler)
-
-    scheduler.start()
-    for stale_job_id in ("daily_report",):
-        try:
-            scheduler.remove_job(stale_job_id)
-            logger.info(f"已清理旧调度任务: {stale_job_id}")
-        except Exception:
-            pass
-    logger.info("旺财V7.5-dev 调度器已启动 (次日主报告 + 盘前校准 + 盘中5分钟事件扫描 + 预测账本 + 盘中/收盘 + Bot轮询)")
 
     asyncio.create_task(_startup_health_check())
 
@@ -193,7 +143,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
-    description="基于 DeepSeek 云端 AI 的 A 股智能监控与交易辅助系统",
+    description="A 股研究、风控、报告与受控券商桥接系统",
     version="8.2.0-dev",
     lifespan=lifespan,
 )
@@ -310,21 +260,41 @@ app.include_router(strategy.router)
 
 async def _fetch_market_data() -> dict:
     """通过 DataRouter 拉取市场数据（多源容错）"""
-    indices = {}
-    for code in ["sh000001", "sz399001", "sz399006"]:
+    expected_codes = list(EXPECTED_MARKET_INDEX_CODES)
+    aggregation_time = datetime.now().astimezone()
+    primary_quotes = {}
+    for code in expected_codes:
         try:
-            result = await data_router.fetch(code)
-            if result and result.get("price"):
-                indices[code] = {"price": result["price"], "change_pct": result.get("change_pct", 0)}
+            primary_quotes[code] = await data_router.fetch(code)
         except Exception:
-            continue
-    if not indices:
+            primary_quotes[code] = None
+    aggregate = aggregate_market_quote_truth(
+        primary_quotes,
+        expected_codes,
+        default_provider="data_router",
+        now=aggregation_time,
+    )
+    if not aggregate["quotes"]:
         try:
-            batch = await tencent_client.fetch_batch(["sh000001", "sz399001"])
-            for k, v in batch.items():
-                indices[k] = {"price": v.get("price", 0), "change_pct": v.get("change_pct", 0)}
+            fallback_quotes = await tencent_client.fetch_batch(expected_codes)
         except Exception:
-            indices = {"sh000001": {"price": 3350, "change_pct": 0}, "sz399001": {"price": 10800, "change_pct": 0}}
+            fallback_quotes = {}
+        aggregate = aggregate_market_quote_truth(
+            fallback_quotes,
+            expected_codes,
+            default_provider="data_router+tencent",
+            now=aggregation_time,
+        )
+
+    verified_quotes = aggregate["quotes"]
+    indices = {
+        code: {
+            "price": quote["price"],
+            "change_pct": quote.get("change_pct", 0),
+        }
+        for code, quote in verified_quotes.items()
+    }
+    market_source_status = aggregate["market_source_status"]
 
     db = SessionLocal()
     try:
@@ -336,7 +306,33 @@ async def _fetch_market_data() -> dict:
             "holdings_str": hd["holdings_str"], "news": [],
             "available_cash": hd.get("available_cash", 0),
             "total_assets": hd.get("total_assets", 0),
-            "portfolio_sync_failed": hd.get("portfolio_sync_failed", False)}
+            "portfolio_sync_failed": hd.get("portfolio_sync_failed", False),
+            "market_source_status": market_source_status}
+
+
+def _apply_premarket_sentinel_input(
+    package: dict | None,
+    report_date: str,
+    market_data: dict,
+) -> dict[str, object]:
+    """Apply the shared Sentinel gate at the backend premarket entry."""
+    return inject_active_sentinel_evidence(
+        package,
+        report_date,
+        market_data,
+    )
+
+
+def _load_premarket_sentinel_package(
+    report_date: str,
+    *,
+    output_root=None,
+):
+    """Load a backend premarket package through the shared lookback policy."""
+    return load_recent_sentinel_package(
+        report_date,
+        output_root=output_root,
+    )
 
 
 def _decision_recommendations(decision: dict) -> list[dict]:
@@ -681,22 +677,39 @@ async def _run_premarket_with_status():
         logger.info("=== 旺财V7 盘前任务启动 ===")
         market_data = await _fetch_market_data()
         try:
-            from app.ai.sentinel_research import load_research_package
-
-            sentinel_package = load_research_package(str(date.today()))
-            if sentinel_package:
-                market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
-                ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+            sentinel_report_date = str(date.today())
+            sentinel_package = _load_premarket_sentinel_package(
+                sentinel_report_date
+            )
+            sentinel_decision = _apply_premarket_sentinel_input(
+                sentinel_package,
+                sentinel_report_date,
+                market_data,
+            )
+            if sentinel_decision["active"] is True:
+                ingest_result = sentinel_decision.get("ingest_result") or {}
                 logger.info(
                     "Sentinel evidence 已进入盘前输入: "
                     f"evidence={ingest_result.get('evidence_count', 0)} "
                     f"targets={ingest_result.get('upserted_targets', 0)}"
                 )
+            elif sentinel_package:
+                logger.warning(
+                    "Sentinel evidence 仅归档: "
+                    f"{sentinel_audit_only_message(sentinel_decision)}"
+                )
         except Exception as exc:
             logger.warning(f"Sentinel evidence 盘前接入失败，降级继续: {exc}")
-        sh = market_data["indices"].get("sh000001", {}).get("price", 3350)
-        sz = market_data["indices"].get("sz399001", {}).get("price", 10800)
-        logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")
+        sh = market_data["indices"].get("sh000001", {}).get("price")
+        sz = market_data["indices"].get("sz399001", {}).get("price")
+        market_status = market_data.get("market_source_status", {}).get("status")
+        if market_status == "ok" and sh and sz:
+            logger.info(f"盘前指数: 上证{sh:.0f} 深证{sz:.0f}")
+        else:
+            logger.warning(
+                f"盘前指数不完整或不可用({market_status or 'failed'})，"
+                "禁止使用固定占位值"
+            )
 
         report = await run_analysis(market_data)
         logger.info("分析完成，启动AI辩论...")
@@ -1106,80 +1119,6 @@ async def _run_yitaojin_quotes_with_status(task: str = "priority_quotes"):
     return await _run_yitaojin_task_with_status(task)
 
 
-def register_yitaojin_jobs(target_scheduler) -> None:
-    """Register bounded jobs; intraday quote refresh reuses the existing scan."""
-    job_options = {
-        "replace_existing": True,
-        "max_instances": 1,
-        "coalesce": True,
-    }
-    target_scheduler.add_job(
-        _run_yitaojin_morning_with_status,
-        CronTrigger(
-            hour=8,
-            minute=55,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_morning",
-        name="易淘金盘前账户、自选与重点行情",
-        misfire_grace_time=300,
-        **job_options,
-    )
-    target_scheduler.add_job(
-        _run_yitaojin_quotes_with_status,
-        CronTrigger(
-            hour=11,
-            minute=35,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_midday_quotes",
-        name="易淘金午间重点行情校验",
-        misfire_grace_time=120,
-        **job_options,
-    )
-    target_scheduler.add_job(
-        _run_yitaojin_quotes_with_status,
-        CronTrigger(
-            hour=14,
-            minute=55,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_close_quotes",
-        name="易淘金收盘前重点行情校验",
-        misfire_grace_time=120,
-        **job_options,
-    )
-    target_scheduler.add_job(
-        _run_yitaojin_close_account_with_status,
-        CronTrigger(
-            hour=15,
-            minute=10,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_close_account",
-        name="易淘金收盘账户快照",
-        misfire_grace_time=900,
-        **job_options,
-    )
-    target_scheduler.add_job(
-        _run_yitaojin_evening_with_status,
-        CronTrigger(
-            hour=20,
-            minute=45,
-            day_of_week="mon-fri",
-            timezone="Asia/Shanghai",
-        ),
-        id="yitaojin_evening",
-        name="易淘金晚间自选同步",
-        misfire_grace_time=900,
-        **job_options,
-    )
-
-
 async def _run_sentinel_research_with_status():
     """Build the current Sentinel research package and Serenity deep dives."""
     try:
@@ -1199,12 +1138,38 @@ async def _run_sentinel_research_with_status():
             capture_output=True,
             timeout=180,
         )
-        if result.returncode != 0:
-            logger.warning(f"Sentinel研究包与Serenity深挖失败: {result.stderr[:800]}")
-            return
-        logger.info(f"Sentinel研究包与Serenity深挖完成: {result.stdout[:800]}")
+        detail = (result.stderr or result.stdout or "")[:800]
+        if result.returncode == 0:
+            logger.info(
+                f"Sentinel研究包与Serenity深挖完成: {result.stdout[:800]}"
+            )
+            return {
+                "state": "completed",
+                "returncode": 0,
+                "detail": detail,
+            }
+        if result.returncode == 2:
+            logger.warning(
+                f"Sentinel研究包与Serenity深挖降级: {detail}"
+            )
+            return {
+                "state": "degraded",
+                "returncode": 2,
+                "detail": detail,
+            }
+        logger.error(f"Sentinel研究包与Serenity深挖失败: {detail}")
+        return {
+            "state": "failed",
+            "returncode": result.returncode,
+            "detail": detail,
+        }
     except Exception as e:
         logger.error(f"Sentinel研究包与Serenity深挖异常: {e}", exc_info=True)
+        return {
+            "state": "failed",
+            "returncode": 1,
+            "detail": e.__class__.__name__,
+        }
 
 
 async def _run_sentinel_review_with_status():

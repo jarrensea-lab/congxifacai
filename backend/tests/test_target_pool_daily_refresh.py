@@ -32,7 +32,7 @@ async def test_build_target_scores_evicts_broken_mid_long_pool_item(monkeypatch)
             return True
 
     class FakeLongStore:
-        def load(self):
+        def load_strict(self):
             return {"items": {"600000": thesis}}
 
     class FakeSource:
@@ -79,7 +79,7 @@ async def test_build_target_scores_evicts_broken_mid_long_pool_item(monkeypatch)
 
     assert scores[0]["pool_kind"] == "mid_long_term"
     assert scores[0]["pool_retained"] is False
-    assert writes[0]["status"] == "removed"
+    assert writes[0]["status"] == "thesis_review"
     assert writes[0]["pool_kind"] == "mid_long_term"
     assert writes[0]["scoring_decision"]["pool_retained"] is False
 
@@ -123,7 +123,7 @@ async def test_daily_refresh_scores_every_existing_pool_member_before_discovery_
             return True
 
     class FakeLongStore:
-        def load(self):
+        def load_strict(self):
             return {
                 "items": {
                     "600000": {

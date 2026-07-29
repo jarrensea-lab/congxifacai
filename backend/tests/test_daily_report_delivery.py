@@ -1,9 +1,104 @@
 """Daily report delivery and Obsidian archive regression tests."""
+import asyncio
 import json
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from threading import Barrier, Event, Thread
 
 import pytest
+
+
+class _EmptyLongThesisStore:
+    def get(self, symbol):
+        return None
+
+    def load_strict(self):
+        return {"version": 1, "updated_at": "", "items": {}}
+
+
+class _OfflineScoreSource:
+    async def fetch_fund_flow_individual(self):
+        return []
+
+    async def fetch_hsgt_flow(self):
+        return []
+
+
+def _ordinary_target_write(
+    target_path,
+    lock_path,
+    journal_path,
+    rendezvous,
+    writer_finished,
+):
+    from app.services.quant_lifecycle import TargetPoolStore
+
+    target_store = TargetPoolStore(
+        target_path,
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    try:
+        rendezvous.wait(timeout=5)
+        target_store.upsert_target(
+            code="000001",
+            name="普通写入",
+            status="watching",
+            source="manual",
+        )
+    finally:
+        writer_finished.set()
+
+
+def _complete_score_snapshot(code, name, *, price=3.2):
+    return {
+        "code": code,
+        "name": name,
+        "quote": {
+            "status": "ok",
+            "price": price,
+            "change_pct": 4.2,
+            "amount_wan": 18000,
+            "turnover_pct": 8.0,
+            "vol_ratio": 2.6,
+        },
+        "kline": {
+            "status": "ok",
+            "bars": [
+                {
+                    "open": price * 0.95,
+                    "close": price * 0.98,
+                    "high": price,
+                    "low": price * 0.9,
+                }
+                for _ in range(20)
+            ],
+        },
+        "fund_flow": {"status": "ok", "net": "净流入"},
+        "financial": {"status": "ok", "revenue_yoy_pct": 12.0},
+        "news": {"status": "ok", "items": [{"title": "订单增长"}]},
+        "sentinel": {"status": "ok", "evidence_ids": ["ev_test"]},
+        "serenity": {"status": "ok", "score": 65},
+    }
+
+
+def _patch_score_dependencies(monkeypatch, target_store, snapshot_builder):
+    monkeypatch.setattr(
+        "app.services.quant_lifecycle.TargetPoolStore",
+        lambda: target_store,
+    )
+    monkeypatch.setattr(
+        "app.data_sources.realtime_market_data.FastRealtimeMarketDataSource",
+        _OfflineScoreSource,
+    )
+    monkeypatch.setattr(
+        "app.data_sources.akshare_news.AKShareNewsClient",
+        _OfflineScoreSource,
+    )
+    monkeypatch.setattr(
+        "app.services.target_snapshot.build_target_snapshot",
+        snapshot_builder,
+    )
 
 
 def test_save_report_to_obsidian_writes_report_index_and_status(tmp_path):
@@ -67,9 +162,10 @@ def test_build_next_day_strategy_sections_include_required_blocks():
             "accountant": {"analysis": "估值未到安全区"},
             "guardian": {"analysis": "小账户先保本金"},
             "researcher": {"analysis": "半导体主题热度高但不可直接交易"},
-        },
-        sentinel_package={
-            "event_count": 5674,
+            },
+            sentinel_package={
+                "date": "2026-06-28",
+                "event_count": 5674,
             "key_event_count": 2558,
             "top_themes": [{"name": "AI半导体", "count": 88}],
             "risk_events": [{"excerpt": "监管问询风险"}],
@@ -83,13 +179,15 @@ def test_build_next_day_strategy_sections_include_required_blocks():
     ))
 
     for heading in (
-        "## 一、系统和项目工作状态",
-        "## 二、明日持仓策略",
-        "## 三、短线关注标的池",
-        "## 四、中长线关注标的池",
+        "## 一、当前账户动作",
+        "### 持仓处理",
+        "### 新开仓机会（主选1只，备选最多2只）",
+        "## 二、中长期论文状态",
+        "## 三、研究参照与预算阻断（附录）",
+        "## 四、系统、数据与模型审计",
     ):
         assert heading in sections
-    assert "系统结论" in sections
+    assert "报告状态" in sections
     assert "Sentinel" in sections
     assert "Serenity" in sections
     assert "2026-06-29" in sections
@@ -213,6 +311,12 @@ def test_build_next_day_strategy_sections_is_concise_enough_for_feishu():
             ],
             "outside_pool_scan": [
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=82,
+                        action="actionable",
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "current_price": 3.55,
@@ -242,17 +346,17 @@ def test_build_next_day_strategy_sections_is_concise_enough_for_feishu():
     assert "数据覆盖与评分审计" in sections
     assert "数据覆盖与评分审计" not in summary
     for heading in (
-        "## 一、系统和项目工作状态",
-        "## 二、明日持仓策略",
-        "## 三、短线关注标的池",
-        "## 四、中长线关注标的池",
+        "## 一、当前账户动作",
+        "### 持仓处理",
+        "### 新开仓机会（主选1只，备选最多2只）",
+        "## 二、中长期论文状态",
     ):
         assert heading in summary
     assert "京东方A(000725)" in summary
     assert "新鲜行情已跌破 ¥7.61，立即卖出100股/退出" in summary
-    assert "| 标的 | 状态 | 现价 | 触发价格 | 止损 | 止盈 | 入选原因 | 查看顺序 |" in summary
-    assert "等待触发（未触发不买）" in summary
-    assert "| 标的 | 现价 | 触发价格 | 止损 | 止盈 | 发展趋势 | 计划持有周期 | 入选原因 |" in summary
+    assert "| 级别 | 标的 | 动作 | 建议金额/股数 | 触发/入场 | 止损 | 目标 | 阻断/闸门 | 下一信号 |" in summary
+    assert "统一入场闸门：阻断" in summary
+    assert "| 标的 | 论文状态 | 估值区间 | 长期分 | 红线 | 本次动作性质 | 下一步 |" in summary
 
 
 def test_build_next_day_strategy_sections_holding_stop_loss_is_explicit():
@@ -294,7 +398,7 @@ def test_build_next_day_strategy_sections_holding_stop_loss_is_explicit():
     assert "立即退出止损" in sections
     assert "新鲜行情已跌破 ¥7.61，立即卖出100股/退出" in sections
     assert "小仓位分批加仓" not in sections
-    assert "执行动作以下方" in sections
+    assert "## 一、当前账户动作" in sections
     assert "数据不足，建议观望" not in sections
 
 
@@ -358,6 +462,11 @@ def test_build_next_day_strategy_sections_promotes_breached_stop_to_first_screen
                 "items": {"000725": {"stop_loss_price": 7.61, "target_price": 8.65}}
             },
             "target_scores": [{
+                **_full_tactical_candidate(
+                    "000629",
+                    "钒钛股份",
+                    score=80,
+                ),
                 "code": "000629",
                 "name": "钒钛股份",
                 "action": "buy",
@@ -372,7 +481,7 @@ def test_build_next_day_strategy_sections_promotes_breached_stop_to_first_screen
         sentinel_package=None,
     ))
 
-    first_screen = sections[:sections.index("## 二、明日持仓策略")]
+    first_screen = sections[:sections.index("<!-- FEISHU_SUMMARY_END -->")]
     assert "开盘前硬风控" in first_screen
     assert "京东方A(000725) 已跌破止损 ¥7.61" in first_screen
     assert "新开仓暂停" in first_screen
@@ -381,11 +490,11 @@ def test_build_next_day_strategy_sections_promotes_breached_stop_to_first_screen
     assert "次日首个15分钟" not in first_screen
     assert "统一入场闸门：阻断" in first_screen
     short_pool = sections[
-        sections.index("## 三、短线关注标的池"):sections.index("## 四、中长线关注标的池")
+        sections.index("### 新开仓机会"):sections.index("## 二、中长期论文状态")
     ]
     assert "钒钛股份(000629)" in short_pool
-    assert "等待触发（未触发不买）" in short_pool
-    assert "| 可执行 |" not in short_pool
+    assert "闸门阻断，不下单" in short_pool
+    assert "人工复核买入" not in short_pool
 
 
 def test_main_report_not_triggered_gate_zeroes_all_entry_rows():
@@ -426,14 +535,14 @@ def test_main_report_not_triggered_gate_zeroes_all_entry_rows():
         sentinel_package=None,
     ))
 
-    first_screen = sections[:sections.index("## 二、明日持仓策略")]
+    first_screen = sections[:sections.index("<!-- FEISHU_SUMMARY_END -->")]
     short_pool = sections[
-        sections.index("## 三、短线关注标的池"):sections.index("## 四、中长线关注标的池")
+        sections.index("### 新开仓机会"):sections.index("## 二、中长期论文状态")
     ]
     score_audit = sections[sections.index("### 标的评分"):]
     assert "统一入场闸门：阻断" in first_screen
     assert "主报告入场状态明确为“未触发不买”" in first_screen
-    assert "| 可执行 |" not in short_pool
+    assert "人工复核买入" not in short_pool
     assert "可人工复核买入" not in score_audit
     assert "可人工复核" not in score_audit
 
@@ -471,12 +580,12 @@ def test_pending_user_confirmed_portfolio_writeback_zeroes_entry_rows():
         },
     ))
 
-    first_screen = sections[:sections.index("## 二、明日持仓策略")]
+    first_screen = sections[:sections.index("<!-- FEISHU_SUMMARY_END -->")]
     short_pool = sections[
-        sections.index("## 三、短线关注标的池"):sections.index("## 四、中长线关注标的池")
+        sections.index("### 新开仓机会"):sections.index("## 二、中长期论文状态")
     ]
     assert "用户确认成交尚未同步持仓真值" in first_screen
-    assert "| 可执行 |" not in short_pool
+    assert "人工复核加仓" not in short_pool
 
 
 def test_fresh_quote_below_stop_requires_immediate_exit_without_wait():
@@ -514,9 +623,9 @@ def test_fresh_quote_below_stop_requires_immediate_exit_without_wait():
         sentinel_package=None,
     ))
 
-    first_screen = sections[:sections.index("## 二、明日持仓策略")]
+    first_screen = sections[:sections.index("<!-- FEISHU_SUMMARY_END -->")]
     holding_section = sections[
-        sections.index("## 二、明日持仓策略"):sections.index("## 三、短线关注标的池")
+        sections.index("### 持仓处理"):sections.index("### 新开仓机会")
     ]
     assert "立即" in first_screen
     assert "退出" in first_screen
@@ -721,6 +830,11 @@ def test_build_next_day_strategy_sections_excludes_current_holdings_from_new_ent
             },
             "target_scores": [
                 {
+                    **_full_tactical_candidate(
+                        "000725",
+                        "京东方A",
+                        score=80,
+                    ),
                     "code": "000725",
                     "name": "京东方A",
                     "action": "buy",
@@ -731,6 +845,11 @@ def test_build_next_day_strategy_sections_excludes_current_holdings_from_new_ent
                     "decision_reason": "候选池残留记录。",
                 },
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=81,
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "action": "buy",
@@ -747,7 +866,7 @@ def test_build_next_day_strategy_sections_excludes_current_holdings_from_new_ent
     ))
 
     short_pool = sections[
-        sections.index("## 三、短线关注标的池"):sections.index("## 四、中长线关注标的池")
+        sections.index("### 新开仓机会"):sections.index("## 二、中长期论文状态")
     ]
     assert "京东方A(000725)" not in short_pool
     assert "钒钛股份(000629)" in short_pool
@@ -794,6 +913,12 @@ def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
             ],
             "outside_pool_scan": [
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=82,
+                        action="actionable",
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "source": "small_account_discovery",
@@ -803,8 +928,9 @@ def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
                     "trigger_price": 3.55,
                     "stop_loss": 3.37,
                     "target_price": 3.98,
-                    "suggested_amount": 355.0,
-                    "watch_reason": "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。",
+                        "suggested_amount": 355.0,
+                        "next_signal": "已具备量能线索，等待资金流转正。",
+                        "watch_reason": "池外小账户补扫；已具备量能线索，明日若资金流转正且不高开追涨，可一手试错复核。",
                 }
             ],
             "role_votes": {
@@ -819,13 +945,14 @@ def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
         strategy_profile=get_strategy_profile("growth_sprint"),
     ))
 
-    system = sections.index("## 一、系统和项目工作状态")
-    holdings = sections.index("## 二、明日持仓策略")
-    short_pool = sections.index("## 三、短线关注标的池")
-    long_pool = sections.index("## 四、中长线关注标的池")
-    assert system < holdings < short_pool < long_pool
+    account = sections.index("## 一、当前账户动作")
+    holdings = sections.index("### 持仓处理")
+    short_pool = sections.index("### 新开仓机会")
+    long_pool = sections.index("## 二、中长期论文状态")
+    audit = sections.index("## 四、系统、数据与模型审计")
+    assert account < holdings < short_pool < long_pool < audit
 
-    first_screen = sections[:short_pool]
+    first_screen = sections[:sections.index("<!-- FEISHU_SUMMARY_END -->")]
     short_screen = sections[short_pool:long_pool]
     assert "钒钛股份(000629)" in short_screen
     assert "已具备量能线索" in short_screen
@@ -837,8 +964,8 @@ def test_build_next_day_strategy_sections_uses_profit_first_dashboard_order():
     assert "预算阻断 1 只" in sections
     assert "AI原文价格错配" not in sections
     assert "现价325元高于区间30%" not in sections
-    assert "赚钱效应" in first_screen
-    assert "赚钱效应：偏低" in first_screen
+    assert "赚钱效应" not in first_screen
+    assert "赚钱效应：偏低" in sections[audit:]
     assert "¥30.43" not in sections
 
 
@@ -861,6 +988,90 @@ def test_load_sentinel_research_package_falls_back_to_latest(monkeypatch, tmp_pa
     assert package["date"] == "2026-06-30"
     assert package["fallback_used"] is True
     assert package["requested_date"] == "2026-07-01"
+
+
+@pytest.mark.parametrize(
+    ("package_date", "expected_status", "expected_text"),
+    [
+        ("2026-07-01", "stale", "历史"),
+        ("2026-07-05", "future", "未来"),
+        (None, "unknown_date", "日期缺失或非法"),
+        ("not-a-date", "unknown_date", "日期缺失或非法"),
+    ],
+)
+def test_inactive_sentinel_package_is_audit_only(
+    package_date,
+    expected_status,
+    expected_text,
+):
+    import scripts.daily_report as daily_report
+
+    package = {
+        "date": package_date,
+        "event_count": 10,
+        "top_themes": [{"name": "AI", "count": 2}],
+    }
+    market_data = {}
+    calls = []
+
+    result = daily_report._inject_active_sentinel_evidence(
+        package,
+        "2026-07-04",
+        market_data,
+        context_builder=lambda value: calls.append(("context", value)) or "ctx",
+        target_upserter=lambda value: calls.append(("upsert", value)) or {},
+    )
+
+    assert result["status"] == expected_status
+    assert result["active"] is False
+    assert calls == []
+    assert "sentinel_evidence" not in market_data
+    rendered = "\n".join(
+        daily_report.build_sentinel_research_section(
+            package,
+            report_date="2026-07-04",
+        )
+    )
+    assert expected_text in rendered
+    assert "当前候选" not in rendered or "不参与当前候选" in rendered
+
+
+@pytest.mark.parametrize("package_date", ["2026-07-02", "2026-07-03", "2026-07-04"])
+def test_recent_sentinel_fallback_can_enter_decision_context(package_date):
+    import scripts.daily_report as daily_report
+
+    package = {"date": package_date, "event_count": 10}
+    market_data = {}
+    calls = []
+
+    result = daily_report._inject_active_sentinel_evidence(
+        package,
+        "2026-07-04",
+        market_data,
+        context_builder=lambda value: calls.append("context") or "ctx",
+        target_upserter=lambda value: calls.append("upsert") or {
+            "evidence_count": 1,
+            "upserted_targets": 1,
+        },
+    )
+
+    assert result["status"] == "active"
+    assert result["active"] is True
+    assert result["age_days"] in {0, 1, 2}
+    assert calls == ["context", "upsert"]
+    assert market_data["sentinel_evidence"] == "ctx"
+
+
+def test_sentinel_package_age_preserves_future_sign():
+    import scripts.daily_report as daily_report
+
+    assert (
+        daily_report._sentinel_package_age_days(
+            {"date": "2026-07-05"},
+            "2026-07-04",
+        )
+        == -1
+    )
 
 
 def test_build_next_day_strategy_sections_render_role_votes():
@@ -893,8 +1104,8 @@ def test_build_next_day_strategy_sections_render_role_votes():
         sentinel_package=None,
     ))
 
-    assert "## 一、系统和项目工作状态" in sections
-    assert "角色投票和裁判原文只留在 Obsidian" in sections
+    assert "## 一、当前账户动作" in sections
+    assert "AI裁判原文仅作本地审计" in sections
     summary = build_feishu_summary(sections)
     assert "688008" not in summary
     assert "猎手 7分" not in summary
@@ -927,6 +1138,11 @@ def test_build_next_day_strategy_sections_hides_budget_blocked_research_referenc
         decision={
             "target_scores": [
                 {
+                    **_full_tactical_candidate(
+                        "002123",
+                        "低价突破",
+                        score=78,
+                    ),
                     "code": "002123",
                     "name": "低价突破",
                     "action": "buy",
@@ -952,10 +1168,13 @@ def test_build_next_day_strategy_sections_hides_budget_blocked_research_referenc
         sentinel_package=None,
     ))
 
-    assert "## 三、短线关注标的池" in sections
-    assert "低价突破(002123)" in sections
-    assert "## 四、中长线关注标的池" in sections
-    assert "澜起科技(688008)" not in sections
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+    assert "### 新开仓机会" in sections
+    assert "低价突破(002123)" in feishu
+    assert "## 二、中长期论文状态" in sections
+    assert "澜起科技(688008)" not in feishu
+    assert "澜起科技(688008)" in appendix
     assert "预算阻断 1 只" in sections
     assert "数据不足，建议观望" not in sections
 
@@ -991,10 +1210,13 @@ def test_build_next_day_strategy_sections_explains_long_research_exists_when_bud
         sentinel_package=None,
     ))
 
-    assert "澜起科技(688008)" not in sections
-    assert "中长线研究不是没有" in sections
-    assert "研究层仍有 1 只预算阻断标的" in sections
-    assert "明细在 Obsidian" in sections
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+    assert "澜起科技(688008)" not in feishu
+    assert "澜起科技(688008)" in appendix
+    assert "中长线研究不是没有" not in sections
+    assert "研究层仍有" not in sections
+    assert "预算不足本身不构成中长期研究结论" in sections
 
 
 def test_build_next_day_strategy_sections_excludes_legacy_report_order():
@@ -1018,12 +1240,12 @@ def test_build_next_day_strategy_sections_excludes_legacy_report_order():
 
     assert "## 📈 一、市场概况" not in sections
     assert "## 🧠 三、AI 多维度分析" not in sections
-    assert sections.index("## 一、系统和项目工作状态") < sections.index("## 二、明日持仓策略")
-    assert sections.index("## 三、短线关注标的池") < sections.index("## 四、中长线关注标的池")
+    assert sections.index("## 一、当前账户动作") < sections.index("## 二、中长期论文状态")
+    assert sections.index("<!-- FEISHU_SUMMARY_END -->") < sections.index("## 四、系统、数据与模型审计")
     assert "明日【唯一】实盘狙击标的" not in sections
     summary = build_feishu_summary(sections)
-    assert "后台风控与策略审计" in sections
-    assert "后台风控与策略审计" not in summary
+    assert "系统、数据与模型审计" in sections
+    assert "系统、数据与模型审计" not in summary
 
 
 def test_build_next_day_strategy_sections_renders_outside_pool_scan_when_no_buy():
@@ -1054,6 +1276,12 @@ def test_build_next_day_strategy_sections_renders_outside_pool_scan_when_no_buy(
             ],
             "outside_pool_scan": [
                 {
+                    **_full_tactical_candidate(
+                        "000629",
+                        "钒钛股份",
+                        score=82,
+                        action="actionable",
+                    ),
                     "code": "000629",
                     "name": "钒钛股份",
                     "source": "small_account_discovery",
@@ -1074,7 +1302,7 @@ def test_build_next_day_strategy_sections_renders_outside_pool_scan_when_no_buy(
 
     assert "### 池外小账户补扫" not in sections
     assert "钒钛股份(000629)" in sections
-    assert "触发价格" in sections
+    assert "触发/入场" in sections
     assert "¥3.37" in sections
     assert "¥3.98" in sections
     assert "small_account_discovery" not in sections
@@ -1115,10 +1343,13 @@ def test_build_next_day_strategy_sections_does_not_try_unaffordable_outside_scan
     ))
 
     assert "不下单" in sections
-    assert "润和软件(300339)" not in sections
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+    assert "润和软件(300339)" not in feishu
+    assert "润和软件(300339)" in appendix
     assert "预算阻断 1 只" in sections
     assert "一手试错约¥3,933.00" not in sections
-    assert "等回落到¥30.42以内" not in sections
+    assert "等回落到¥30.42以内" not in feishu
 
 
 def test_build_next_day_strategy_sections_hides_internal_enums_and_translates_missing_data():
@@ -1195,8 +1426,6 @@ def test_build_next_day_strategy_sections_hides_internal_enums_and_translates_mi
         assert token not in sections
     assert "个股资金流" in sections
     assert "K线" in sections
-    assert "放量突破买点" in sections
-    assert "回踩买点" in sections
     assert "预算阻断 1 只" in sections
 
 
@@ -1245,10 +1474,13 @@ def test_build_next_day_strategy_sections_renders_mid_frequency_strategy_line():
         strategy_profile=get_strategy_profile("growth_sprint"),
     ))
 
-    assert "## 四、中长线关注标的池" in sections
-    assert "北方华创(002371)" not in sections
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+    assert "## 二、中长期论文状态" in sections
+    assert "北方华创(002371)" not in feishu
+    assert "北方华创(002371)" in appendix
     assert "预算阻断 1 只" in sections
-    assert "¥935.36" not in sections
+    assert "¥935.36" not in feishu
     assert "可人工复核买入" not in sections
 
 
@@ -1298,18 +1530,36 @@ def test_build_next_day_strategy_sections_renders_long_horizon_summary():
                     "red_line_status": "triggered",
                     "combined_decision_reason": "中长期 thesis 红线触发。",
                 },
+                {
+                    "code": "000001",
+                    "name": "形成中测试",
+                    "action": "watch",
+                    "score": 40,
+                    "entry_price": 10.0,
+                    "lot_value": 1000,
+                    "block_reason": "price_not_triggered",
+                    "decision_reason": "等待财务验证。",
+                    "long_quality_score": 72,
+                    "thesis_status": "forming",
+                    "valuation_zone": "unknown",
+                    "red_line_status": "clear",
+                    "combined_decision_reason": "论文验证材料未完整。",
+                },
             ],
         },
         roles={},
         sentinel_package=None,
     ))
 
-    assert "## 四、中长线关注标的池" in sections
+    assert "## 二、中长期论文状态" in sections
     assert "长期测试(002123)" in sections
     assert "论文成立" in sections
     assert "积累区" in sections
     assert "红线触发" in sections
-    first_screen = sections[:sections.index("## 四、中长线关注标的池")]
+    assert "论文形成中/验证未完成" in sections
+    assert "形成中测试(000001)" in sections
+    assert "未建论文" not in sections
+    first_screen = sections[:sections.index("## 二、中长期论文状态")]
     assert "accumulation_zone" not in first_screen
 
 
@@ -1658,6 +1908,7 @@ async def test_build_target_scores_prioritizes_actionable_pool_status(monkeypatc
         total_assets=6052.57,
         limit=1,
         market_source=shared_market_source,
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert selected_codes == ["300002"]
@@ -1715,6 +1966,7 @@ async def test_build_target_scores_does_not_reactivate_cooldown_after_loss(monke
         available_cash=2103.25,
         total_assets=5975.25,
         market_source=FakeSource(),
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert selected_codes == ["300002"]
@@ -1775,6 +2027,7 @@ async def test_build_target_scores_refreshes_newest_research_hypothesis_first(mo
         total_assets=5975.25,
         limit=1,
         market_source=FakeSource(),
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert selected_codes == ["000563"]
@@ -1847,6 +2100,7 @@ async def test_build_target_scores_keeps_triggered_research_reference_non_execut
         available_cash=6085.61,
         total_assets=6085.61,
         limit=1,
+        long_thesis_store=_EmptyLongThesisStore(),
     )
 
     assert scores[0]["score"] >= 70
@@ -1855,6 +2109,791 @@ async def test_build_target_scores_keeps_triggered_research_reference_non_execut
     assert writes[0]["scoring_decision"]["score"] == scores[0]["score"]
     assert writes[0]["scoring_decision"]["action"] == "research_only"
     assert writes[0]["scoring_decision"]["source_status"]["quote"] == "ok"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("current_status", "expected_status"),
+    [
+        ("long_research", "long_watch"),
+        ("long_watch", "long_watch"),
+        ("accumulation_zone", "accumulation_zone"),
+    ],
+)
+async def test_build_target_scores_consumes_injected_long_thesis_and_preserves_long_state(
+    monkeypatch,
+    tmp_path,
+    current_status,
+    expected_status,
+):
+    from app.services.long_thesis import LongThesisStore
+    from scripts.daily_report import build_target_scores_for_report
+
+    writes = []
+    thesis_store = LongThesisStore(tmp_path / "long_thesis.json")
+    thesis_store.upsert(
+        {
+            "symbol": "002123",
+            "name": "梦网科技",
+            "quality_score": 88,
+            "thesis_status": "healthy",
+            "verification_status": "verified",
+            "current_long_evidence_ids": [
+                "long-thesis:002123:v2",
+                "long-red-line:002123:v2",
+            ],
+            "valuation_anchor": {
+                "accumulation_price": 3.3,
+                "fair_price": 4.0,
+                "overpriced_price": 5.2,
+            },
+            "assumptions": [{"id": "growth", "status": "intact"}],
+            "red_lines": [{"id": "margin", "status": "clear"}],
+            "financial_evidence": {"raw_blob": "not-for-scorecard" * 100},
+        }
+    )
+
+    class FakeStore:
+        def load(self):
+            return {
+                "items": {
+                    "002123": {
+                        "code": "002123",
+                        "name": "梦网科技",
+                        "status": current_status,
+                        "source": "long_horizon",
+                        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+                    }
+                }
+            }
+
+        def upsert_target(self, **kwargs):
+            writes.append(kwargs)
+            return True
+
+    class FakeSource:
+        async def fetch_fund_flow_individual(self):
+            return []
+
+        async def fetch_hsgt_flow(self):
+            return []
+
+    async def fake_snapshot(code, **kwargs):
+        return {
+            "code": code,
+            "name": kwargs["name"],
+            "quote": {
+                "status": "ok",
+                "price": 3.2,
+                "change_pct": 1.2,
+                "amount_wan": 8200,
+                "turnover_pct": 3.0,
+                "vol_ratio": 1.1,
+            },
+            "kline": {
+                "status": "ok",
+                "bars": [
+                    {"open": 3.1, "close": 3.15, "high": 3.2, "low": 3.0}
+                    for _ in range(20)
+                ],
+            },
+            "fund_flow": {"status": "ok", "net": "净流入"},
+            "financial": {"status": "ok", "revenue_yoy_pct": 12.0},
+            "news": {"status": "ok", "items": [{"title": "订单增长"}]},
+            "sentinel": {"status": "ok", "evidence_ids": ["ev_test"]},
+            "serenity": {"status": "ok", "score": 65},
+        }
+
+    monkeypatch.setattr("app.services.quant_lifecycle.TargetPoolStore", FakeStore)
+    monkeypatch.setattr(
+        "app.data_sources.realtime_market_data.FastRealtimeMarketDataSource",
+        FakeSource,
+    )
+    monkeypatch.setattr("app.data_sources.akshare_news.AKShareNewsClient", FakeSource)
+    monkeypatch.setattr(
+        "app.services.target_snapshot.build_target_snapshot",
+        fake_snapshot,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=FakeSource(),
+        long_thesis_store=thesis_store,
+    )
+
+    assert scores[0]["action"] == "watch"
+    assert scores[0]["block_reason"] == "price_not_triggered"
+    assert scores[0]["long_quality_score"] == 88
+    assert scores[0]["thesis_status"] == "healthy"
+    assert scores[0]["valuation_zone"] == "accumulation_zone"
+    assert scores[0]["red_line_status"] == "clear"
+    assert scores[0]["long_horizon_reason"] == "assumptions_intact"
+    assert "长期跟踪" in scores[0]["combined_decision_reason"]
+    assert scores[0]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2",
+        "long-red-line:002123:v2",
+    ]
+    assert writes[0]["status"] == expected_status
+    assert writes[0]["current_long_evidence_ids"] == scores[0][
+        "current_long_evidence_ids"
+    ]
+    decision = writes[0]["scoring_decision"]
+    for field in (
+        "long_quality_score",
+        "thesis_status",
+        "valuation_zone",
+        "red_line_status",
+        "long_horizon_reason",
+        "combined_decision_reason",
+        "current_long_evidence_ids",
+    ):
+        assert decision[field] == scores[0][field]
+    assert "financial_evidence" not in decision
+
+
+@pytest.mark.asyncio
+async def test_build_target_scores_default_long_thesis_store_uses_env_path(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_thesis import LongThesisStore
+    from scripts.daily_report import build_target_scores_for_report
+
+    thesis_path = tmp_path / "env-long-thesis.json"
+    monkeypatch.setenv("CONGXI_LONG_THESIS_PATH", str(thesis_path))
+    LongThesisStore().upsert(
+        {
+            "symbol": "000001",
+            "quality_score": 77,
+            "thesis_status": "healthy",
+            "assumptions": [{"id": "deposit", "status": "intact"}],
+            "red_lines": [],
+        }
+    )
+    received_theses = []
+
+    class FakeStore:
+        def load(self):
+            return {
+                "items": {
+                    "000001": {
+                        "code": "000001",
+                        "name": "平安银行",
+                        "status": "long_research",
+                        "source": "long_horizon",
+                    }
+                }
+            }
+
+        def upsert_target(self, **kwargs):
+            return True
+
+    class FakeSource:
+        async def fetch_fund_flow_individual(self):
+            return []
+
+        async def fetch_hsgt_flow(self):
+            return []
+
+    async def fake_snapshot(code, **kwargs):
+        return {"code": code, "name": kwargs["name"], "quote": {"price": 10.0}}
+
+    def fake_score(snapshot, **kwargs):
+        received_theses.append(kwargs.get("long_thesis"))
+        return {
+            "code": snapshot["code"],
+            "name": snapshot["name"],
+            "score": 50,
+            "action": "watch",
+            "long_quality_score": 77,
+            "thesis_status": "healthy",
+        }
+
+    monkeypatch.setattr("app.services.quant_lifecycle.TargetPoolStore", FakeStore)
+    monkeypatch.setattr(
+        "app.data_sources.realtime_market_data.FastRealtimeMarketDataSource",
+        FakeSource,
+    )
+    monkeypatch.setattr("app.data_sources.akshare_news.AKShareNewsClient", FakeSource)
+    monkeypatch.setattr(
+        "app.services.target_snapshot.build_target_snapshot",
+        fake_snapshot,
+    )
+    monkeypatch.setattr("app.services.target_scoring.score_target", fake_score)
+
+    await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=FakeSource(),
+    )
+
+    assert received_theses[0]["symbol"] == "000001"
+    assert received_theses[0]["quality_score"] == 77
+
+
+@pytest.mark.parametrize(
+    "corrupt_bytes",
+    [
+        b"{broken",
+        b"\xff\xfe\xfa",
+    ],
+)
+@pytest.mark.asyncio
+async def test_build_target_scores_fails_closed_when_long_thesis_store_is_corrupted(
+    monkeypatch,
+    tmp_path,
+    corrupt_bytes,
+):
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from scripts.daily_report import (
+        build_next_day_strategy_sections,
+        build_target_scores_for_report,
+    )
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store.upsert_target(
+        code="002123",
+        name="长期摘要保护",
+        status="watching",
+        source="manual",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        scoring_decision={
+            "action": "watch",
+            "score": 68,
+            "long_quality_score": 82,
+            "thesis_status": "healthy",
+            "valuation_zone": "fair_zone",
+            "red_line_status": "clear",
+            "long_horizon_reason": "last_valid_summary",
+            "combined_decision_reason": "保留最后有效长期摘要。",
+            "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        },
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    before = target_store.path.read_bytes()
+    thesis_path = tmp_path / "long_thesis.json"
+    thesis_path.write_bytes(corrupt_bytes)
+    thesis_store = LongThesisStore(
+        thesis_path,
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+
+    async def fake_snapshot(code, **kwargs):
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+    sections = "\n".join(build_next_day_strategy_sections(
+        report_date="2026-07-26",
+        target_date="2026-07-27",
+        risk_level=4,
+        final_view="长期论文存储待修复",
+        confidence=0,
+        positions=[],
+        available_cash=6085.61,
+        total_assets=6085.61,
+        market_data={"indices": {"shanghai": 0}},
+        analysis_report={"overall_bias": "unknown"},
+        decision={"target_scores": scores},
+        roles={},
+        sentinel_package=None,
+    ))
+
+    assert "长期论文存储损坏" in sections
+    assert "论文状态未知" in sections
+    assert "红线状态未知" in sections
+    assert "论文成立" not in sections
+    assert "红线未触发" not in sections
+    assert (
+        "| 长期摘要保护(002123) | 论文状态未知 | 待估值 | 未知 | "
+        "红线状态未知 | 观察复核 | 长期论文存储损坏，本批评分已安全阻断；"
+        "当前论文与红线状态未知，历史摘要仅作 last-known 审计，"
+        "修复存储后再评分。 |"
+    ) in sections
+    assert "| None |" not in sections
+    assert scores[0]["action"] == "watch"
+    assert scores[0]["block_reason"] == "long_thesis_store_invalid"
+    assert scores[0]["entry_allowed"] is False
+    assert scores[0]["combined_decision_reason"] == scores[0][
+        "decision_reason"
+    ]
+    assert scores[0]["thesis_status"] == "unknown"
+    assert scores[0]["long_quality_score"] is None
+    assert scores[0]["valuation_zone"] == "unknown"
+    assert scores[0]["red_line_status"] == "unknown"
+    assert scores[0]["current_long_evidence_ids"] == []
+    assert scores[0]["last_known_long_quality_score"] == 82
+    assert scores[0]["last_known_thesis_status"] == "healthy"
+    assert scores[0]["last_known_valuation_zone"] == "fair_zone"
+    assert scores[0]["last_known_red_line_status"] == "clear"
+    assert scores[0]["last_known_combined_decision_reason"] == (
+        "保留最后有效长期摘要。"
+    )
+    assert scores[0]["last_known_long_evidence_ids"] == [
+        "long-thesis:002123:v1"
+    ]
+    assert target_store.path.read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_build_target_scores_reloads_latest_target_and_thesis_after_snapshots(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_horizon_transaction import LongHorizonBatchTransaction
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from scripts.daily_report import build_target_scores_for_report
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store = LongThesisStore(
+        tmp_path / "long_thesis.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    thesis_store.upsert({
+        "symbol": "002123",
+        "name": "旧版本",
+        "quality_score": 88,
+        "thesis_status": "healthy",
+        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "status": "clear"}],
+    })
+    target_store.upsert_target(
+        code="002123",
+        name="旧版本",
+        status="long_watch",
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    transaction = LongHorizonBatchTransaction(
+        journal_path,
+        [
+            ("long_thesis", thesis_store.path),
+            ("target_pool", target_store.path),
+        ],
+        lock_path=lock_path,
+    )
+    snapshot_started = Event()
+    materializer_finished = Event()
+    errors = []
+
+    def materialize_broken_v2():
+        try:
+            assert snapshot_started.wait(timeout=5)
+            with transaction.locked():
+                transaction.begin()
+                thesis_store.upsert({
+                    "symbol": "002123",
+                    "name": "最新版本",
+                    "quality_score": 92,
+                    "thesis_status": "broken",
+                    "current_long_evidence_ids": [
+                        "long-thesis:002123:v2",
+                        "long-red-line:002123:v2",
+                    ],
+                    "red_lines": [{
+                        "id": "margin",
+                        "status": "triggered",
+                        "condition": "毛利率红线触发",
+                    }],
+                })
+                target_store.upsert_target(
+                    code="002123",
+                    name="最新版本",
+                    status="long_watch",
+                    source="long_horizon",
+                    current_long_evidence_ids=[
+                        "long-thesis:002123:v2",
+                        "long-red-line:002123:v2",
+                    ],
+                )
+                transaction.commit()
+        except Exception as exc:  # pragma: no cover - surfaced below.
+            errors.append(exc)
+        finally:
+            materializer_finished.set()
+
+    worker = Thread(target=materialize_broken_v2)
+    worker.start()
+
+    async def fake_snapshot(code, **kwargs):
+        snapshot_started.set()
+        assert await asyncio.to_thread(materializer_finished.wait, 5)
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+    worker.join(timeout=5)
+
+    assert errors == []
+    assert not worker.is_alive()
+    assert scores[0]["name"] == "最新版本"
+    assert scores[0]["action"] != "buy"
+    assert scores[0]["block_reason"] == "long_thesis_broken"
+    assert scores[0]["thesis_status"] == "broken"
+    assert scores[0]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2",
+        "long-red-line:002123:v2",
+    ]
+    current = target_store.get("002123")
+    assert current["name"] == "最新版本"
+    assert current["status"] == "thesis_review"
+    assert current["current_long_evidence_ids"] == scores[0][
+        "current_long_evidence_ids"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_exclusive_materializer_waits_for_daily_scoring_guard(
+    monkeypatch,
+    tmp_path,
+):
+    from app.services.long_horizon_transaction import LongHorizonBatchTransaction
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from app.services.target_scoring import score_target as real_score_target
+    from scripts.daily_report import build_target_scores_for_report
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store = LongThesisStore(
+        tmp_path / "long_thesis.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    thesis_store.upsert({
+        "symbol": "002123",
+        "name": "一致性测试",
+        "quality_score": 88,
+        "thesis_status": "healthy",
+        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "status": "clear"}],
+    })
+    target_store.upsert_target(
+        code="002123",
+        name="一致性测试",
+        status="long_watch",
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    transaction = LongHorizonBatchTransaction(
+        journal_path,
+        [
+            ("long_thesis", thesis_store.path),
+            ("target_pool", target_store.path),
+        ],
+        lock_path=lock_path,
+    )
+    rendezvous = Barrier(2)
+    exclusive_acquired = Event()
+    materializer_finished = Event()
+    acquired_during_score = []
+    errors = []
+
+    def materialize_v2():
+        try:
+            rendezvous.wait(timeout=5)
+            with transaction.locked():
+                exclusive_acquired.set()
+                transaction.begin()
+                thesis_store.upsert({
+                    "symbol": "002123",
+                    "name": "一致性测试",
+                    "quality_score": 0,
+                    "thesis_status": "broken",
+                    "current_long_evidence_ids": ["long-thesis:002123:v2"],
+                    "red_lines": [{
+                        "id": "margin",
+                        "status": "triggered",
+                        "condition": "更新后红线",
+                    }],
+                })
+                target_store.upsert_target(
+                    code="002123",
+                    name="一致性测试",
+                    status="thesis_review",
+                    source="long_horizon",
+                    current_long_evidence_ids=["long-thesis:002123:v2"],
+                )
+                transaction.commit()
+        except Exception as exc:  # pragma: no cover - surfaced below.
+            errors.append(exc)
+        finally:
+            materializer_finished.set()
+
+    def synchronized_score(snapshot, **kwargs):
+        rendezvous.wait(timeout=5)
+        acquired_during_score.append(exclusive_acquired.wait(timeout=0.5))
+        return real_score_target(snapshot, **kwargs)
+
+    worker = Thread(target=materialize_v2)
+    worker.start()
+
+    async def fake_snapshot(code, **kwargs):
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+    monkeypatch.setattr(
+        "app.services.target_scoring.score_target",
+        synchronized_score,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+    assert await asyncio.to_thread(materializer_finished.wait, 5)
+    worker.join(timeout=5)
+
+    assert errors == []
+    assert not worker.is_alive()
+    assert acquired_during_score == [False]
+    assert scores[0]["current_long_evidence_ids"] == [
+        "long-thesis:002123:v1"
+    ]
+    current = target_store.get("002123")
+    assert current["status"] == "thesis_review"
+    assert current["current_long_evidence_ids"] == [
+        "long-thesis:002123:v2"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_ordinary_target_writer_waits_and_is_not_lost_during_scoring(
+    monkeypatch,
+    tmp_path,
+):
+    from multiprocessing import get_context
+
+    from app.services.long_thesis import LongThesisStore
+    from app.services.quant_lifecycle import TargetPoolStore
+    from app.services.target_scoring import score_target as real_score_target
+    from scripts.daily_report import build_target_scores_for_report
+
+    lock_path = tmp_path / ".long_horizon_transaction.lock"
+    journal_path = tmp_path / "long_horizon_transaction.json"
+    thesis_store = LongThesisStore(
+        tmp_path / "long_thesis.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    target_store = TargetPoolStore(
+        tmp_path / "target_pool.json",
+        transaction_lock_path=lock_path,
+        transaction_journal_path=journal_path,
+    )
+    thesis_store.upsert({
+        "symbol": "002123",
+        "name": "池锁一致性测试",
+        "quality_score": 88,
+        "thesis_status": "healthy",
+        "current_long_evidence_ids": ["long-thesis:002123:v1"],
+        "assumptions": [{"id": "growth", "status": "intact"}],
+        "red_lines": [{"id": "margin", "status": "clear"}],
+    })
+    target_store.upsert_target(
+        code="002123",
+        name="池锁一致性测试",
+        status="long_watch",
+        source="long_horizon",
+        current_long_evidence_ids=["long-thesis:002123:v1"],
+        current_price=3.2,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+    process_context = get_context("spawn")
+    rendezvous = process_context.Barrier(2)
+    writer_finished = process_context.Event()
+    finished_during_score = []
+
+    def synchronized_score(snapshot, **kwargs):
+        rendezvous.wait(timeout=5)
+        finished_during_score.append(writer_finished.wait(timeout=0.5))
+        return real_score_target(snapshot, **kwargs)
+
+    worker = process_context.Process(
+        target=_ordinary_target_write,
+        args=(
+            target_store.path,
+            lock_path,
+            journal_path,
+            rendezvous,
+            writer_finished,
+        ),
+    )
+    worker.start()
+
+    async def fake_snapshot(code, **kwargs):
+        return _complete_score_snapshot(code, kwargs["name"])
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+    monkeypatch.setattr(
+        "app.services.target_scoring.score_target",
+        synchronized_score,
+    )
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=1,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+    assert await asyncio.to_thread(writer_finished.wait, 5)
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert worker.exitcode == 0
+    assert finished_during_score == [False]
+    assert scores[0]["code"] == "002123"
+    assert target_store.get("000001")["name"] == "普通写入"
+    assert target_store.get("002123")["scoring_decision"]["action"] == (
+        scores[0]["action"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_build_target_scores_loads_each_store_map_once_for_twelve_codes(
+    monkeypatch,
+):
+    from scripts.daily_report import build_target_scores_for_report
+
+    class CountingTargetStore:
+        def __init__(self):
+            self.load_calls = 0
+            self.writes = []
+            self.payload = {
+                "items": {
+                    f"{index:06d}": {
+                        "code": f"{index:06d}",
+                        "name": f"标的{index}",
+                        "status": "watching",
+                        "source": "manual",
+                    }
+                    for index in range(1, 13)
+                }
+            }
+
+        def load(self):
+            self.load_calls += 1
+            return self.payload
+
+        def upsert_target(self, **kwargs):
+            self.writes.append(kwargs)
+            return True
+
+    class CountingLongThesisStore:
+        def __init__(self):
+            self.strict_load_calls = 0
+            self.get_calls = 0
+
+        def load_strict(self):
+            self.strict_load_calls += 1
+            return {"version": 1, "updated_at": "", "items": {}}
+
+        def get(self, symbol):
+            self.get_calls += 1
+            return None
+
+    target_store = CountingTargetStore()
+    thesis_store = CountingLongThesisStore()
+
+    async def fake_snapshot(code, **kwargs):
+        return {"code": code, "name": kwargs["name"], "quote": {"price": 3.2}}
+
+    def fake_score(snapshot, **kwargs):
+        return {
+            "code": snapshot["code"],
+            "name": snapshot["name"],
+            "score": 50,
+            "action": "watch",
+        }
+
+    _patch_score_dependencies(
+        monkeypatch,
+        target_store,
+        fake_snapshot,
+    )
+    monkeypatch.setattr("app.services.target_scoring.score_target", fake_score)
+
+    scores = await build_target_scores_for_report(
+        available_cash=6085.61,
+        total_assets=6085.61,
+        limit=12,
+        market_source=_OfflineScoreSource(),
+        long_thesis_store=thesis_store,
+    )
+
+    assert len(scores) == 12
+    assert target_store.load_calls == 2
+    assert thesis_store.strict_load_calls == 1
+    assert thesis_store.get_calls == 0
 
 
 def test_build_feishu_summary_keeps_full_report_local_hint():
@@ -2118,15 +3157,233 @@ def test_data_source_audit_marks_sqlite_degraded_from_structured_sync_truth():
         )
     )
 
-    assert "| SQLite | degraded |" in audit
+    assert "| SQLite | 降级 |" in audit
     assert "SECRET" not in audit
 
 
+def test_data_source_audit_requires_structured_market_success_with_indices():
+    from scripts.daily_report import build_data_source_audit
+
+    fresh_cutoff = datetime.now().astimezone().isoformat()
+    failed_audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {"shanghai": 4000},
+                "market_source_status": {
+                    "status": "failed",
+                    "provider": "data_router+tencent",
+                    "data_cutoff": None,
+                    "error": "all_realtime_index_sources_failed",
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+    ok_audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {
+                    "shanghai": 4000,
+                    "shenzhen": 12000,
+                    "cyb": 2600,
+                },
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": fresh_cutoff,
+                    "freshness": "fresh",
+                    "error": "",
+                    "coverage": {"expected": 3, "verified": 3},
+                    "missing_sources": [],
+                    "rejected_sources": [],
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+    empty_audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {},
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": fresh_cutoff,
+                    "freshness_status": "fresh",
+                    "error": "",
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | 降级 |" in failed_audit
+    assert "所有实时指数行情源均失败" in failed_audit
+    assert "| 行情数据 | 成功 |" in ok_audit
+    assert "tencent" in ok_audit
+    assert fresh_cutoff in ok_audit
+    assert "| 行情数据 | 降级 |" in empty_audit
+
+
+@pytest.mark.parametrize(
+    "status_patch",
+    [
+        {},
+        {"coverage": {"expected": 3, "verified": 2}},
+        {
+            "coverage": {"expected": 3, "verified": 3},
+            "missing_sources": ["sz399006"],
+        },
+        {
+            "coverage": {"expected": 3, "verified": 3},
+            "rejected_sources": ["sz399006"],
+        },
+    ],
+)
+def test_data_source_audit_rejects_incomplete_market_coverage(status_patch):
+    from scripts.daily_report import build_data_source_audit
+
+    status = {
+        "status": "ok",
+        "provider": "tencent",
+        "data_cutoff": datetime.now().astimezone().isoformat(),
+        "freshness_status": "fresh",
+        "error": "",
+        **status_patch,
+    }
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {
+                    "shanghai": 4000,
+                    "shenzhen": 12000,
+                    "cyb": 2600,
+                },
+                "market_source_status": status,
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | 降级 |" in audit
+
+
+def test_data_source_audit_rejects_naive_market_cutoff():
+    from scripts.daily_report import build_data_source_audit
+
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {
+                    "shanghai": 4000,
+                    "shenzhen": 12000,
+                    "cyb": 2600,
+                },
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": datetime.now().replace(tzinfo=None).isoformat(),
+                    "freshness_status": "fresh",
+                    "error": "",
+                    "coverage": {"expected": 3, "verified": 3},
+                    "missing_sources": [],
+                    "rejected_sources": [],
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | 降级 |" in audit
+
+
+@pytest.mark.parametrize(
+    "market_source_status",
+    [
+        {
+            "status": "ok",
+            "provider": "tencent",
+            "data_cutoff": None,
+            "freshness_status": "fresh",
+            "error": "",
+        },
+        {
+            "status": "ok",
+            "provider": "tencent",
+            "data_cutoff": "2000-01-01T00:00:00+08:00",
+            "freshness_status": "fresh",
+            "error": "",
+        },
+        {
+            "status": "ok",
+            "provider": "tencent",
+            "data_cutoff": "FRESH_CUTOFF",
+            "error": "",
+        },
+    ],
+)
+def test_data_source_audit_rejects_missing_stale_or_unproven_market_truth(
+    market_source_status,
+):
+    from scripts.daily_report import build_data_source_audit
+
+    status = dict(market_source_status)
+    if status.get("data_cutoff") == "FRESH_CUTOFF":
+        status["data_cutoff"] = datetime.now().astimezone().isoformat()
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {"shanghai": 4000},
+                "market_source_status": status,
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | 降级 |" in audit
+
+
+@pytest.mark.parametrize("freshness_status", ["stale", "conflict", "unknown", "failed"])
+def test_data_source_audit_rejects_nonfresh_market_status(freshness_status):
+    from scripts.daily_report import build_data_source_audit
+
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {"shanghai": 4000},
+                "market_source_status": {
+                    "status": "ok",
+                    "provider": "tencent",
+                    "data_cutoff": datetime.now().astimezone().isoformat(),
+                    "freshness_status": freshness_status,
+                    "error": "",
+                },
+            },
+            sentinel_package=None,
+        )
+    )
+
+    assert "| 行情数据 | 降级 |" in audit
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "partial_kind",
+    [
+        "none",
+        "exception",
+        "empty",
+        "price_zero",
+        "price_nan",
+        "price_inf",
+        "price_negative_inf",
+    ],
+)
 async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
     tmp_path,
     monkeypatch,
     capsys,
+    partial_kind,
 ):
     import app.data_sources.akshare_market as akshare_module
     import app.data_sources.realtime_market_data as realtime_module
@@ -2166,10 +3423,32 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
 
     class FakeRealtimeSource:
         async def fetch_batch(self, codes):
-            return {
-                code: {"price": 4000 if code == "sh000001" else 12000, "change_pct": 0.1}
+            fresh_cutoff = datetime.now().astimezone().isoformat()
+            quotes = {
+                code: {
+                    "price": 4000 if code == "sh000001" else 12000,
+                    "change_pct": 0.1,
+                    "source": "tencent",
+                    "quote_timestamp": fresh_cutoff,
+                    "freshness": "fresh",
+                }
                 for code in codes
             }
+            if partial_kind == "none":
+                quotes["sz399001"] = None
+            elif partial_kind == "exception":
+                quotes["sz399001"] = RuntimeError("index source failed")
+            elif partial_kind == "empty":
+                quotes["sz399001"] = {}
+            else:
+                invalid_prices = {
+                    "price_zero": 0,
+                    "price_nan": float("nan"),
+                    "price_inf": float("inf"),
+                    "price_negative_inf": float("-inf"),
+                }
+                quotes["sz399001"]["price"] = invalid_prices[partial_kind]
+            return quotes
 
     class FakePositionWatchStore:
         def load(self):
@@ -2260,10 +3539,20 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
     visible = captured["visible_decision"]
     target_rows = visible["target_scores"]
     outside_rows = visible["outside_pool_scan"]
+    market_source_status = captured["market_data"]["market_source_status"]
 
     assert db.closed is True
     assert persisted_portfolio["portfolio_sync_failed"] is True
     assert captured["market_data"]["portfolio_sync_failed"] is True
+    assert "shanghai" in captured["market_data"]["indices"]
+    assert "cyb" in captured["market_data"]["indices"]
+    assert "shenzhen" not in captured["market_data"]["indices"]
+    assert market_source_status["status"] == "degraded"
+    assert market_source_status["freshness_status"] == "degraded"
+    assert "sz399001" in (
+        market_source_status["missing_sources"]
+        + market_source_status["rejected_sources"]
+    )
     assert persisted_gate["reasons"] == ["portfolio_sync_failed"]
     assert captured["gate"] == persisted_gate
     assert target_rows[0]["action"] == "watching"
@@ -2275,8 +3564,11 @@ async def test_daily_report_main_sync_exception_fails_closed_end_to_end(
         "stop_loss",
         "entry_cancelled",
     ]
-    assert "| SQLite | degraded |" in captured["rendered_sections"]
-    assert "| SQLite | degraded |" in report_content
+    assert "| SQLite | 降级 |" in captured["rendered_sections"]
+    assert "| SQLite | 降级 |" in report_content
+    assert "| 行情数据 | 降级 |" in captured["rendered_sections"]
+    assert "覆盖=2/3" in captured["rendered_sections"]
+    assert "sz399001" in captured["rendered_sections"]
     for artifact in (output, report_content, json.dumps(persisted_gate), json.dumps(persisted_portfolio)):
         assert "SECRET-MAIN-PROBE" not in artifact
 
@@ -2349,6 +3641,1028 @@ def test_empty_portfolio_action_summary_has_no_stale_holding_action():
     assert "TCL科技" not in summary
     assert "清仓" not in summary
     assert "减仓" not in summary
+
+
+def test_next_day_report_is_action_first_with_exact_quantities_and_candidate_caps():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    decision = {
+        "position_watch": {
+            "items": {
+                "000725": {
+                    "stop_loss_price": 7.61,
+                    "target_price": 8.65,
+                },
+                "600839": {
+                    "stop_loss_price": 6.30,
+                    "target_price": 7.20,
+                },
+            }
+        },
+        "target_scores": [
+            {
+                **_full_tactical_candidate(
+                    f"00000{idx}",
+                    f"候选{idx}",
+                    score=90 - idx,
+                ),
+                "code": f"00000{idx}",
+                "name": f"候选{idx}",
+                "action": "buy",
+                "score": 90 - idx,
+                "entry_price": float(idx + 2),
+                "stop_loss": round((idx + 2) * 0.9, 2),
+                "target_price": round((idx + 2) * 1.2, 2),
+                "lot_size": 100,
+                "lot_value": float((idx + 2) * 100),
+                "position_shares": 100,
+                "position_amount": float((idx + 2) * 100),
+                "decision_reason": f"排序第{idx}，等待触发。",
+                "next_signal": f"候选{idx}量价资金同时确认。",
+            }
+            for idx in range(1, 5)
+        ],
+    }
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="先处理风险仓",
+            confidence=8,
+            positions=[
+                {
+                    "code": "000725",
+                    "name": "京东方A",
+                    "shares": 100,
+                    "avg_cost": 8.011,
+                    "current_price": 7.59,
+                    "current_value": 759,
+                    "quote_source": "tencent",
+                    "quote_timestamp": "2026-07-26T15:00:00+08:00",
+                    "quote_trading_date": "2026-07-26",
+                    "quote_freshness": "fresh",
+                },
+                {
+                    "code": "600839",
+                    "name": "四川长虹",
+                    "shares": 200,
+                    "avg_cost": 6.70,
+                    "current_price": 6.80,
+                    "current_value": 1360,
+                },
+            ],
+            available_cash=5000,
+            total_assets=8000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision=decision,
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    assert sections.startswith("## 一、当前账户动作")
+    first_screen = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    assert "京东方A(000725)" in first_screen
+    assert "当前100股" in first_screen
+    assert "精确卖出100股" in first_screen
+    assert "四川长虹(600839)" in first_screen
+    assert "当前200股" in first_screen
+    assert "精确卖出0股" in first_screen
+    assert first_screen.index("京东方A(000725)") < first_screen.index(
+        "四川长虹(600839)"
+    )
+    assert "主选" in first_screen
+    assert "备选1" in first_screen
+    assert "备选2" in first_screen
+    assert "候选1(000001)" in first_screen
+    assert "候选2(000002)" in first_screen
+    assert "候选3(000003)" in first_screen
+    assert "候选4(000004)" not in first_screen
+    assert "100股" in first_screen
+    assert first_screen.index("## 一、当前账户动作") < sections.index(
+        "系统、数据与模型审计"
+    )
+
+
+def test_next_day_report_keeps_research_only_in_appendix_and_budget_is_not_long():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=3,
+            final_view="等待触发",
+            confidence=7,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    {
+                        "code": "688008",
+                        "name": "预算高价股",
+                        "action": "research_only",
+                        "entry_price": 268.06,
+                        "lot_size": 200,
+                        "lot_value": 53612,
+                        "block_reason": "lot_size_exceeded",
+                        "decision_reason": "买不起最小交易单位。",
+                    },
+                    {
+                        "code": "002729",
+                        "name": "研究参照股",
+                        "action": "research_reference",
+                        "entry_price": 13.38,
+                        "lot_size": 100,
+                        "lot_value": 1338,
+                        "decision_reason": "研究来源尚未生产晋级。",
+                    },
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+    long_section = feishu.split("## 二、中长期论文状态", 1)[1]
+
+    assert "预算高价股" not in feishu
+    assert "研究参照股" not in feishu
+    assert "预算高价股" not in long_section
+    assert "中长线研究不是没有" not in sections
+    assert "研究层仍有" not in sections
+    assert "预算高价股(688008)" in appendix
+    assert "研究参照股(002729)" in appendix
+    assert "不进入 AI 辩论输入" not in sections
+    assert "不进入AI辩论输入" not in sections
+
+
+def test_next_day_report_preserves_unknown_long_thesis_and_moves_audit_later():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="数据异常，禁止新开仓",
+            confidence=3,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    {
+                        "code": "000001",
+                        "name": "长线未知样本",
+                        "action": "watching",
+                        "entry_price": 10,
+                        "stop_loss": 9,
+                        "target_price": 12,
+                        "position_amount": 0,
+                        "thesis_status": "unknown",
+                        "red_line_status": "unknown",
+                        "valuation_zone": "unknown",
+                        "long_quality_score": None,
+                        "block_reason": "long_thesis_store_invalid",
+                        "combined_decision_reason": "长期论文存储损坏，状态未知，禁止新开仓。",
+                        "next_signal": "修复长期论文存储并重新评分。",
+                    }
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    assert "论文状态未知" in sections
+    assert "红线状态未知" in sections
+    assert "长期论文存储损坏" in sections
+    assert "未建论文" not in sections
+    assert sections.index("## 一、当前账户动作") < sections.index(
+        "## 四、系统、数据与模型审计"
+    )
+
+
+def test_legacy_next_day_helpers_do_not_reintroduce_false_routing_or_fake_long_claims():
+    from scripts.daily_report import (
+        _long_pool_section,
+        _render_budget_blocks,
+        get_strategy_profile,
+    )
+
+    decision = {
+        "target_scores": [
+            {
+                "code": "688008",
+                "name": "纯预算阻断",
+                "action": "research_only",
+                "lot_value": 50000,
+                "block_reason": "lot_size_exceeded",
+            }
+        ]
+    }
+    budget_lines = "\n".join(
+        _render_budget_blocks(
+            decision=decision,
+            target_buckets={
+                "executable": [],
+                "watching": [],
+                "research_reference": decision["target_scores"],
+                "removed": [],
+            },
+            hidden_codes={"688008"},
+            available_cash=3000,
+            total_assets=3000,
+            profile=get_strategy_profile(),
+        )
+    )
+    long_lines = "\n".join(
+        _long_pool_section(decision, budget_blocked_count=1)
+    )
+
+    assert "不进入 AI 辩论输入" not in budget_lines
+    assert "以当次路由审计为准" in budget_lines
+    assert "中长线研究不是没有" not in long_lines
+    assert "纯预算阻断" not in long_lines
+
+
+def test_budget_blocked_real_long_thesis_remains_visible_as_non_trading_research():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="长期红线复核",
+            confidence=8,
+            positions=[],
+            available_cash=1304.25,
+            total_assets=5972.25,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    {
+                        "code": "688008",
+                        "name": "预算阻断长期样本",
+                        "source": "long_horizon",
+                        "action": "research_only",
+                        "production_eligibility": {
+                            "eligible": False,
+                            "reason": "research_only_provenance",
+                        },
+                        "entry_price": 233.66,
+                        "lot_size": 200,
+                        "lot_value": 46732,
+                        "block_reason": "lot_size_exceeded",
+                        "decision_reason": "一手金额超过当前执行预算。",
+                        "thesis_status": "broken",
+                        "long_quality_score": 0,
+                        "red_line_status": "triggered",
+                        "valuation_zone": "unknown",
+                        "long_horizon_reason": "下行安全红线触发。",
+                        "combined_decision_reason": (
+                            "一手金额超过当前执行预算。"
+                            "长期跟踪：下行安全红线触发。"
+                        ),
+                    }
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    new_entry = feishu.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = feishu.split("## 二、中长期论文状态", 1)[1]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+
+    assert "预算阻断长期样本(688008)" not in new_entry
+    assert "预算阻断长期样本(688008)" in long_section
+    assert "红线触发" in long_section
+    assert "风险退出" in long_section
+    assert "人工复核买入" not in long_section
+    assert "预算阻断长期样本(688008)" in appendix
+
+
+@pytest.mark.parametrize("thesis_status", ["healthy", "unknown"])
+def test_long_horizon_research_provenance_stays_non_trading_long_tracking(
+    thesis_status,
+):
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=3,
+            final_view="长期跟踪",
+            confidence=6,
+            positions=[],
+            available_cash=5000,
+            total_assets=5000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    {
+                        "code": "002123",
+                        "name": "长期影子样本",
+                        "source": "long_horizon",
+                        "action": "research_only",
+                        "production_eligibility": {
+                            "eligible": False,
+                            "reason": "shadow_only",
+                        },
+                        "entry_price": 3.2,
+                        "stop_loss": 2.9,
+                        "target_price": 3.8,
+                        "lot_value": 320,
+                        "thesis_status": thesis_status,
+                        "long_quality_score": (
+                            82 if thesis_status == "healthy" else None
+                        ),
+                        "red_line_status": (
+                            "clear" if thesis_status == "healthy" else "unknown"
+                        ),
+                        "valuation_zone": (
+                            "fair_zone"
+                            if thesis_status == "healthy"
+                            else "unknown"
+                        ),
+                        "combined_decision_reason": "只做长期影子跟踪，不产生买入动作。",
+                    }
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    new_entry = feishu.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = feishu.split("## 二、中长期论文状态", 1)[1]
+    assert "长期影子样本(002123)" not in new_entry
+    assert "长期影子样本(002123)" in long_section
+    assert (
+        "论文成立" in long_section
+        if thesis_status == "healthy"
+        else "论文状态未知" in long_section
+    )
+    assert "人工复核买入" not in long_section
+    assert "只展示已建立的长期论文状态，不单独触发交易动作" in long_section
+
+
+def test_over_position_holding_uses_profile_cap_for_exact_partial_reduction():
+    from scripts.daily_report import (
+        build_next_day_strategy_sections,
+        get_strategy_profile,
+    )
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=3,
+            final_view="先降低超限仓位",
+            confidence=8,
+            positions=[
+                {
+                    "code": "000001",
+                    "name": "超仓样本",
+                    "shares": 300,
+                    "avg_cost": 9.5,
+                    "current_price": 10,
+                    "current_value": 3000,
+                }
+            ],
+            available_cash=1000,
+            total_assets=4000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "position_watch": {
+                    "items": {
+                        "000001": {
+                            "stop_loss_price": 8.5,
+                            "target_price": 12,
+                        }
+                    }
+                }
+            },
+            roles={},
+            sentinel_package=None,
+            strategy_profile=get_strategy_profile("growth_sprint"),
+        )
+    )
+
+    holding = sections.split("### 持仓处理", 1)[1].split(
+        "### 新开仓机会",
+        1,
+    )[0]
+    assert "当前300股" in holding
+    assert "仓位超限，精确减仓" in holding
+    assert "精确卖出100股" in holding
+    assert "精确卖出300股" not in holding
+
+
+@pytest.mark.parametrize(
+    ("runtime_status", "expected_header", "expected_audit"),
+    [
+        (
+            {
+                "status": "success",
+                "providers": ["DeepSeek", "Qwen"],
+                "calls": [
+                    {
+                        "role": "猎手",
+                        "provider": "DeepSeek",
+                        "status": "success",
+                        "output_usable": True,
+                    },
+                    {
+                        "role": "裁判",
+                        "provider": "Qwen",
+                        "status": "success",
+                        "output_usable": True,
+                    },
+                ],
+                "degradation_reasons": [],
+            },
+            "本次AI路由：DeepSeek + Qwen（调用成功）",
+            "本次调用成功",
+        ),
+        (
+            {
+                "status": "degraded",
+                "providers": ["DeepSeek"],
+                "calls": [
+                    {
+                        "role": "裁判",
+                        "provider": "DeepSeek",
+                        "requested_provider": "Qwen",
+                        "status": "degraded",
+                        "fallback_reason": "qwen_api_key_missing",
+                        "output_usable": True,
+                    }
+                ],
+                "degradation_reasons": ["qwen_api_key_missing"],
+            },
+            "本次AI路由：DeepSeek（降级）",
+            "Qwen 密钥缺失，实际回退到 DeepSeek",
+        ),
+        (
+            None,
+            "本次AI路由：状态未验证/降级状态未知",
+            "本次状态未验证/降级状态未知",
+        ),
+    ],
+)
+def test_report_model_status_uses_actual_runtime_truth(
+    runtime_status,
+    expected_header,
+    expected_audit,
+):
+    from scripts.daily_report import (
+        build_data_source_audit,
+        format_model_runtime_header,
+    )
+
+    header = format_model_runtime_header(runtime_status)
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={"indices": {}},
+            sentinel_package=None,
+            model_runtime_status=runtime_status,
+        )
+    )
+
+    assert expected_header in header
+    assert expected_audit in audit
+    if runtime_status is None:
+        assert "调用成功" not in header
+
+
+def test_report_shows_deepseek_only_as_failed_qwen_fallback_attempt():
+    from scripts.daily_report import (
+        build_data_source_audit,
+        format_model_runtime_header,
+    )
+
+    runtime_status = {
+        "status": "degraded",
+        "providers": [],
+        "calls": [
+            {
+                "role": "裁判",
+                "provider": "",
+                "attempted_provider": "DeepSeek",
+                "requested_provider": "Qwen",
+                "model": "deepseek-chat",
+                "status": "degraded",
+                "fallback_reason": "qwen_api_key_missing",
+                "degradation_reason": "cloud_call_failed",
+                "output_usable": False,
+            }
+        ],
+        "degradation_reasons": [
+            "qwen_api_key_missing",
+            "cloud_call_failed",
+        ],
+    }
+
+    header = format_model_runtime_header(runtime_status)
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={"indices": {}},
+            sentinel_package=None,
+            model_runtime_status=runtime_status,
+        )
+    )
+
+    assert header == "> 🤖 本次AI路由：无成功提供方（降级）"
+    assert "DeepSeek" not in header
+    assert "Qwen" not in header
+    assert (
+        "实际提供方：无成功提供方；失败尝试：DeepSeek（原请求 Qwen）；"
+        "Qwen 密钥缺失，实际回退到 DeepSeek；云端模型调用失败"
+    ) in audit
+
+
+def _full_tactical_candidate(
+    code,
+    name,
+    *,
+    score=80,
+    action="buy",
+    playbook="breakout_entry",
+    **updates,
+):
+    row = {
+        "code": code,
+        "name": name,
+        "score": score,
+        "action": action,
+        "entry_price": 3.2,
+        "stop_loss": 3.0,
+        "target_price": 3.8,
+        "lot_value": 320,
+        "position_shares": 100,
+        "position_amount": 320,
+        "missing_data": [],
+        "source_status": {
+            "quote": "ok",
+            "kline": "ok",
+            "fund_flow": "ok",
+            "financial": "ok",
+        },
+        "authorization_valid": True,
+        "production_eligibility": {"eligible": True},
+        "playbook": playbook,
+        "next_signal": "量价资金触发后人工核价。",
+    }
+    row.update(updates)
+    return row
+
+
+def test_zero_buy_budget_blocks_every_positive_lot_from_main_candidates():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=3,
+            final_view="现金不足不买",
+            confidence=8,
+            positions=[],
+            available_cash=0,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    _full_tactical_candidate(
+                        "002123",
+                        "零预算样本",
+                    )
+                ]
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    first_screen = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
+    appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
+    assert "零预算样本(002123)" not in first_screen
+    assert "新开仓结论：不下单" in first_screen
+    assert "可执行预算为 ¥0.00" in first_screen
+    assert "零预算样本(002123)" in appendix
+    assert "一手金额 ¥320.00 超过可执行预算 ¥0.00" in appendix
+
+
+@pytest.mark.parametrize(
+    ("code", "shares", "expected"),
+    [
+        ("000001", 50, 50),
+        ("000001", 100, 100),
+        ("000001", 150, 150),
+        ("000001", 200, 100),
+        ("000001", 300, 100),
+        ("000001", 400, 100),
+        ("688001", 50, 50),
+        ("688001", 100, 100),
+        ("688001", 150, 150),
+        ("688001", 200, 200),
+        ("688001", 300, 300),
+        ("688001", 400, 200),
+    ],
+)
+def test_over_position_reduction_obeys_board_lot_and_odd_lot_exit_rules(
+    code,
+    shares,
+    expected,
+):
+    from scripts.daily_report import (
+        _over_position_sell_quantity,
+        get_strategy_profile,
+    )
+
+    target_shares = max(0, shares - 50)
+    total_assets = max(1, target_shares * 10 / 0.5)
+    result = _over_position_sell_quantity(
+        code=code,
+        shares=shares,
+        price=10,
+        total_assets=total_assets,
+        profile=get_strategy_profile("growth_sprint"),
+    )
+
+    assert result == expected
+
+
+@pytest.mark.parametrize(
+    ("shares", "target_shares", "expected"),
+    [
+        (201, 151, 201),
+        (399, 349, 399),
+        (400, 350, 200),
+        (401, 200, 201),
+    ],
+)
+def test_star_reduction_uses_200_share_minimum_then_one_share_increments(
+    shares,
+    target_shares,
+    expected,
+):
+    from scripts.daily_report import _over_position_sell_quantity
+
+    result = _over_position_sell_quantity(
+        code="688001",
+        shares=shares,
+        price=10,
+        total_assets=target_shares * 10 / 0.5,
+        profile={
+            "single_position_limit_pct": 50,
+            "standard_single_position_limit_pct": 50,
+        },
+    )
+
+    assert result == expected
+
+
+def test_stale_quote_sell_zero_precedes_star_lot_reduction():
+    from scripts.daily_report import (
+        build_next_day_strategy_sections,
+        get_strategy_profile,
+    )
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="先核价",
+            confidence=8,
+            positions=[
+                {
+                    "code": "688001",
+                    "name": "科创陈旧行情",
+                    "shares": 400,
+                    "avg_cost": 10,
+                    "current_price": 10,
+                    "quote_status": "stale",
+                    "quote_freshness": "stale",
+                }
+            ],
+            available_cash=0,
+            total_assets=4000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={},
+            roles={},
+            sentinel_package=None,
+            strategy_profile=get_strategy_profile("growth_sprint"),
+        )
+    )
+
+    holding = sections.split("### 持仓处理", 1)[1].split(
+        "### 新开仓机会",
+        1,
+    )[0]
+    assert "精确卖出0股" in holding
+    assert "精确卖出200股" not in holding
+
+
+def test_candidates_require_full_score_and_rank_globally_across_sources():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    rows = [
+        _full_tactical_candidate(
+            "000010",
+            "低分伪买入",
+            score=10,
+            authorization_valid=False,
+        ),
+        {
+            "code": "000011",
+            "name": "未评分池外行",
+            "action": "actionable",
+            "entry_price": 2.8,
+            "stop_loss": 2.6,
+            "target_price": 3.2,
+            "lot_value": 280,
+            "suggested_amount": 280,
+        },
+        _full_tactical_candidate(
+            "000099",
+            "九十九分主选",
+            score=99,
+        ),
+        _full_tactical_candidate(
+            "000080",
+            "八十分突破",
+            score=80,
+            playbook="breakout_entry",
+        ),
+        _full_tactical_candidate(
+            "000081",
+            "八十分回踩",
+            score=80,
+            playbook="dip_entry",
+        ),
+    ]
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="按完整评分排序",
+            confidence=9,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [rows[0], rows[2], rows[4]],
+                "outside_pool_scan": [rows[1], rows[3]],
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    assert candidates.index("九十九分主选(000099)") < candidates.index(
+        "八十分突破(000080)"
+    )
+    assert candidates.index("八十分突破(000080)") < candidates.index(
+        "八十分回踩(000081)"
+    )
+    assert "低分伪买入" not in candidates
+    assert "未评分池外行" not in candidates
+    assert candidates.count("| 备选") == 2
+
+
+def test_candidate_global_rank_is_score_first_before_action_wording():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="全局分数优先",
+            confidence=9,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={
+                "target_scores": [
+                    _full_tactical_candidate(
+                        "000070",
+                        "七十分买入",
+                        score=70,
+                        action="buy",
+                    )
+                ],
+                "outside_pool_scan": [
+                    _full_tactical_candidate(
+                        "000099",
+                        "九十九分可执行",
+                        score=99,
+                        action="actionable",
+                    )
+                ],
+            },
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    assert candidates.index("九十九分可执行(000099)") < candidates.index(
+        "七十分买入(000070)"
+    )
+
+
+def test_healthy_long_thesis_can_also_be_tactical_when_full_score_authorized():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    row = _full_tactical_candidate(
+        "002123",
+        "长短双资格",
+        score=91,
+        thesis_status="healthy",
+        long_quality_score=88,
+        red_line_status="clear",
+        valuation_zone="fair_zone",
+        combined_decision_reason="长期论文成立，短线放量触发。",
+    )
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="双轨独立判断",
+            confidence=9,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={"target_scores": [row]},
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = sections.split("## 二、中长期论文状态", 1)[1].split(
+        "<!-- FEISHU_SUMMARY_END -->",
+        1,
+    )[0]
+    assert "长短双资格(002123)" in candidates
+    assert "长短双资格(002123)" in long_section
+
+
+def test_long_quality_without_full_tactical_authorization_never_grants_entry():
+    from scripts.daily_report import build_next_day_strategy_sections
+
+    row = _full_tactical_candidate(
+        "002124",
+        "只有长期质量",
+        score=99,
+        action="watch",
+        authorization_valid=False,
+        source_status={
+            "quote": "ok",
+            "kline": "missing",
+            "fund_flow": "ok",
+            "financial": "ok",
+        },
+        missing_data=["kline"],
+        thesis_status="healthy",
+        long_quality_score=99,
+        red_line_status="clear",
+    )
+    sections = "\n".join(
+        build_next_day_strategy_sections(
+            report_date="2026-07-26",
+            target_date="2026-07-27",
+            risk_level=4,
+            final_view="长期不替代战术",
+            confidence=8,
+            positions=[],
+            available_cash=3000,
+            total_assets=3000,
+            market_data={"indices": {}},
+            analysis_report={"overall_bias": "neutral"},
+            decision={"target_scores": [row]},
+            roles={},
+            sentinel_package=None,
+        )
+    )
+
+    candidates = sections.split("### 新开仓机会", 1)[1].split(
+        "## 二、中长期论文状态",
+        1,
+    )[0]
+    long_section = sections.split("## 二、中长期论文状态", 1)[1]
+    assert "只有长期质量(002124)" not in candidates
+    assert "只有长期质量(002124)" in long_section
+
+
+def test_append_new_sections_is_lazy_and_mutually_exclusive_in_legacy_mode():
+    from scripts.daily_report import _append_new_report_sections
+
+    lines = ["header"]
+    called = []
+
+    rendered = _append_new_report_sections(
+        lines,
+        legacy_mode=True,
+        builder=lambda: called.append(True) or ["new"],
+    )
+
+    assert rendered is False
+    assert called == []
+    assert lines == ["header"]
+
+
+def test_data_source_audit_hides_internal_enums_from_visible_markdown():
+    from scripts.daily_report import build_data_source_audit
+
+    audit = "\n".join(
+        build_data_source_audit(
+            market_data={
+                "indices": {},
+                "market_source_status": {
+                    "status": "degraded",
+                    "freshness_status": "conflict",
+                    "error": "index_quotes_not_fetched",
+                    "coverage": {"expected": 3, "verified": 0},
+                    "missing_sources": ["sh000001"],
+                    "rejected_sources": [],
+                },
+                "portfolio_sync_status": "unavailable",
+            },
+            sentinel_package={
+                "source_status": {"status": "partial"},
+                "event_count": 0,
+            },
+            model_runtime_status=None,
+        )
+    )
+
+    for raw_enum in (
+        "market_status_not_ok",
+        "coverage_incomplete",
+        "freshness_unproven:",
+        "index_quotes_not_fetched",
+        "| partial |",
+        "conflict",
+        "| degraded |",
+        "| missing |",
+    ):
+        assert raw_enum not in audit
+    assert "指数覆盖不完整" in audit
+    assert "指数行情未获取" in audit
+    assert "数据新鲜度未证实（数据冲突）" in audit
+    assert "| Tushare 高频新闻 | 部分可用 |" in audit
+    assert "| 行情数据 | 降级 |" in audit
 
 
 def test_daily_report_archive_keeps_all_report_types_in_trade_day_folder(tmp_path):

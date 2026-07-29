@@ -1204,3 +1204,44 @@ def test_apply_account_constraints_moves_unaffordable_new_stock_to_watchlist():
     assert [r["code"] for r in recs] == ["000100"]
     assert constrained["unaffordable_watchlist"][0]["code"] == "601318"
     assert constrained["account_constraints"]["available_cash"] == 1544.89
+
+
+def test_apply_account_constraints_uses_profile_limits_and_board_lot_sizes():
+    from app.engine.workshop import _apply_account_constraints
+
+    profile = {
+        "mode": "growth_sprint",
+        "cash_reserve_pct": 10,
+        "single_position_limit_pct": 50,
+    }
+    decision = {
+        "short_term": {
+            "recommendations": [
+                {"code": "000001", "name": "平安银行", "buy_range": "10.00-10.20元"},
+                {"code": "688008", "name": "澜起科技", "buy_range": "8.00-8.10元"},
+            ]
+        },
+        "mid_low_freq": {"recommendations": []},
+    }
+
+    constrained = _apply_account_constraints(
+        decision,
+        available_cash=2000,
+        total_assets=3000,
+        strategy_profile=profile,
+    )
+
+    assert [item["code"] for item in constrained["stock_pool"]] == ["000001"]
+    assert [item["code"] for item in constrained["unaffordable_watchlist"]] == ["688008"]
+    assert "200股" in constrained["unaffordable_watchlist"][0]["reason_unaffordable"]
+    assert constrained["account_constraints"] == {
+        "profile_mode": "growth_sprint",
+        "available_cash": 2000.0,
+        "total_assets": 3000.0,
+        "cash_reserve_pct": 10.0,
+        "single_position_limit_pct": 50.0,
+        "reserve_cash": 300.0,
+        "executable_cash": 1500.0,
+        "lot_size": None,
+        "lot_size_by_code": {"000001": 100, "688008": 200},
+    }

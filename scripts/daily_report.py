@@ -33,6 +33,18 @@ from app.services.strategy_profile import (
     calculate_target_price,
     get_strategy_profile,
 )
+from app.services.market_data_health import (
+    EXPECTED_MARKET_INDEX_CODES,
+    aggregate_market_quote_truth,
+    is_recent_market_cutoff,
+)
+from app.services.sentinel_input_gate import (
+    classify_sentinel_package as _sentinel_package_freshness,
+    inject_active_sentinel_evidence as _inject_active_sentinel_evidence,
+    load_recent_sentinel_package as _load_recent_sentinel_package,
+    sentinel_audit_only_message as _sentinel_audit_only_message,
+    sentinel_package_age_days as _sentinel_package_age_days,
+)
 from app.services.visible_decision_gate import (
     ENTRY_ACTIONS,
     apply_visible_decision_gate,
@@ -40,6 +52,8 @@ from app.services.visible_decision_gate import (
     format_visible_decision_reasons,
     write_visible_decision_gate,
 )
+from app.report_engine.templates.next_day import render_next_day_sections
+from app.services.quant_lifecycle import lot_size_for_code
 
 
 def _load_yitaojin_quote_validation_for_decision(
@@ -111,6 +125,93 @@ def build_feishu_summary(md_content: str, limit: int = 3000) -> str:
     return summary[:limit].rstrip() + "\n\n...*(完整报告已保存至 Obsidian 报告目录)*"
 
 
+def _legacy_report_sections_enabled() -> bool:
+    """Return true only for the explicit legacy compatibility opt-in."""
+    return os.getenv("CONGXI_REPORT_LEGACY_SECTIONS", "0") == "1"
+
+
+def _append_new_report_sections(
+    lines: list[str],
+    *,
+    legacy_mode: bool,
+    builder,
+) -> bool:
+    """Lazily render exactly one report body during legacy compatibility."""
+    if legacy_mode:
+        return False
+    lines.extend(builder())
+    return True
+
+
+def _active_single_position_limit_pct(
+    profile: dict,
+    total_assets: float,
+) -> float:
+    if total_assets < 5000:
+        return float(profile["single_position_limit_pct"])
+    return float(
+        profile.get(
+            "standard_single_position_limit_pct",
+            profile["single_position_limit_pct"],
+        )
+    )
+
+
+def _over_position_sell_quantity(
+    *,
+    code: str,
+    shares: int,
+    price: float,
+    total_assets: float,
+    profile: dict,
+) -> int:
+    """Reuse execution-guard account-cap math for an exact A-share reduction."""
+    shares = max(0, int(shares or 0))
+    price = float(price or 0)
+    assets = float(total_assets or 0)
+    if shares <= 0 or price <= 0 or assets <= 0:
+        return 0
+    single_pct = _active_single_position_limit_pct(profile, assets)
+    single_limit = round(assets * single_pct / 100, 2)
+    if shares * price <= single_limit:
+        return 0
+    minimum_declaration = lot_size_for_code(code)
+    if shares <= minimum_declaration:
+        return shares
+    target_shares = int(single_limit / price)
+    requested_reduction = max(0, shares - target_shares)
+    clean_code = "".join(char for char in str(code) if char.isdigit())[-6:]
+    if clean_code.startswith(("688", "689")):
+        # 科创板申报下限为 200 股，超过下限后按 1 股递增；零股可一次卖清。
+        sell_quantity = min(
+            shares,
+            max(minimum_declaration, requested_reduction),
+        )
+        remaining = shares - sell_quantity
+        if remaining == 0 or remaining >= minimum_declaration:
+            return sell_quantity
+        retain_minimum = shares - minimum_declaration
+        if (
+            retain_minimum >= minimum_declaration
+            and retain_minimum >= requested_reduction
+        ):
+            return retain_minimum
+        return shares
+
+    sell_quantity = (
+        (requested_reduction + minimum_declaration - 1)
+        // minimum_declaration
+    ) * minimum_declaration
+    sell_quantity = min(sell_quantity, shares)
+    remaining = shares - sell_quantity
+    if remaining and (
+        remaining < minimum_declaration
+        or remaining % minimum_declaration != 0
+    ):
+        return shares
+    return sell_quantity
+
+
 def build_execution_guard(
     positions: list[dict],
     available_cash: float,
@@ -121,11 +222,7 @@ def build_execution_guard(
     profile = strategy_profile or get_strategy_profile()
     lines = []
     reserve_pct = float(profile["cash_reserve_pct"])
-    single_pct = (
-        float(profile["single_position_limit_pct"])
-        if total_assets < 5000
-        else float(profile["standard_single_position_limit_pct"])
-    )
+    single_pct = _active_single_position_limit_pct(profile, total_assets)
     reserve_cash = round(total_assets * reserve_pct / 100, 2) if total_assets else 0
     single_limit = round(total_assets * single_pct / 100, 2) if total_assets else 0
     buy_budget = max(0.0, min(available_cash - reserve_cash, single_limit))
@@ -161,18 +258,21 @@ def build_execution_guard(
         if not shares or not price or not total_assets:
             continue
         ratio = value / total_assets * 100
-        target_shares = int((single_limit / price) // 1)
         if ratio > single_pct and total_assets < 5000:
-            if shares <= 100:
+            sell_qty = _over_position_sell_quantity(
+                code=str(p.get("code") or ""),
+                shares=shares,
+                price=price,
+                total_assets=total_assets,
+                profile=profile,
+            )
+            if sell_qty == shares:
                 lines.append(
                     f"- {p.get('name', p.get('code', '持仓'))}: 当前{shares}股，占总资产约{ratio:.1f}%，"
                     f"超过小账户{single_pct:.0f}%上限；若要立刻合规，机器可执行方案是清仓{shares}股，"
                     "否则只能继续持有观察，不能执行非整手减仓后留下零碎仓的方案。"
                 )
-            else:
-                sell_qty = max(0, shares - target_shares)
-                sell_qty = ((sell_qty + 99) // 100) * 100
-                sell_qty = min(sell_qty, shares)
+            elif sell_qty:
                 lines.append(
                     f"- {p.get('name', p.get('code', '持仓'))}: 当前{shares}股，占总资产约{ratio:.1f}%；"
                     f"若按{single_pct:.0f}%上限降仓，优先卖出约{sell_qty}股。"
@@ -214,27 +314,11 @@ def build_final_action_summary(
 
 
 def load_sentinel_research_package(report_date: str) -> dict | None:
-    """Load Sentinel research package for report_date, falling back to the latest available package."""
-    try:
-        from app.ai.sentinel_research import load_research_package
-
-        package = load_research_package(report_date, output_root=SENTINEL_OUTPUT_ROOT)
-        if package:
-            return package
-        package_dir = SENTINEL_OUTPUT_ROOT / "research_packages"
-        if not package_dir.exists():
-            return None
-        for path in sorted(package_dir.glob("*.json"), reverse=True):
-            fallback = load_research_package(path.stem, output_root=SENTINEL_OUTPUT_ROOT)
-            if fallback:
-                fallback = dict(fallback)
-                fallback["fallback_used"] = True
-                fallback["requested_date"] = report_date
-                fallback["fallback_reason"] = "requested_date_package_missing"
-                return fallback
-        return None
-    except Exception:
-        return None
+    """Load the nearest Sentinel package within the shared active window."""
+    return _load_recent_sentinel_package(
+        report_date,
+        output_root=SENTINEL_OUTPUT_ROOT,
+    )
 
 
 def _role_excerpt(role_data: dict) -> str:
@@ -313,17 +397,6 @@ def build_role_vote_audit(decision: dict, hidden_codes: set[str] | None = None) 
     return lines
 
 
-def _sentinel_package_age_days(package: dict | None, report_date: str | None) -> int | None:
-    if not package or not report_date or not package.get("date"):
-        return None
-    try:
-        current = datetime.strptime(str(report_date), "%Y-%m-%d").date()
-        package_date = datetime.strptime(str(package.get("date")), "%Y-%m-%d").date()
-    except ValueError:
-        return None
-    return max(0, (current - package_date).days)
-
-
 def build_sentinel_research_section(package: dict | None, report_date: str | None = None) -> list[str]:
     """Render Sentinel research package summary for the main report."""
     if not package:
@@ -335,15 +408,15 @@ def build_sentinel_research_section(package: dict | None, report_date: str | Non
         f"- Sentinel 状态：{(package.get('source_status') or {}).get('status', 'unknown')}",
         f"- 高频新闻：{package.get('event_count', 0)} 条，关键新闻 {package.get('key_event_count', 0)} 条。",
     ]
-    age_days = _sentinel_package_age_days(
+    freshness = _sentinel_package_freshness(
         package,
         report_date or package.get("requested_date"),
     )
-    if age_days is not None and age_days > 2:
+    if freshness["active"] is not True:
         lines.extend([
-            f"- 研究包日期：{package.get('date')}，已过期 {age_days} 天。",
-            "- Serenity：旧深挖不参与当前候选判断；等待新的研究包生成。",
-            "- 边界：旧报告只保留作历史复盘。",
+            f"- 研究包时效：{_sentinel_audit_only_message(freshness)}",
+            "- Serenity：该深挖不参与当前候选判断；等待日期有效的新研究包生成。",
+            "- 边界：该报告只保留作历史审计/复盘。",
         ])
         return lines
     if package.get("fallback_used"):
@@ -381,16 +454,141 @@ def build_data_source_audit(
     sqlite_ok: bool | None = None,
     deepseek_ok: bool | None = None,
     qwen_ok: bool | None = None,
+    model_runtime_status: dict | None = None,
+    report_date: str | None = None,
 ) -> list[str]:
     """Render data-source audit rows for the main report."""
     indices = market_data.get("indices", {}) if isinstance(market_data, dict) else {}
+    market_status = market_data.get("market_source_status", {}) if isinstance(market_data, dict) else {}
+    market_status = market_status if isinstance(market_status, dict) else {}
+    data_cutoff = market_status.get("data_cutoff")
+    freshness_status = str(
+        market_status.get("freshness_status") or market_status.get("freshness") or ""
+    ).strip().lower()
+    coverage = market_status.get("coverage")
+    coverage = coverage if isinstance(coverage, dict) else {}
+    expected_count = coverage.get("expected")
+    verified_count = coverage.get("verified")
+    coverage_text = (
+        f"{verified_count}/{expected_count}"
+        if expected_count is not None and verified_count is not None
+        else "未知"
+    )
+    missing_sources = market_status.get("missing_sources")
+    missing_sources = missing_sources if isinstance(missing_sources, list) else []
+    rejected_sources = market_status.get("rejected_sources")
+    rejected_sources = rejected_sources if isinstance(rejected_sources, list) else []
+    coverage_detail = (
+        f"覆盖={coverage_text}；"
+        f"缺失来源={','.join(map(str, missing_sources)) or '无'}；"
+        f"拒绝来源={','.join(map(str, rejected_sources)) or '无'}"
+    )
+    coverage_complete = (
+        expected_count == len(EXPECTED_MARKET_INDEX_CODES)
+        and verified_count == len(EXPECTED_MARKET_INDEX_CODES)
+    )
+    source_lists_complete = not missing_sources and not rejected_sources
+    index_keys_complete = {
+        "shanghai",
+        "shenzhen",
+        "cyb",
+    }.issubset(indices)
+    cutoff_recent = is_recent_market_cutoff(
+        data_cutoff,
+        now=datetime.now().astimezone(),
+    )
+    market_ok = (
+        market_status.get("status") == "ok"
+        and index_keys_complete
+        and coverage_complete
+        and source_lists_complete
+        and freshness_status in {"fresh", "ok"}
+        and cutoff_recent
+    )
+    if market_ok:
+        market_detail = (
+            f"指数 {len(indices)} 项；提供方={market_status.get('provider') or '未知'}；"
+            f"数据截止={data_cutoff}；新鲜度={_status_label(freshness_status)}；"
+            f"{coverage_detail}"
+        )
+    else:
+        failure_reasons = []
+        if market_status.get("status") != "ok":
+            failure_reasons.append(
+                str(market_status.get("error") or "market_status_not_ok")
+            )
+        if not indices:
+            failure_reasons.append("indices_missing")
+        elif not index_keys_complete:
+            failure_reasons.append("required_indices_missing")
+        if not coverage_complete:
+            failure_reasons.append("coverage_incomplete")
+        if not source_lists_complete:
+            failure_reasons.append("missing_or_rejected_sources")
+        if not data_cutoff:
+            failure_reasons.append("data_cutoff_missing")
+        elif not cutoff_recent:
+            failure_reasons.append("data_cutoff_stale_or_invalid")
+        if freshness_status not in {"fresh", "ok"}:
+            failure_reasons.append(
+                f"freshness_unproven:{freshness_status or 'missing'}"
+            )
+        market_detail = (
+            f"指数 {len(indices)} 项；提供方={market_status.get('provider') or '未知'}；"
+            f"数据截止={data_cutoff or '未知'}；"
+            f"失败原因={'、'.join(_audit_reason_label(reason) for reason in failure_reasons)}；"
+            f"{coverage_detail}"
+        )
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
-    deepseek_status = "configured" if os.getenv("DEEPSEEK_API_KEY") else "missing"
-    qwen_status = "configured" if (os.getenv("DASHSCOPE_API_KEY") or os.getenv("QWEN_API_KEY")) else "missing"
-    if deepseek_ok is not None:
-        deepseek_status = "ok" if deepseek_ok else "degraded"
-    if qwen_ok is not None:
-        qwen_status = "ok" if qwen_ok else "degraded"
+    sentinel_freshness = _sentinel_package_freshness(
+        sentinel_package,
+        report_date,
+    )
+    if not sentinel_package:
+        sentinel_package_status = "missing"
+        sentinel_package_detail = "未找到研究包"
+    elif sentinel_freshness["active"] is True:
+        sentinel_package_status = "ok"
+        sentinel_package_detail = "当前决策研究输入，不产生交易指令"
+    else:
+        sentinel_package_status = "degraded"
+        sentinel_package_detail = _sentinel_audit_only_message(
+            sentinel_freshness
+        )
+    if model_runtime_status is None and (
+        deepseek_ok is not None or qwen_ok is not None
+    ):
+        probe_calls = []
+        for provider, probe in (
+            ("DeepSeek", deepseek_ok),
+            ("Qwen", qwen_ok),
+        ):
+            if probe is None:
+                continue
+            probe_calls.append({
+                "role": "连通性探测",
+                "provider": provider,
+                "requested_provider": provider,
+                "status": "success" if probe else "degraded",
+            })
+        model_runtime_status = {
+            "status": (
+                "success"
+                if deepseek_ok is True and qwen_ok is True
+                else "degraded"
+            ),
+            "providers": [
+                call["provider"]
+                for call in probe_calls
+                if call["status"] == "success"
+            ],
+            "calls": probe_calls,
+            "degradation_reasons": (
+                []
+                if deepseek_ok is True and qwen_ok is True
+                else ["cloud_call_failed"]
+            ),
+        }
     if sqlite_ok is None:
         sqlite_ok = not (
             market_data.get("portfolio_sync_failed") is True
@@ -400,14 +598,15 @@ def build_data_source_audit(
     rows = [
         "| 数据源 | 状态 | 覆盖/说明 |",
         "|---|---|---|",
-        f"| 行情数据 | {'ok' if indices else 'degraded'} | 指数 {len(indices)} 项 |",
-        f"| Tushare 高频新闻 | {sentinel_status.get('status', 'missing')} | 新闻 {(sentinel_package or {}).get('event_count', 0)} 条 |",
-        f"| Sentinel 研究包 | {'ok' if sentinel_package else 'missing'} | 研究输入，不产生交易指令 |",
-        f"| DeepSeek | {_status_label(deepseek_status)} | 四角色/裁判主模型；状态表示配置存在，不等于本次探活成功 |",
-        f"| Qwen | {_status_label(qwen_status)} | 研究员/备用裁判；状态表示配置存在，不等于本次探活成功 |",
-        f"| 本地持仓 | {'ok' if portfolio_loaded else 'missing'} | 账户约束优先生效 |",
-        f"| SQLite | {'ok' if sqlite_ok else 'degraded'} | 辩论快照与持仓同步 |",
+        f"| 行情数据 | {_status_label('ok' if market_ok else 'degraded')} | {market_detail} |",
+        f"| Tushare 高频新闻 | {_status_label(sentinel_status.get('status', 'missing'))} | 新闻 {(sentinel_package or {}).get('event_count', 0)} 条 |",
+        f"| Sentinel 研究包 | {_status_label(sentinel_package_status)} | {sentinel_package_detail} |",
     ]
+    rows.extend(_model_runtime_audit_rows(model_runtime_status))
+    rows.extend([
+        f"| 本地持仓 | {_status_label('ok' if portfolio_loaded else 'missing')} | 账户约束优先生效 |",
+        f"| SQLite | {_status_label('ok' if sqlite_ok else 'degraded')} | 辩论快照与持仓同步 |",
+    ])
     return rows
 
 
@@ -491,12 +690,136 @@ def _cell(value, limit: int = 120) -> str:
 
 def _status_label(value: str) -> str:
     labels = {
-        "ok": "可用",
+        "ok": "成功",
+        "success": "成功",
         "configured": "已配置",
         "missing": "缺失",
         "degraded": "降级",
+        "failed": "失败",
+        "error": "失败",
+        "unavailable": "不可用",
+        "unknown": "未知",
+        "fresh": "新鲜",
+        "stale": "过期",
+        "not_enabled": "未启用",
+        "conflict": "数据冲突",
+        "partial": "部分可用",
+        "invalid": "无效",
+        "expired": "过期",
+        "blocked": "阻断",
+        "pending": "待处理",
     }
-    return labels.get(str(value or "").lower(), str(value or "—"))
+    normalized = str(value or "").lower()
+    if normalized in labels:
+        return labels[normalized]
+    if normalized and normalized.isascii():
+        return "其他状态"
+    return str(value or "—")
+
+
+def _audit_reason_label(value: str) -> str:
+    raw = str(value or "")
+    labels = {
+        "market_status_not_ok": "行情源状态异常",
+        "indices_missing": "指数数据缺失",
+        "required_indices_missing": "必需指数缺失",
+        "coverage_incomplete": "指数覆盖不完整",
+        "missing_or_rejected_sources": "存在缺失或被拒绝的数据源",
+        "data_cutoff_missing": "数据截止时间缺失",
+        "data_cutoff_stale_or_invalid": "数据截止时间过期或无效",
+        "index_quotes_not_fetched": "指数行情未获取",
+        "all_realtime_index_sources_failed": "所有实时指数行情源均失败",
+    }
+    if raw.startswith("freshness_unproven:"):
+        status = raw.split(":", 1)[1]
+        return f"数据新鲜度未证实（{_status_label(status)}）"
+    if raw in labels:
+        return labels[raw]
+    if raw and raw.isascii():
+        return "其他数据源异常（详情见结构化状态）"
+    return _humanize_reason(raw)
+
+
+def _model_runtime_truth(value: dict | None) -> dict:
+    from app.ai.debate import reconcile_model_runtime_status
+
+    return reconcile_model_runtime_status(value)
+
+
+def _model_degradation_text(reasons: list[str]) -> str:
+    labels = {
+        "qwen_api_key_missing": "Qwen 密钥缺失，实际回退到 DeepSeek",
+        "cloud_call_failed": "云端模型调用失败",
+        "required_output_unusable": "必要模型输出不可用",
+        "successful_provider_missing": "成功输出缺少实际提供方",
+        "runtime_marked_degraded": "上游运行态已标记降级",
+        "empty_model_output": "模型返回空内容",
+        "judge_not_called": "裁判未完成调用",
+        "debate_call_failed": "本次辩论调用失败",
+        "runtime_status_unavailable": "本次状态未验证/降级状态未知",
+        "validator_call_failed": "输出校验模型调用失败",
+    }
+    return "；".join(
+        labels.get(str(reason), "存在未分类降级")
+        for reason in reasons
+    )
+
+
+def format_model_runtime_header(model_runtime_status: dict | None) -> str:
+    """Describe only providers actually observed in this report run."""
+    runtime = _model_runtime_truth(model_runtime_status)
+    status = runtime["status"]
+    providers = runtime["providers"]
+    provider_text = " + ".join(providers)
+    if status == "success" and provider_text:
+        return f"> 🤖 本次AI路由：{provider_text}（调用成功）"
+    if status == "degraded":
+        route = provider_text or "无成功提供方"
+        return f"> 🤖 本次AI路由：{route}（降级）"
+    return "> 🤖 本次AI路由：状态未验证/降级状态未知"
+
+
+def _model_runtime_audit_rows(
+    model_runtime_status: dict | None,
+) -> list[str]:
+    runtime = _model_runtime_truth(model_runtime_status)
+    if runtime["status"] == "success":
+        provider_text = " + ".join(runtime["providers"]) or "实际提供方未记录"
+        detail = f"实际提供方：{provider_text}；本次调用成功"
+        status_text = "成功"
+    elif runtime["status"] == "degraded":
+        provider_text = " + ".join(runtime["providers"]) or "无成功提供方"
+        failed_attempts = []
+        for call in runtime["calls"]:
+            attempted = call.get("attempted_provider")
+            if not attempted or call.get("output_usable") is True:
+                continue
+            requested = call.get("requested_provider")
+            label = (
+                f"{attempted}（原请求 {requested}）"
+                if requested and requested != attempted
+                else attempted
+            )
+            if label not in failed_attempts:
+                failed_attempts.append(label)
+        reason_text = _model_degradation_text(
+            runtime["degradation_reasons"]
+        ) or "存在未分类降级"
+        attempt_text = (
+            f"；失败尝试：{'、'.join(failed_attempts)}"
+            if failed_attempts
+            else ""
+        )
+        detail = (
+            f"实际提供方：{provider_text}{attempt_text}；{reason_text}"
+        )
+        status_text = "降级"
+    else:
+        status_text = "未验证"
+        detail = "本次状态未验证/降级状态未知"
+    return [
+        f"| AI 模型实际路由 | {status_text} | {detail} |",
+    ]
 
 
 def _missing_data_label(value: str) -> str:
@@ -550,6 +873,10 @@ def _block_reason_label(value: str) -> str:
         "risk_budget_too_small": "一手风险超过预算",
         "regime_blocks_dip": "大盘/板块环境阻断低吸",
         "price_not_triggered": "价格/量能/资金未同时触发",
+        "long_thesis_broken": "长期论文红线触发",
+        "long_thesis_store_invalid": "长期论文存储损坏",
+        "visible_decision_gate_blocked": "统一入场闸门阻断",
+        "quote_validation_blocked": "易淘金行情校验阻断",
     }
     return labels.get(str(value or "").lower(), _humanize_reason(value) if value else "无")
 
@@ -621,7 +948,7 @@ def _is_budget_blocked(item: dict, buy_budget: float) -> bool:
     if item.get("block_reason") == "lot_size_exceeded":
         return True
     lot_value = _lot_value(item)
-    return bool(lot_value and buy_budget and lot_value > buy_budget)
+    return bool(lot_value > 0 and lot_value > max(0.0, buy_budget))
 
 
 def _hidden_budget_codes(decision: dict, buy_budget: float) -> set[str]:
@@ -895,7 +1222,8 @@ def _render_budget_blocks(
     ]
     if hidden_codes:
         lines.append(
-            f"- 预算阻断 {len(hidden_codes)} 只：已从主报告正文隐藏，不进入 AI 辩论输入、不进入雷达池、不占用盘前视线。"
+            f"- 预算阻断 {len(hidden_codes)} 只：已从可执行正文和雷达池隐藏；"
+            "上游是否进入模型分析以当次路由审计为准，本段不作未验证推断。"
         )
         lines.append("- 明细保留在本地结构化审计日志；主报告只展示可执行标的、预算通过的雷达候选和补数据任务。")
     else:
@@ -1148,6 +1476,8 @@ def _trend_text(item: dict) -> str:
     parts = []
     if item.get("thesis_status"):
         parts.append(_thesis_status_label(item.get("thesis_status")))
+    if item.get("red_line_status") == "unknown":
+        parts.append("红线状态未知")
     if item.get("valuation_zone"):
         parts.append(_valuation_zone_label(item.get("valuation_zone")))
     if item.get("long_quality_score") is not None:
@@ -1241,14 +1571,24 @@ def _project_status_section(
         theme_text = "、".join(
             f"{item.get('name')}({item.get('count')})" for item in themes[:3] if isinstance(item, dict)
         ) or "无明确主题"
-        age_days = _sentinel_package_age_days(sentinel_package, report_date)
+        freshness = _sentinel_package_freshness(
+            sentinel_package,
+            report_date,
+        )
         dives = sentinel_package.get("serenity_deep_dives") or []
-        if age_days is not None and age_days > 2:
+        if freshness["active"] is not True:
             lines.append(
-                f"- Sentinel：研究包日期 {sentinel_package.get('date')}，已过期 {age_days} 天；"
-                "只保留历史复盘，不作为当前候选证据。"
+                f"- Sentinel：{_sentinel_audit_only_message(freshness)}"
             )
-            lines.append("- Serenity：旧深挖不参与当前候选判断；等待20:00研究任务刷新。")
+            dive_label = (
+                "旧深挖"
+                if freshness["status"] == "stale"
+                else "该深挖"
+            )
+            lines.append(
+                f"- Serenity：{dive_label}不参与当前候选判断；"
+                "等待20:00研究任务刷新。"
+            )
             lines.append("")
             return lines
         dive_names = []
@@ -1441,7 +1781,14 @@ def _long_pool_rows(decision: dict) -> list[dict]:
             if pool_kind == "mid_long_term" and item.get("pool_retained") is True:
                 long_rows.append(item)
             continue
-        if item.get("thesis_status") or item.get("long_quality_score") or str(item.get("action") or "") in {"research_only", "research_reference"}:
+        action = _effective_target_action(item).lower()
+        if action in {"research_only", "research_reference"}:
+            continue
+        if (
+            item.get("thesis_status")
+            or item.get("long_quality_score") is not None
+            or item.get("red_line_status")
+        ):
             long_rows.append(item)
     return long_rows
 
@@ -1455,12 +1802,10 @@ def _long_pool_section(decision: dict, *, budget_blocked_count: int = 0) -> list
         "|---|---:|---:|---:|---:|---|---|---|",
     ]
     if not rows:
-        if budget_blocked_count:
-            lines.append(
-                f"| 暂无 | - | - | - | - | 中长线研究不是没有；研究层仍有 {budget_blocked_count} 只预算阻断标的 | - | 明细在 Obsidian，不作为当前账户策略 |"
-            )
-        else:
-            lines.append("| 暂无 | - | - | - | - | Serenity/长线研究未形成可跟踪配置 | - | 只在 Obsidian 查看研究细节 |")
+        lines.append(
+            "| 暂无 | - | - | - | - | Serenity/长期论文尚未形成可验证闭环 | - | "
+            "预算阻断只在附录披露，不据此推断中长期价值 |"
+        )
         lines.append("")
         return lines
     for item in rows[:6]:
@@ -1556,11 +1901,14 @@ def _research_archive_lines(
         "- Serenity 深挖：保留产业链瓶颈、候选锚点和验证问题；进入策略前必须再过账户与行情评分。",
     ]
     if sentinel_package:
-        age_days = _sentinel_package_age_days(sentinel_package, report_date)
-        if age_days is not None and age_days > 2:
+        freshness = _sentinel_package_freshness(
+            sentinel_package,
+            report_date,
+        )
+        if freshness["active"] is not True:
             lines.append(
-                f"- Serenity 深挖归档：最新研究包已过期 {age_days} 天；"
-                "旧文件只作历史复盘，不参与当前候选判断。"
+                "- Serenity 深挖归档："
+                f"{_sentinel_audit_only_message(freshness)}"
             )
             return lines
         lines.append(
@@ -1673,10 +2021,20 @@ def _render_mid_frequency_strategy(
 def _thesis_status_label(status: str) -> str:
     return {
         "healthy": "论文成立",
+        "forming": "论文形成中/验证未完成",
         "weakened": "边际弱化",
         "broken": "红线触发",
         "stale": "论文过期",
+        "unknown": "论文状态未知",
     }.get(str(status or ""), "未建论文")
+
+
+def _red_line_status_label(status: str) -> str:
+    return {
+        "triggered": "触发",
+        "clear": "未触发",
+        "unknown": "红线状态未知",
+    }.get(str(status or ""), "红线状态未知")
 
 
 def _valuation_zone_label(zone: str) -> str:
@@ -1721,6 +2079,12 @@ def _render_long_horizon_summary(rows: list[dict]) -> list[str]:
         "|---|---|---|---:|---|---|---|",
     ]
     for item in long_rows[:8]:
+        long_quality_score = item.get("long_quality_score")
+        long_quality_label = (
+            str(long_quality_score)
+            if long_quality_score is not None
+            else "未知"
+        )
         next_step = _humanize_reason(
             item.get("combined_decision_reason")
             or item.get("decision_reason")
@@ -1729,8 +2093,8 @@ def _render_long_horizon_summary(rows: list[dict]) -> list[str]:
         )
         lines.append(
             f"| {_cell(_target_label(item), 40)} | {_thesis_status_label(item.get('thesis_status'))} | "
-            f"{_valuation_zone_label(item.get('valuation_zone'))} | {item.get('long_quality_score', 0)} | "
-            f"{'触发' if item.get('red_line_status') == 'triggered' else '未触发'} | "
+            f"{_valuation_zone_label(item.get('valuation_zone'))} | {long_quality_label} | "
+            f"{_red_line_status_label(item.get('red_line_status'))} | "
             f"{_action_nature(item)} | {_cell(next_step, 140)} |"
         )
     lines.append("")
@@ -1768,6 +2132,549 @@ def _structured_review_summary(target_buckets: dict[str, list[dict]], decision: 
     return "".join(parts)
 
 
+def _holding_action_view(
+    *,
+    positions: list[dict],
+    decision: dict,
+    target_date: str,
+    total_assets: float,
+    profile: dict,
+) -> list[dict]:
+    """Normalize holdings into exact, renderer-only action rows."""
+    watch_items = _position_watch_items(decision)
+    rows: list[dict] = []
+    for pos in positions:
+        shares = max(0, int(pos.get("shares", pos.get("position", 0)) or 0))
+        price = float(pos.get("current_price", 0) or 0)
+        cost = pos.get("avg_cost") or pos.get("cost_price") or pos.get("average_cost")
+        watch = _watch_for_position(pos, watch_items)
+        stop_loss = watch.get("stop_loss_price") or watch.get("stop_loss")
+        target_price = watch.get("target_price") or watch.get("take_profit_price")
+        try:
+            risk_reference_price = float(cost or 0) or price
+        except (TypeError, ValueError):
+            risk_reference_price = price
+        if not stop_loss and risk_reference_price:
+            stop_loss = calculate_stop_loss_price(risk_reference_price)
+        if not target_price and risk_reference_price:
+            target_price = calculate_target_price(risk_reference_price)
+
+        quote_alarm = _holding_quote_alarm(pos, target_date)
+        quote_freshness = _quote_freshness_for_service_date(pos, target_date)
+        has_explicit_quote_state = any(
+            key in pos
+            for key in (
+                "quote_status",
+                "quote_freshness",
+                "freshness",
+                "quote_source",
+                "quote_timestamp",
+            )
+        )
+        try:
+            breached = bool(price and stop_loss and price <= float(stop_loss))
+        except (TypeError, ValueError):
+            breached = False
+        try:
+            target_hit = bool(price and target_price and price >= float(target_price))
+        except (TypeError, ValueError):
+            target_hit = False
+
+        if quote_alarm and (has_explicit_quote_state or breached):
+            action = "人工核验止损，核验前不卖"
+            sell_quantity = 0
+            next_signal = (
+                f"{quote_alarm}，必须人工核验止损 {_money(stop_loss)}；"
+                "确认有效价格后再生成卖出数量，核验前精确卖出0股。"
+            )
+        elif breached:
+            action = "立即退出止损"
+            sell_quantity = shares
+            next_signal = (
+                f"新鲜行情已跌破 {_money(stop_loss)}，立即卖出{shares}股/退出；"
+                "禁止补仓/抢反弹。"
+            )
+        elif target_hit:
+            action = "目标位止盈退出"
+            sell_quantity = shares
+            next_signal = (
+                f"现价已达到 {_money(target_price)}，卖出{shares}股止盈；"
+                "若开盘即回落到目标位下方，先人工核价再执行。"
+            )
+        else:
+            over_position_sell = _over_position_sell_quantity(
+                code=_target_code(pos),
+                shares=shares,
+                price=price,
+                total_assets=total_assets,
+                profile=profile,
+            )
+            if over_position_sell:
+                action = (
+                    "仓位超限，精确退出"
+                    if over_position_sell == shares
+                    else "仓位超限，精确减仓"
+                )
+                sell_quantity = over_position_sell
+                single_pct = _active_single_position_limit_pct(
+                    profile,
+                    total_assets,
+                )
+                next_signal = (
+                    f"按当前策略单票上限 {single_pct:.0f}% 卖出"
+                    f"{over_position_sell}股；执行后重新核对持仓真值，"
+                    f"剩余{shares - over_position_sell}股继续服从止损 "
+                    f"{_money(stop_loss)} 和目标 {_money(target_price)}。"
+                )
+            else:
+                action = "持有观察"
+                sell_quantity = 0
+                next_signal = (
+                    f"跌破 {_money(stop_loss)} 则卖出{shares}股；"
+                    f"达到 {_money(target_price)} 则卖出{shares}股；"
+                    "否则精确卖出0股，不加仓。"
+                )
+
+        price_text = (
+            "待核验"
+            if quote_alarm and (has_explicit_quote_state or breached)
+            else _money(price)
+        )
+        if quote_freshness == "fresh_close" and price_text != "待核验":
+            price_text = f"有效收盘价 {_money(price)}"
+        rows.append({
+            "label": _target_label(pos),
+            "shares": shares,
+            "price_text": price_text,
+            "cost_text": _money(cost),
+            "stop_text": _money(stop_loss),
+            "target_text": _money(target_price),
+            "action": action,
+            "sell_quantity": sell_quantity,
+            "next_signal": next_signal,
+        })
+    return rows
+
+
+def _candidate_position(item: dict) -> tuple[int, float]:
+    """Return one exact executable/observe quantity without inventing odd lots."""
+    entry = _positive_float(_trigger_from_item(item)) or 0.0
+    code = _target_code(item)
+    lot_size = int(item.get("lot_size") or lot_size_for_code(code))
+    explicitly_blocked = (
+        item.get("entry_allowed") is False
+        or item.get("execution_blocked_reason")
+        in {"visible_decision_gate_blocked", "quote_validation_blocked"}
+    )
+    if explicitly_blocked:
+        return 0, 0.0
+    shares = int(
+        item.get("position_shares")
+        or item.get("shares")
+        or item.get("suggested_shares")
+        or 0
+    )
+    amount = _positive_float(
+        item.get("position_amount") or item.get("suggested_amount")
+    ) or 0.0
+    if shares <= 0 and entry > 0 and amount > 0 and lot_size > 0:
+        shares = int(amount // entry // lot_size) * lot_size
+    if shares <= 0 and (_lot_value(item) > 0 or amount > 0):
+        shares = lot_size
+    if shares > 0 and lot_size > 0:
+        shares = max(lot_size, (shares // lot_size) * lot_size)
+    exact_amount = round(shares * entry, 2) if shares > 0 and entry > 0 else 0.0
+    return shares, exact_amount
+
+
+def _tactical_action(item: dict) -> str:
+    return str(
+        item.get("blocked_entry_action")
+        or item.get("action")
+        or item.get("status")
+        or ""
+    ).strip().lower()
+
+
+def _fully_scored_tactical_candidate(item: dict) -> bool:
+    """Mirror the TargetScoring authorization contract at report boundary."""
+    action = _tactical_action(item)
+    if action not in {
+        "buy",
+        "add",
+        "increase",
+        "actionable",
+        "executable",
+        "add_position",
+    }:
+        return False
+    score = item.get("score")
+    if isinstance(score, bool) or not isinstance(score, (int, float)):
+        return False
+    if not math.isfinite(float(score)) or float(score) < 70:
+        return False
+    source_status = item.get("source_status")
+    if not isinstance(source_status, dict) or not all(
+        source_status.get(key) == "ok"
+        for key in ("quote", "kline", "fund_flow", "financial")
+    ):
+        return False
+    if item.get("authorization_valid") is not True:
+        return False
+    if item.get("missing_data") not in (None, []):
+        return False
+    production = item.get("production_eligibility")
+    if (
+        not isinstance(production, dict)
+        or production.get("eligible") is not True
+        or item.get("research_only") is True
+    ):
+        return False
+    return _effective_target_action({
+        **item,
+        "action": action,
+    }).lower() not in {"research_only", "research_reference"}
+
+
+def _candidate_rank(item: dict, source_index: int) -> tuple:
+    action = _tactical_action(item)
+    action_tier = (
+        0
+        if action in {"buy", "add", "increase"}
+        else 1
+    )
+    score = float(item.get("score") or 0)
+    playbook = str(item.get("playbook") or "").strip().lower()
+    trigger_tier = (
+        0
+        if item.get("triggered") is True
+        else 1
+        if playbook == "breakout_entry"
+        else 2
+        if playbook == "dip_entry"
+        else 3
+    )
+    return (
+        -score,
+        action_tier,
+        trigger_tier,
+        _target_code(item),
+        source_index,
+    )
+
+
+def _candidate_view(
+    *,
+    decision: dict,
+    holding_codes: set[str],
+    gate: dict,
+) -> tuple[list[dict], str]:
+    """Keep ranked, fully specified non-research candidates, capped by renderer."""
+    ordered: list[dict] = []
+    seen: set[str] = set()
+    missing_reasons: list[str] = []
+    source_rows = _target_scores(decision) + _outside_pool_scan(decision)
+    ranked_rows = sorted(
+        enumerate(source_rows),
+        key=lambda pair: _candidate_rank(pair[1], pair[0]),
+    )
+    for source_index, item in ranked_rows:
+        code = _target_code(item)
+        if not code or code in holding_codes or code in seen:
+            continue
+        if not _fully_scored_tactical_candidate(item):
+            continue
+
+        entry = _positive_float(_trigger_from_item(item))
+        stop_loss = _positive_float(_stop_from_item(item))
+        target_price = _positive_float(_target_from_item(item))
+        lot_value = _lot_value(item)
+        if not all((entry, stop_loss, target_price, lot_value)):
+            missing = _missing_data_text(item.get("missing_data") or [])
+            missing_reasons.append(
+                f"{_target_label(item)} 缺"
+                + (
+                    missing
+                    if missing != "无"
+                    else "明确触发价、止损、目标位或一手金额"
+                )
+            )
+            continue
+
+        seen.add(code)
+        shares, exact_amount = _candidate_position(item)
+        blocked = shares <= 0 or item.get("entry_allowed") is False
+        action = _tactical_action(item)
+        if blocked:
+            action_text = "闸门阻断，不下单"
+        elif action in {"buy", "actionable", "executable"}:
+            action_text = "人工复核买入"
+        elif action in {"add", "increase"}:
+            action_text = "人工复核加仓"
+        else:
+            action_text = "等待触发，不下单"
+        gate_reason = (
+            format_visible_decision_reasons(gate)
+            if gate.get("entry_allowed") is False
+            else _block_reason_label(
+                item.get("execution_blocked_reason")
+                or item.get("block_reason")
+            )
+        )
+        if gate_reason in {"无", ""}:
+            gate_reason = "账户与硬风控通过，仍需人工核价"
+        reason = _humanize_reason(
+            item.get("next_signal")
+            or item.get("decision_reason")
+            or item.get("watch_reason")
+            or item.get("reason")
+        )
+        ordered.append({
+            "label": _target_label(item),
+            "action": action_text,
+            "amount_shares_text": (
+                f"{_money(exact_amount)} / {shares}股"
+                if shares > 0
+                else "¥0.00 / 0股"
+            ),
+            "entry_text": _money(entry),
+            "stop_text": _money(stop_loss),
+            "target_text": _money(target_price),
+            "gate_reason": _humanize_reason(gate_reason),
+            "next_signal": reason
+            or "等待价格、量能、个股资金流和人工核价同时确认。",
+        })
+
+    missing_reason = "；".join(missing_reasons[:3])
+    if not ordered and not missing_reason:
+        gate_reason = format_visible_decision_reasons(gate)
+        missing_reason = (
+            gate_reason
+            or "缺少同时通过的价格触发、量能、个股资金流、账户预算或硬风控信号。"
+        )
+    return ordered[:3], _humanize_reason(missing_reason)
+
+
+def _long_horizon_view(decision: dict) -> list[dict]:
+    rows: list[dict] = []
+    for item in _target_scores(decision):
+        has_long_truth = (
+            bool(item.get("thesis_status"))
+            or item.get("long_quality_score") is not None
+            or bool(item.get("red_line_status"))
+        )
+        if not has_long_truth:
+            continue
+        long_quality_score = item.get("long_quality_score")
+        long_reason = _humanize_reason(
+            item.get("combined_decision_reason")
+            or item.get("long_horizon_reason")
+            or item.get("decision_reason")
+            or "等待论文复核。"
+        )
+        explicit_next_signal = item.get("next_signal")
+        next_signal = (
+            _humanize_reason(explicit_next_signal)
+            if explicit_next_signal
+            else ""
+        )
+        rows.append({
+            "label": _target_label(item),
+            "thesis_status": _thesis_status_label(item.get("thesis_status")),
+            "valuation_zone": _valuation_zone_label(item.get("valuation_zone")),
+            "long_quality_score": (
+                str(long_quality_score)
+                if long_quality_score is not None
+                else "未知"
+            ),
+            "red_line_status": _red_line_status_label(
+                item.get("red_line_status")
+            ),
+            "action_nature": _action_nature(item),
+            "next_signal": (
+                f"{long_reason}；下一步：{next_signal}"
+                if next_signal and next_signal not in long_reason
+                else long_reason
+            ),
+        })
+    return rows
+
+
+def _research_appendix_view(
+    *,
+    decision: dict,
+    hidden_codes: set[str],
+    buy_budget: float,
+) -> tuple[list[dict], list[dict]]:
+    budget_rows: list[dict] = []
+    research_rows: list[dict] = []
+    seen: set[str] = set()
+    for item in _target_scores(decision) + _outside_pool_scan(decision):
+        code = _target_code(item)
+        if not code or code in seen:
+            continue
+        action = _effective_target_action(item).lower()
+        production = item.get("production_eligibility")
+        is_research = (
+            action in {"research_only", "research_reference"}
+            or item.get("research_only") is True
+            or (
+                isinstance(production, dict)
+                and production.get("eligible") is False
+            )
+        )
+        if code not in hidden_codes and not is_research:
+            continue
+        seen.add(code)
+        row = {
+            "label": _target_label(item),
+            "lot_value_text": _money(_lot_value(item)),
+            "reason": _humanize_reason(
+                (
+                    f"一手金额 {_money(_lot_value(item))} "
+                    f"超过可执行预算 {_money(buy_budget)}"
+                    if code in hidden_codes
+                    else item.get("decision_reason")
+                )
+                or item.get("watch_reason")
+                or item.get("block_reason")
+                or "仅作研究参照。"
+            ),
+            "next_signal": _humanize_reason(
+                item.get("next_signal")
+                or (
+                    "价格或账户预算满足最小交易单位后重新评分。"
+                    if code in hidden_codes
+                    else "完成显式、可审计的生产晋级后重新评分。"
+                )
+            ),
+        }
+        if code in hidden_codes:
+            budget_rows.append(row)
+        else:
+            research_rows.append(row)
+    return budget_rows, research_rows
+
+
+def _next_day_audit_lines(
+    *,
+    report_date: str,
+    target_date: str,
+    risk_level: int,
+    confidence,
+    positions: list[dict],
+    available_cash: float,
+    total_assets: float,
+    market_data: dict,
+    analysis_report: dict,
+    sentinel_package: dict | None,
+    profile: dict,
+    gate: dict,
+    model_runtime_status: dict | None,
+) -> list[str]:
+    lines = [
+        f"- 报告状态：已生成；服务交易日 {target_date}；报告日 {report_date}；风险等级 R{risk_level}；置信度 {confidence}/10。",
+        f"- 策略模式：{profile['title']}；目标：{profile['target']}。",
+        f"- 账户状态：持仓 {len(positions)} 只；可用现金 {_money(available_cash)}；总资产 {_money(total_assets)}。",
+        f"- 市场环境：{_market_effect_line(risk_level, analysis_report, market_data)}。",
+        "- 执行口径：主报告以结构化评分为准；AI裁判原文仅作本地审计。",
+        (
+            "- 统一入场闸门：允许人工复核；无硬否决。"
+            if gate.get("entry_allowed")
+            else "- 统一入场闸门：阻断；"
+            f"{format_visible_decision_reasons(gate) or '原因未形成可验证记录'}。"
+        ),
+    ]
+    quote_validation = gate.get("quote_validation")
+    if isinstance(quote_validation, dict):
+        status = str(quote_validation.get("status") or "unavailable")
+        as_of = quote_validation.get("as_of") or "无有效时间"
+        if quote_validation.get("enabled") is not True:
+            lines.append(
+                "- 易淘金行情校验：未启用；当前沿用原有行情链路，未声称已完成易淘金核价。"
+            )
+        elif status == "ok":
+            lines.append(f"- 易淘金行情校验：快照可用；截至 {as_of}。")
+        elif status == "blocked":
+            lines.append(
+                f"- 易淘金行情校验：过期、冲突、缺失或交易状态阻断；截至 {as_of}；新开仓关闭。"
+            )
+        else:
+            lines.append(
+                f"- 易淘金行情校验：读取不可用；截至 {as_of}；新开仓关闭。"
+            )
+    if sentinel_package:
+        freshness = _sentinel_package_freshness(
+            sentinel_package,
+            report_date,
+        )
+        if freshness["active"] is not True:
+            lines.append(
+                "- Sentinel/Serenity："
+                f"{_sentinel_audit_only_message(freshness)}"
+            )
+        else:
+            themes = sentinel_package.get("top_themes") or []
+            theme_text = "、".join(
+                f"{item.get('name')}({item.get('count')})"
+                for item in themes[:3]
+                if isinstance(item, dict)
+            ) or "无明确主题"
+            lines.append(
+                f"- Sentinel：抓取 {sentinel_package.get('event_count', 0)} 条，"
+                f"关键 {sentinel_package.get('key_event_count', 0)} 条；主题 {theme_text}。"
+            )
+            lines.append(
+                f"- Serenity：形成 {len(sentinel_package.get('serenity_deep_dives') or [])} 个深挖主题。"
+            )
+    else:
+        lines.append(
+            "- Sentinel/Serenity：本次无可用研究包；只使用行情、持仓和结构化评分。"
+        )
+    lines.extend(["", "### 数据覆盖与评分审计", ""])
+    lines.extend(
+        build_data_source_audit(
+            market_data=market_data,
+            sentinel_package=sentinel_package,
+            model_runtime_status=model_runtime_status,
+            report_date=report_date,
+        )
+    )
+    return lines
+
+
+def _next_day_score_audit_lines(
+    *,
+    decision: dict,
+    hidden_codes: set[str],
+) -> list[str]:
+    target_scores = _target_scores(decision)
+    lines = ["### 标的评分", ""]
+    if not target_scores:
+        lines.extend([
+            "- 本次未生成结构化标的评分；研究线索不能直接当成买入建议。",
+            "",
+            *build_role_vote_audit(
+                decision,
+                hidden_codes=hidden_codes,
+            ),
+        ])
+        return lines
+    lines.extend([
+        "| 标的 | 分数 | 动作 | 数据缺口 | 阻断原因 |",
+        "|---|---:|---|---|---|",
+    ])
+    for item in target_scores:
+        lines.append(
+            f"| {_cell(_target_label(item), 40)} | {item.get('score', 0)} | "
+            f"{_action_label(_effective_target_action(item))} | "
+            f"{_cell(_missing_data_text(item.get('missing_data') or []), 80)} | "
+            f"{_cell(_block_reason_label(item.get('block_reason')), 80)} |"
+        )
+    lines.extend(["", *build_role_vote_audit(decision, hidden_codes=hidden_codes)])
+    return lines
+
+
 def build_next_day_strategy_sections(
     *,
     report_date: str,
@@ -1786,8 +2693,9 @@ def build_next_day_strategy_sections(
     strategy_profile: dict | None = None,
     portfolio_truth: dict | None = None,
     visible_decision_gate: dict | None = None,
+    model_runtime_status: dict | None = None,
 ) -> list[str]:
-    """Build the concise Feishu-first next-day strategy sections."""
+    """Compatibility wrapper that prepares truth and calls the pure renderer."""
     profile = strategy_profile or get_strategy_profile()
     total_assets = total_assets or available_cash
     buy_budget, _ = _buy_budget_for_profile(available_cash, total_assets, profile)
@@ -1810,100 +2718,59 @@ def build_next_day_strategy_sections(
         stop_breaches=stop_breach_alerts,
     )
     visible_decision = apply_visible_decision_gate(budget_visible_decision, gate)
-    lines: list[str] = []
-    lines.extend(_project_status_section(
-        report_date=report_date,
-        target_date=target_date,
-        risk_level=risk_level,
-        final_view=final_view,
-        confidence=confidence,
-        positions=positions,
-        available_cash=available_cash,
-        total_assets=total_assets,
-        market_data=market_data,
-        analysis_report=analysis_report,
-        sentinel_package=sentinel_package,
-        profile=profile,
-        budget_blocked_count=len(hidden_codes),
-        stop_breach_alerts=stop_breach_alerts,
-        quote_data_alarms=quote_data_alarms,
-        visible_decision_gate=gate,
-    ))
-    lines.extend(_holding_strategy_section(
-        positions=positions,
-        total_assets=total_assets,
-        decision=visible_decision,
-        target_date=target_date,
-    ))
     holding_codes = {_target_code(item) for item in positions if _target_code(item)}
-    lines.extend(_short_pool_section(visible_decision, excluded_codes=holding_codes))
-    lines.extend(_long_pool_section(visible_decision, budget_blocked_count=len(hidden_codes)))
-    lines.append("- 说明：Sentinel/Serenity 的原始抓取、深挖全文和角色辩论细节保留在 Obsidian，不在飞书主报告展开。")
-    lines.append("")
-    target_scores = _target_scores(visible_decision)
-    target_buckets = _split_target_scores(visible_decision)
-    lines.extend([
-        FEISHU_SUMMARY_END_MARKER,
-        "",
-        "## 五、后台风控与策略审计",
-        "",
-    ])
-    lines.extend(_render_budget_blocks(
-        decision=decision,
-        target_buckets=target_buckets,
-        hidden_codes=hidden_codes,
-        available_cash=available_cash,
-        total_assets=total_assets,
-        profile=profile,
-    ))
-    lines.extend(_render_mid_frequency_strategy(
-        target_buckets["research_reference"],
-        available_cash=available_cash,
-        total_assets=total_assets,
-        profile=profile,
-    ))
-    lines.extend([
-        "## 六、数据覆盖与评分审计",
-        "",
-        "- 数据源审计：",
-    ])
-    lines.extend(
-        f"  {line}"
-        for line in build_data_source_audit(
-            market_data=market_data,
-            sentinel_package=sentinel_package,
-        )
+    candidates, candidate_missing_reason = _candidate_view(
+        decision=visible_decision,
+        holding_codes=holding_codes,
+        gate=gate,
     )
-    if target_scores:
-        lines.extend([
-            "",
-            "### 标的评分",
-            "",
-            "| 标的 | 分数 | 动作 | 数据缺口 | 阻断原因 |",
-            "|---|---:|---|---|---|",
-        ])
-        for item in target_scores:
-            lines.append(
-                f"| {_cell(_target_label(item), 40)} | {item.get('score', 0)} | "
-                f"{_action_label(_effective_target_action(item))} | "
-                f"{_cell(_missing_data_text(item.get('missing_data') or []), 80)} | "
-                f"{_cell(_block_reason_label(item.get('block_reason')), 80)} |"
-            )
-    else:
-        lines.extend([
-            "",
-            "- 标的评分：本次未生成结构化 target_scores；不能把研究线索直接当成买入建议。",
-        ])
-    lines.extend(["", *build_role_vote_audit(decision, hidden_codes=hidden_codes), ""])
-    review_summary = _structured_review_summary(target_buckets, visible_decision)
-    if hidden_codes and not target_scores:
+    budget_rows, research_rows = _research_appendix_view(
+        decision=decision,
+        hidden_codes=hidden_codes,
+        buy_budget=buy_budget,
+    )
+    if not candidates and hidden_codes:
+        candidate_missing_reason = (
+            f"可执行预算为 {_money(buy_budget)}；"
+            f"{len(hidden_codes)} 只候选的一手金额超过当前预算，禁止生成买入动作。"
+        )
+    target_buckets = _split_target_scores(visible_decision)
+    review_summary = _structured_review_summary(
+        target_buckets,
+        visible_decision,
+    )
+    if hidden_codes and not _target_scores(visible_decision):
         review_summary = (
             f"结构化评分摘要：飞书可见标的 0 只；预算阻断 {len(hidden_codes)} 只。"
             "AI裁判原文保留在本地辩论快照；主报告不展示买不起标的或其幻觉价格。"
         )
-    lines.extend([
-        "## 七、复盘与自迭代",
-        "",
+    hard_risk_lines: list[str] = []
+    if stop_breach_alerts:
+        breach_text = "；".join(
+            f"{item['label']} 已跌破止损 {_money(item['stop_loss'])}"
+            f"（{item['price_label']} {_money(item['price'])}，{item['shares']}股）"
+            for item in stop_breach_alerts[:3]
+        )
+        hard_risk_lines.append(
+            f"- 开盘前硬风控：{breach_text}；新开仓暂停，优先处理风险仓；"
+            "立即执行减仓/退出，禁止补仓/抢反弹。"
+        )
+    if quote_data_alarms:
+        alarm_text = "；".join(
+            f"{item['label']} {item['alarm']}，必须人工核验止损 {_money(item['stop_loss'])}"
+            for item in quote_data_alarms[:3]
+        )
+        hard_risk_lines.append(
+            f"- 行情数据报警：{alarm_text}；核验前禁止补仓/抢反弹。"
+        )
+    if gate.get("entry_allowed") is False:
+        hard_risk_lines.append(
+            "- 统一入场闸门：阻断；"
+            f"原因：{format_visible_decision_reasons(gate) or '原因未形成可验证记录'}；"
+            "只限制买入/加仓，卖出、止损和入场取消继续执行。"
+        )
+
+    review_lines = [
         f"- 本报告生成日：{report_date}",
         f"- 裁判采用/否决说明：{review_summary}",
         "- 可执行标的必须留存触发价、止损、目标位、账户预算和证据编号。",
@@ -1911,10 +2778,50 @@ def build_next_day_strategy_sections(
         "",
         "### 研究归档",
         "",
-    ])
-    lines.extend(_research_archive_lines(sentinel_package, roles, decision, report_date))
-    lines.append("")
-    return lines
+        *_research_archive_lines(
+            sentinel_package,
+            roles,
+            decision,
+            report_date,
+        ),
+    ]
+    return render_next_day_sections({
+        "target_date": target_date,
+        "hard_risk_lines": hard_risk_lines,
+        "holdings": _holding_action_view(
+            positions=positions,
+            decision=visible_decision,
+            target_date=target_date,
+            total_assets=total_assets,
+            profile=profile,
+        ),
+        "candidates": candidates,
+        "candidate_missing_reason": candidate_missing_reason,
+        "long_horizon": _long_horizon_view(decision),
+        "budget_blocked": budget_rows,
+        "budget_blocked_count": len(hidden_codes),
+        "research_reference": research_rows,
+        "audit_lines": _next_day_audit_lines(
+            report_date=report_date,
+            target_date=target_date,
+            risk_level=risk_level,
+            confidence=confidence,
+            positions=positions,
+            available_cash=available_cash,
+            total_assets=total_assets,
+            market_data=market_data,
+            analysis_report=analysis_report,
+            sentinel_package=sentinel_package,
+            profile=profile,
+            gate=gate,
+            model_runtime_status=model_runtime_status,
+        ),
+        "score_audit_lines": _next_day_score_audit_lines(
+            decision=visible_decision,
+            hidden_codes=hidden_codes,
+        ),
+        "review_lines": review_lines,
+    })
 
 
 def save_report_to_obsidian(
@@ -2008,13 +2915,19 @@ async def build_target_scores_for_report(
     long_thesis_store=None,
 ) -> list[dict]:
     """Score current target-pool items with normalized data snapshots."""
+    from contextlib import nullcontext
+
     from app.ai.serenity_financial_evidence import fetch_financial_evidence
     from app.data_sources.akshare_market import AKShareMarketClient
     from app.data_sources.akshare_news import AKShareNewsClient
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
-    from app.services.long_thesis import LongThesisStore
+    from app.services.long_horizon_transaction import writer_transaction_guard
+    from app.services.long_thesis import (
+        LongThesisStore,
+        LongThesisStoreInvalid,
+    )
     from app.services.quant_lifecycle import TargetPoolStore, target_production_eligibility
-    from app.services.target_scoring import score_target
+    from app.services.target_scoring import next_target_status, score_target
     from app.services.target_snapshot import build_target_snapshot
     from app.services.target_pool_policy import (
         decide_pool_membership,
@@ -2047,12 +2960,21 @@ async def build_target_scores_for_report(
         return {code: financial_cache.get(code, {}) for code in codes}
 
     store = TargetPoolStore()
+    resolved_long_thesis_store = (
+        long_thesis_store
+        if long_thesis_store is not None
+        else LongThesisStore()
+    )
     payload = store.load()
-    resolved_long_thesis_store = long_thesis_store or LongThesisStore()
-    long_thesis_payload = resolved_long_thesis_store.load()
-    long_theses = (
-        long_thesis_payload.get("items")
-        if isinstance(long_thesis_payload.get("items"), dict)
+    thesis_preview_payload = {"items": {}}
+    if limit is None:
+        try:
+            thesis_preview_payload = resolved_long_thesis_store.load_strict()
+        except LongThesisStoreInvalid:
+            pass
+    long_thesis_preview = (
+        thesis_preview_payload.get("items")
+        if isinstance(thesis_preview_payload.get("items"), dict)
         else {}
     )
     items = [
@@ -2075,7 +2997,7 @@ async def build_target_scores_for_report(
         if was_previously_retained(item)
         or (
             limit is None
-            and str(item.get("code") or "").strip() in long_theses
+            and str(item.get("code") or "").strip() in long_thesis_preview
         )
     ]
     mandatory_ids = {id(item) for item in mandatory_items}
@@ -2088,12 +3010,13 @@ async def build_target_scores_for_report(
     quote_source = FastRealtimeMarketDataSource()
     resolved_market_source = market_source or CachedMarketSource()
     news_source = AKShareNewsClient()
-    scores: list[dict] = []
+    snapshots: dict[str, dict] = {}
+    selected_codes: list[str] = []
     for item in items:
         code = str(item.get("code") or "").strip()
         if not code:
             continue
-        snapshot = await build_target_snapshot(
+        snapshots[code] = await build_target_snapshot(
             code,
             name=item.get("name", code),
             quote_source=quote_source,
@@ -2103,92 +3026,311 @@ async def build_target_scores_for_report(
             sentinel=item.get("sentinel") or {},
             serenity=item.get("serenity") or {},
         )
-        evidence = item.get("evidence") if isinstance(item.get("evidence"), dict) else {}
-        snapshot["trigger_price"] = next(
-            (
-                value
-                for candidate in (item.get("trigger_price"), evidence.get("trigger_price"))
-                if (value := _positive_float(candidate)) is not None
-            ),
-            None,
+        selected_codes.append(code)
+
+    guard_pairs = [
+        (
+            getattr(candidate, "transaction_lock_path", None),
+            getattr(candidate, "transaction_journal_path", None),
         )
-        snapshot["production_eligibility"] = target_production_eligibility(item)
-        long_thesis = long_theses.get(code)
-        score = score_target(
-            snapshot,
-            available_cash=available_cash,
-            total_assets=total_assets,
-            long_thesis=long_thesis if isinstance(long_thesis, dict) else None,
-        )
-        score["source_status"] = {
+        for candidate in (store, resolved_long_thesis_store)
+    ]
+    configured_guards = [
+        (Path(lock_path).resolve(), Path(journal_path).resolve())
+        for lock_path, journal_path in guard_pairs
+        if lock_path is not None and journal_path is not None
+    ]
+    if configured_guards:
+        if len(set(configured_guards)) != 1:
+            raise RuntimeError("long_horizon_transaction_guard_mismatch")
+        lock_path, journal_path = configured_guards[0]
+        scoring_guard = writer_transaction_guard(lock_path, journal_path)
+    else:
+        scoring_guard = nullcontext()
+    exclusive_pool_guard = getattr(store, "exclusive_pool_guard", None)
+    pool_guard = (
+        exclusive_pool_guard()
+        if callable(exclusive_pool_guard)
+        else nullcontext()
+    )
+
+    def source_status_for(snapshot: dict) -> dict:
+        return {
             key: (snapshot.get(key) or {}).get("status")
-            for key in ("quote", "kline", "fund_flow", "northbound", "news", "financial", "sentinel", "serenity")
-        }
-        pool_kind = infer_pool_kind(
-            item,
-            long_thesis=long_thesis if isinstance(long_thesis, dict) else None,
-        )
-        previously_retained = was_previously_retained(item)
-        membership = decide_pool_membership(
-            pool_kind=pool_kind,
-            scorecard=score,
-            previously_retained=previously_retained,
-        )
-        score.update({
-            "pool_kind": pool_kind,
-            "pool_retained": membership["retained"],
-            "pool_previously_retained": previously_retained,
-            "pool_retention_score": membership["score"],
-            "pool_retention_threshold": membership["threshold"],
-            "pool_retention_reason": membership["reason"],
-        })
-        quote = snapshot.get("quote") if isinstance(snapshot.get("quote"), dict) else {}
-        action = str(score.get("action") or "")
-        next_status = {
-            "buy": "executable",
-            "add": "executable",
-            "research_only": "research_reference",
-            "remove": "removed",
-        }.get(action, "watching")
-        if not membership["retained"]:
-            next_status = (
-                "removed"
-                if previously_retained
-                else "research_reference"
+            for key in (
+                "quote",
+                "kline",
+                "fund_flow",
+                "northbound",
+                "news",
+                "financial",
+                "sentinel",
+                "serenity",
             )
-        store.upsert_target(
-            code=code,
-            name=score.get("name") or item.get("name", code),
-            status=next_status,
-            pool_kind=pool_kind,
-            source="target_scoring",
-            evidence=evidence,
-            evidence_ids=item.get("evidence_ids") or [],
-            sentinel=item.get("sentinel") or {},
-            serenity=item.get("serenity") or {},
-            scoring_decision={
-                "action": action,
-                "score": score.get("score", 0),
-                "block_reason": score.get("block_reason", ""),
-                "decision_reason": score.get("decision_reason", ""),
-                "missing_data": score.get("missing_data") or [],
-                "playbook": score.get("playbook", "watch"),
-                "source_status": score.get("source_status") or {},
-                "long_quality_score": score.get("long_quality_score", 0),
-                "thesis_status": score.get("thesis_status", ""),
+        }
+
+    def invalid_store_score(item: dict, snapshot: dict) -> dict:
+        previous = (
+            item.get("scoring_decision")
+            if isinstance(item.get("scoring_decision"), dict)
+            else {}
+        )
+        pool_kind = infer_pool_kind(item)
+        previously_retained = was_previously_retained(item)
+        last_known_long_evidence_ids = list(
+            item.get("current_long_evidence_ids") or []
+        )
+        corruption_reason = (
+            "长期论文存储损坏，本批评分已安全阻断；"
+            "当前论文与红线状态未知，历史摘要仅作 last-known 审计，"
+            "修复存储后再评分。"
+        )
+        return {
+            "code": str(item.get("code") or snapshot.get("code") or ""),
+            "name": str(item.get("name") or snapshot.get("name") or ""),
+            "score": previous.get("score", 0),
+            "action": (
+                "research_only"
+                if str(item.get("status") or "") == "research_reference"
+                else "watch"
+            ),
+            "block_reason": "long_thesis_store_invalid",
+            "entry_allowed": False,
+            "decision_reason": corruption_reason,
+            "combined_decision_reason": corruption_reason,
+            "missing_data": previous.get("missing_data") or [],
+            "playbook": previous.get("playbook", "watch"),
+            "source_status": source_status_for(snapshot),
+            "long_quality_score": None,
+            "thesis_status": "unknown",
+            "valuation_zone": "unknown",
+            "red_line_status": "unknown",
+            "long_horizon_reason": "long_thesis_store_invalid",
+            "current_long_evidence_ids": [],
+            "last_known_long_quality_score": previous.get(
+                "long_quality_score"
+            ),
+            "last_known_thesis_status": previous.get("thesis_status", ""),
+            "last_known_valuation_zone": previous.get(
+                "valuation_zone",
+                "unknown",
+            ),
+            "last_known_red_line_status": previous.get(
+                "red_line_status",
+                "",
+            ),
+            "last_known_long_horizon_reason": previous.get(
+                "long_horizon_reason",
+                "",
+            ),
+            "last_known_combined_decision_reason": previous.get(
+                "combined_decision_reason",
+                previous.get("decision_reason", ""),
+            ),
+            "last_known_long_evidence_ids": last_known_long_evidence_ids,
+            "production_eligibility": target_production_eligibility(item),
+            "pool_kind": pool_kind,
+            "pool_retained": previously_retained,
+            "pool_previously_retained": previously_retained,
+            "pool_retention_score": previous.get("pool_retention_score", 0),
+            "pool_retention_threshold": previous.get(
+                "pool_retention_threshold",
+                0,
+            ),
+            "pool_retention_reason": "long_thesis_store_invalid_preserve_existing",
+        }
+
+    scores: list[dict] = []
+    target_writes: list[dict] = []
+    with scoring_guard, pool_guard:
+        current_payload = store.load()
+        current_items = current_payload.get("items", {})
+        try:
+            thesis_payload = resolved_long_thesis_store.load_strict()
+        except LongThesisStoreInvalid:
+            for code in selected_codes:
+                item = current_items.get(code)
+                if not isinstance(item, dict):
+                    continue
+                scores.append(invalid_store_score(item, snapshots[code]))
+            return sorted(
+                scores,
+                key=lambda row: float(row.get("score", 0) or 0),
+                reverse=True,
+            )
+        thesis_items = thesis_payload.get("items", {})
+
+        for code in selected_codes:
+            item = current_items.get(code)
+            if (
+                not isinstance(item, dict)
+                or item.get("status")
+                in {"removed", "expired", "cooldown_after_loss"}
+            ):
+                continue
+            snapshot = dict(snapshots[code])
+            snapshot["name"] = item.get("name", code)
+            if "sentinel" in item:
+                snapshot["sentinel"] = item.get("sentinel") or {}
+            if "serenity" in item:
+                snapshot["serenity"] = item.get("serenity") or {}
+            evidence = (
+                item.get("evidence")
+                if isinstance(item.get("evidence"), dict)
+                else {}
+            )
+            snapshot["trigger_price"] = next(
+                (
+                    value
+                    for candidate in (
+                        item.get("trigger_price"),
+                        evidence.get("trigger_price"),
+                    )
+                    if (value := _positive_float(candidate)) is not None
+                ),
+                None,
+            )
+            snapshot["production_eligibility"] = (
+                target_production_eligibility(item)
+            )
+            thesis = thesis_items.get(code)
+            score = score_target(
+                snapshot,
+                available_cash=available_cash,
+                total_assets=total_assets,
+                long_thesis=thesis,
+            )
+            score["source_status"] = source_status_for(snapshot)
+            pool_kind = infer_pool_kind(
+                item,
+                long_thesis=thesis if isinstance(thesis, dict) else None,
+            )
+            previously_retained = was_previously_retained(item)
+            membership = decide_pool_membership(
+                pool_kind=pool_kind,
+                scorecard=score,
+                previously_retained=previously_retained,
+            )
+            score.update({
                 "pool_kind": pool_kind,
                 "pool_retained": membership["retained"],
                 "pool_previously_retained": previously_retained,
                 "pool_retention_score": membership["score"],
                 "pool_retention_threshold": membership["threshold"],
                 "pool_retention_reason": membership["reason"],
-                "evaluated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            },
-            current_price=quote.get("price"),
-            available_cash=available_cash,
-            total_assets=total_assets,
-        )
-        scores.append(score)
+            })
+            thesis_current_ids = (
+                thesis.get("current_long_evidence_ids")
+                if isinstance(thesis, dict)
+                else None
+            )
+            current_long_evidence_ids = (
+                thesis_current_ids
+                if isinstance(thesis_current_ids, list)
+                else item.get("current_long_evidence_ids") or []
+            )
+            current_long_evidence_ids = list(dict.fromkeys(
+                str(value).strip()
+                for value in current_long_evidence_ids
+                if str(value).strip()
+            ))
+            score["current_long_evidence_ids"] = current_long_evidence_ids
+            quote = (
+                snapshot.get("quote")
+                if isinstance(snapshot.get("quote"), dict)
+                else {}
+            )
+            action = str(score.get("action") or "")
+            authorization_valid = (
+                action in {"buy", "add"}
+                and float(score.get("score", 0) or 0) >= 70
+                and not (score.get("missing_data") or [])
+                and all(
+                    score["source_status"].get(key) == "ok"
+                    for key in ("quote", "kline", "fund_flow", "financial")
+                )
+            )
+            score["authorization_valid"] = authorization_valid
+            score["authorization_reason"] = (
+                "full_scorecard_passed"
+                if authorization_valid
+                else "scorecard_missing_or_incomplete"
+            )
+            next_status = next_target_status(
+                str(item.get("status") or "watching"),
+                action,
+                score,
+                authorization_valid=authorization_valid,
+            )
+            if not membership["retained"] and pool_kind == "short_term":
+                next_status = (
+                    "removed"
+                    if previously_retained
+                    else "research_reference"
+                )
+            target_writes.append(dict(
+                code=code,
+                name=score.get("name") or item.get("name", code),
+                status=next_status,
+                pool_kind=pool_kind,
+                source="target_scoring",
+                evidence=evidence,
+                evidence_ids=item.get("evidence_ids") or [],
+                current_long_evidence_ids=current_long_evidence_ids,
+                sentinel=item.get("sentinel") or {},
+                serenity=item.get("serenity") or {},
+                scoring_decision={
+                    "action": action,
+                    "score": score.get("score", 0),
+                    "block_reason": score.get("block_reason", ""),
+                    "decision_reason": score.get("decision_reason", ""),
+                    "missing_data": score.get("missing_data") or [],
+                    "playbook": score.get("playbook", "watch"),
+                    "source_status": score.get("source_status") or {},
+                    "authorization_valid": authorization_valid,
+                    "authorization_reason": score[
+                        "authorization_reason"
+                    ],
+                    "pool_kind": pool_kind,
+                    "pool_retained": membership["retained"],
+                    "pool_previously_retained": previously_retained,
+                    "pool_retention_score": membership["score"],
+                    "pool_retention_threshold": membership["threshold"],
+                    "pool_retention_reason": membership["reason"],
+                    "long_quality_score": score.get(
+                        "long_quality_score",
+                        0,
+                    ),
+                    "thesis_status": score.get("thesis_status", ""),
+                    "valuation_zone": score.get(
+                        "valuation_zone",
+                        "unknown",
+                    ),
+                    "red_line_status": score.get("red_line_status", ""),
+                    "long_horizon_reason": score.get(
+                        "long_horizon_reason",
+                        "",
+                    ),
+                    "combined_decision_reason": score.get(
+                        "combined_decision_reason",
+                        score.get("decision_reason", ""),
+                    ),
+                    "current_long_evidence_ids": current_long_evidence_ids,
+                    "evaluated_at": datetime.now().strftime(
+                        "%Y-%m-%d %H:%M:%S"
+                    ),
+                },
+                current_price=quote.get("price"),
+                available_cash=available_cash,
+                total_assets=total_assets,
+            ))
+            scores.append(score)
+        batch_upsert = getattr(store, "upsert_targets", None)
+        if callable(batch_upsert):
+            batch_upsert(target_writes, payload=current_payload)
+        else:
+            for target_write in target_writes:
+                store.upsert_target(**target_write)
     return sorted(scores, key=lambda row: float(row.get("score", 0) or 0), reverse=True)
 
 
@@ -2499,7 +3641,6 @@ async def main():
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
-    from app.services.evidence_ledger import build_sentinel_evidence_context, upsert_sentinel_evidence_to_target_pool
     from app.services.portfolio_store import recalculate_portfolio, sync_db_from_user_portfolio
 
     now = datetime.now()
@@ -2545,10 +3686,18 @@ async def main():
     # ===== 2. 获取行情 =====
     print("📊 获取实时行情...", flush=True)
     tc = FastRealtimeMarketDataSource()
+    market_provider = str(getattr(tc, "name", "fast_realtime_market_data"))
     strategy_profile = get_strategy_profile()
     available_cash = float(portfolio.get("available_cash", portfolio.get("cash", 0)) or 0)
     market_data = {
         "indices": {},
+        "market_source_status": {
+            "status": "failed",
+            "provider": "fast_realtime_market_data",
+            "data_cutoff": None,
+            "freshness_status": "failed",
+            "error": "index_quotes_not_fetched",
+        },
         "sectors": [],
         "holdings": [],
         "holdings_str": "空仓",
@@ -2559,22 +3708,42 @@ async def main():
         "portfolio_sync_status": portfolio.get("portfolio_sync_status", "unknown"),
     }
 
+    index_codes = list(EXPECTED_MARKET_INDEX_CODES)
     try:
-        indices = await tc.fetch_batch(["sh000001", "sz399001", "sz399006"])
-        sh = indices.get("sh000001", {})
-        sz = indices.get("sz399001", {})
-        cy = indices.get("sz399006", {})
-        market_data["indices"] = {
-            "shanghai": sh.get("price", 0),
-            "shenzhen": sz.get("price", 0),
-            "cyb": cy.get("price", 0),
-            "sh_change": sh.get("change_pct", 0),
-            "sz_change": sz.get("change_pct", 0),
-            "cy_change": cy.get("change_pct", 0),
-        }
+        raw_indices = await tc.fetch_batch(index_codes)
+        aggregate = aggregate_market_quote_truth(
+            raw_indices,
+            index_codes,
+            default_provider=market_provider,
+            now=datetime.now().astimezone(),
+        )
+        verified_quotes = aggregate["quotes"]
+        normalized_indices = {}
+        for code, price_key, change_key in (
+            ("sh000001", "shanghai", "sh_change"),
+            ("sz399001", "shenzhen", "sz_change"),
+            ("sz399006", "cyb", "cy_change"),
+        ):
+            quote = verified_quotes.get(code)
+            if not quote:
+                continue
+            normalized_indices[price_key] = quote["price"]
+            normalized_indices[change_key] = quote.get("change_pct", 0)
+        market_data["indices"] = normalized_indices
+        market_data["market_source_status"] = aggregate["market_source_status"]
+        sh = verified_quotes.get("sh000001", {})
+        sz = verified_quotes.get("sz399001", {})
         print(f"   上证: {sh.get('price','?')} ({sh.get('change_pct',0):+.2f}%) | "
               f"深证: {sz.get('price','?')} ({sz.get('change_pct',0):+.2f}%)", flush=True)
     except Exception as e:
+        aggregate = aggregate_market_quote_truth(
+            {},
+            index_codes,
+            default_provider=market_provider,
+            now=datetime.now().astimezone(),
+        )
+        market_data["indices"] = {}
+        market_data["market_source_status"] = aggregate["market_source_status"]
         print(f"   ⚠️ 指数获取失败: {e}", flush=True)
 
     if positions:
@@ -2600,18 +3769,28 @@ async def main():
     portfolio["total_assets"] = round(available_cash + portfolio["total_value"], 2)
     market_data["total_assets"] = portfolio["total_assets"]
     sentinel_package = load_sentinel_research_package(today)
-    if sentinel_package:
-        market_data["sentinel_evidence"] = build_sentinel_evidence_context(sentinel_package)
-        try:
-            ingest_result = upsert_sentinel_evidence_to_target_pool(sentinel_package)
+    try:
+        sentinel_decision = _inject_active_sentinel_evidence(
+            sentinel_package,
+            today,
+            market_data,
+        )
+        if sentinel_decision["active"] is True:
+            ingest_result = sentinel_decision.get("ingest_result") or {}
             print(
                 "   Sentinel evidence 接入: "
                 f"{ingest_result.get('evidence_count', 0)} 条证据, "
                 f"{ingest_result.get('upserted_targets', 0)} 个标的入池",
                 flush=True,
             )
-        except Exception as e:
-            print(f"   ⚠️ Sentinel evidence 入池失败，降级继续: {e}", flush=True)
+        elif sentinel_package:
+            print(
+                "   Sentinel evidence 仅归档: "
+                f"{_sentinel_audit_only_message(sentinel_decision)}",
+                flush=True,
+            )
+    except Exception as e:
+        print(f"   ⚠️ Sentinel evidence 入池失败，降级继续: {e}", flush=True)
 
     # ===== 3. 分析 + 辩论 =====
     print("📊 构建市场数据摘要...", flush=True)
@@ -2623,6 +3802,7 @@ async def main():
         decision = debate_result.get("decision", {})
         roles = debate_result.get("roles", {})
         risk_level = debate_result.get("recommended_risk_level", 3)
+        model_runtime_status = debate_result.get("model_runtime_status")
         final_view = decision.get("final_view", decision.get("final_decision", "待分析"))
         confidence = decision.get("confidence", "N/A")
         print(f"   辩论完成 — 裁判结论: {final_view} | R{risk_level}", flush=True)
@@ -2633,6 +3813,12 @@ async def main():
         final_view = "分析失败"
         confidence = "N/A"
         roles = {}
+        model_runtime_status = {
+            "status": "degraded",
+            "providers": [],
+            "calls": [],
+            "degradation_reasons": ["debate_call_failed"],
+        }
 
     print("🎯 生成标的池评分...", flush=True)
     from app.data_sources.akshare_market import AKShareMarketClient
@@ -2708,32 +3894,44 @@ async def main():
     lines.append("# 📊 恭喜发财 — 次日投资策略主报告")
     lines.append("")
     lines.append(f"> 📅 **{today}** | 🕐 {time_str} | 服务交易日: **{target_date}**")
-    lines.append(f"> 🤖 DeepSeek + Qwen 多角色辩论 | 📈 风险等级: **R{risk_level}**")
+    lines.append(
+        f"{format_model_runtime_header(model_runtime_status)} | "
+        f"📈 风险等级: **R{risk_level}**"
+    )
     lines.append("")
     lines.append("---")
     lines.append("")
-    lines.extend(build_next_day_strategy_sections(
-        report_date=today,
-        target_date=target_date,
-        risk_level=risk_level,
-        final_view=final_view,
-        confidence=confidence,
-        positions=positions,
-        available_cash=available_cash,
-        total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-        market_data=market_data,
-        analysis_report=report,
-        decision=decision,
-        roles=roles,
-        sentinel_package=sentinel_package,
-        strategy_profile=strategy_profile,
-        portfolio_truth=portfolio,
-        visible_decision_gate=visible_gate,
-    ))
+    legacy_mode = _legacy_report_sections_enabled()
+    rendered_new_report = _append_new_report_sections(
+        lines,
+        legacy_mode=legacy_mode,
+        builder=lambda: build_next_day_strategy_sections(
+            report_date=today,
+            target_date=target_date,
+            risk_level=risk_level,
+            final_view=final_view,
+            confidence=confidence,
+            positions=positions,
+            available_cash=available_cash,
+            total_assets=portfolio.get(
+                "total_assets",
+                portfolio.get("total_value", 0) + available_cash,
+            ),
+            market_data=market_data,
+            analysis_report=report,
+            decision=decision,
+            roles=roles,
+            sentinel_package=sentinel_package,
+            strategy_profile=strategy_profile,
+            portfolio_truth=portfolio,
+            visible_decision_gate=visible_gate,
+            model_runtime_status=model_runtime_status,
+        ),
+    )
     gate_path = write_visible_decision_gate(visible_gate)
     print(f"✅ 统一入场闸门已保存: {gate_path}", flush=True)
 
-    if os.getenv("CONGXI_REPORT_LEGACY_SECTIONS", "0") != "1":
+    if rendered_new_report:
         return await finalize_daily_report(
             lines=lines,
             today=today,

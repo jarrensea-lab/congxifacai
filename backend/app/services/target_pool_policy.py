@@ -79,11 +79,14 @@ def was_previously_retained(item: Mapping[str, Any]) -> bool:
     )
     if isinstance(scoring.get("pool_retained"), bool):
         return scoring["pool_retained"]
-    return str(item.get("status") or "").strip().lower() in {
-        "executable",
-        "watching",
-        "actionable",
-    }
+    return str(item.get("status") or "").strip().lower() in (
+        {
+            "executable",
+            "watching",
+            "actionable",
+        }
+        | _LONG_LIFECYCLE_STATUSES
+    )
 
 
 def decide_pool_membership(

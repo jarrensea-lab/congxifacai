@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "mode": "shadow",
+  "minute_data": {
+    "root": "/absolute/path/to/A股分时数据包"
+  },
+  "adjustment_factors": {
+    "primary": "tushare_csv",
+    "tushare_csv": {
+      "root": "/absolute/path/to/复权因子_tushare/复权因子"
+    },
+    "vendor_archives": {
+      "root": "/absolute/path/to/复权因子"
+    }
+  }
+}
