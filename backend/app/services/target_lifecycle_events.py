@@ -16,6 +16,8 @@ REASON_LABELS = {
     "blocked_high_position": "处于阶段高位，风险收益不再合适",
     "long_thesis_broken": "中长期逻辑红线触发",
     "risk_budget_too_small": "一手风险超过账户单笔风险预算",
+    "regime_blocks_dip": "大盘或板块环境阻断当前低吸条件",
+    "regime_blocks_buy": "大盘处于恐慌或下跌状态，暂不新开仓",
 }
 
 

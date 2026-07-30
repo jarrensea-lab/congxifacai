@@ -26,7 +26,14 @@ def evaluate_market_regime(snapshot: dict[str, Any]) -> dict[str, Any]:
     breadth = _ratio(regime.get("breadth") or regime.get("advance_ratio"), 1)
     sector_rank = _to_float(regime.get("sector_relative_rank"), 50)
 
-    bearish_label = label in {"bear", "bearish", "ice_point", "panic", "downtrend"}
+    bearish_label = label in {
+        "bear",
+        "bearish",
+        "ice_point",
+        "panic",
+        "downtrend",
+        "data_unavailable",
+    }
     broad_selloff = index_change_pct <= -1.5 and breadth < 0.35
     sector_weak = sector_rank > 70
     can_dip = not (bearish_label or broad_selloff or sector_weak)
@@ -41,7 +48,7 @@ def evaluate_market_regime(snapshot: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "label": label,
-        "can_buy": True,
+        "can_buy": not (bearish_label or broad_selloff),
         "can_dip": can_dip,
         "reason": reason,
     }

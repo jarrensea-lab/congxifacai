@@ -49,6 +49,27 @@ def test_older_failure_cannot_overwrite_newer_success(tmp_path):
     assert store.get_stage(run_id, "delivery")["status"] == "succeeded"
 
 
+def test_latest_summary_never_calls_partial_run_succeeded(tmp_path):
+    from app.services.pipeline_run_store import PipelineRunStore
+
+    store = PipelineRunStore(tmp_path / "pipeline.db")
+    run_id = store.begin_run("2026-07-31")["run_id"]
+    stage = store.start_stage(run_id, "account_snapshot")
+    store.finish_stage(
+        run_id,
+        "account_snapshot",
+        attempt=stage["attempt"],
+        status="succeeded",
+    )
+
+    summary = store.latest_run_summary(
+        ("account_snapshot", "market_discovery")
+    )
+
+    assert summary["status"] == "running"
+    assert summary["missing_stages"] == ["market_discovery"]
+
+
 def test_incomplete_stages_preserves_expected_order(tmp_path):
     from app.services.pipeline_run_store import PipelineRunStore
 

@@ -44,6 +44,20 @@ async def health_check():
     except Exception:
         pass
 
+    try:
+        from app.config import resolve_runtime_pipeline_db_path
+        from app.services.opportunity_pipeline import STAGES
+        from app.services.pipeline_run_store import PipelineRunStore
+
+        pipeline_health = PipelineRunStore(
+            resolve_runtime_pipeline_db_path()
+        ).latest_run_summary(STAGES)
+    except Exception as exc:
+        pipeline_health = {
+            "status": "unavailable",
+            "error_code": exc.__class__.__name__,
+        }
+
     return {
         "status": "ok",
         "uptime_seconds": int(_time.time() - _server_start_time),
@@ -51,6 +65,7 @@ async def health_check():
         "database": "ok" if db_ok else "error",
         "version": _runtime_identity["product_version"],
         "runtime": dict(_runtime_identity),
+        "opportunity_pipeline": pipeline_health,
     }
 
 

@@ -240,6 +240,7 @@ def score_target(
         and lot_value <= budget
         and playbook.get("triggered") is True
         and change_pct < 9
+        and regime.get("can_buy", True)
     )
     composite = build_composite_score(
         snapshot,
@@ -393,6 +394,24 @@ def score_target(
             "target_price": target_price,
             "decision_reason": f"{name}({code}) 一手亏损风险超过单笔风险预算，不能为了试错强行买入。",
             "next_signal": f"等待价格回落或止损距离收窄，使一手风险不超过¥{sizing.get('risk_budget', 0):.2f}。",
+        })
+
+    if (
+        playbook.get("triggered")
+        and playbook.get("playbook") != "dip_entry"
+        and not regime.get("can_buy", True)
+    ):
+        return finish({
+            "score": min(total_score, 68),
+            "action": "watch",
+            "block_reason": "regime_blocks_buy",
+            "stop_loss": stop_loss,
+            "target_price": target_price,
+            "decision_reason": (
+                f"{name}({code}) 交易形态已出现，但{regime.get('reason')} "
+                "市场环境恢复前不新开仓。"
+            ),
+            "next_signal": "等待指数和市场宽度恢复后，再重新确认原交易形态。",
         })
 
     if playbook.get("playbook") == "dip_entry" and not regime.get("can_dip", True):

@@ -305,3 +305,47 @@ class PipelineRunStore:
                 (trade_date, PIPELINE_VERSION),
             ).fetchone()
         return str(row["run_id"]) if row is not None else ""
+
+    def latest_run_summary(
+        self,
+        expected_stages: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Return sanitized pipeline health for the service health endpoint."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id, trade_date, pipeline_version, updated_at
+                FROM pipeline_runs
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """
+            ).fetchone()
+        if row is None:
+            return {"status": "not_run"}
+        payload = self._as_dict(row)
+        stages = self.stages_for_run(str(payload["run_id"]))
+        statuses = {
+            name: str(stage.get("status") or "pending")
+            for name, stage in stages.items()
+        }
+        missing_stages = [
+            name for name in expected_stages if name not in statuses
+        ]
+        if any(status == "failed" for status in statuses.values()):
+            status = "failed"
+        elif missing_stages or any(
+            status in {"pending", "running"} for status in statuses.values()
+        ):
+            status = "running"
+        elif any(value == "degraded" for value in statuses.values()):
+            status = "degraded"
+        elif statuses:
+            status = "succeeded"
+        else:
+            status = "pending"
+        return {
+            **payload,
+            "status": status,
+            "stages": statuses,
+            "missing_stages": missing_stages,
+        }

@@ -902,6 +902,23 @@ def _humanize_reason(value) -> str:
     text = text.replace("dip_entry", "回踩买点")
     text = text.replace("缺少结构化数据项", "缺少关键数据")
     text = text.replace("池外小账户补扫", "小账户低价候选扫描")
+    text = text.replace(
+        "primary_empty_market_universe",
+        "主市场扫描为空，已切换备用数据源",
+    )
+    text = text.replace(
+        "empty_market_universe",
+        "全市场扫描未返回有效股票",
+    )
+    text = text.replace(
+        "no_scored_candidates",
+        "候选补齐数据后仍没有完成评分的标的",
+    )
+    text = text.replace("sentinel_missing", "Sentinel 今日研究证据缺失")
+    text = text.replace(
+        "pipeline_run_already_active",
+        "同一交易日的策略管线仍在运行",
+    )
     text = text.replace("。，", "，").replace("。。", "。")
     return text
 
@@ -1020,7 +1037,11 @@ def build_v9_opportunity_section(result: dict) -> list[str]:
         )
         lines.append(f"没有买入建议的原因：{_humanize_reason(reason)}。")
         closest = max(
-            scorecards,
+            (
+                item
+                for item in scorecards
+                if not item.get("lifecycle_only")
+            ),
             key=lambda item: float(item.get("score") or 0),
             default=None,
         )

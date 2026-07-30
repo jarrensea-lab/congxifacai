@@ -160,6 +160,25 @@ def test_score_target_blocks_dip_entry_when_market_regime_is_bad():
     assert result["playbook"] == "dip_entry"
 
 
+def test_score_target_blocks_breakout_when_market_regime_is_panic():
+    snapshot = _base_snapshot(code="002123", price=3.2)
+    snapshot["market_regime"] = {
+        "label": "panic",
+        "index_change_pct": -2.4,
+        "breadth": 0.18,
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    assert result["action"] == "watch"
+    assert result["block_reason"] == "regime_blocks_buy"
+    assert "市场环境恢复前不新开仓" in result["decision_reason"]
+
+
 def test_score_target_checks_affordability_before_missing_data():
     snapshot = _base_snapshot(code="002371", price=935.36)
     snapshot["fund_flow"] = {"status": "missing", "reason": "fund_flow_not_found"}

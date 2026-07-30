@@ -73,3 +73,30 @@ def test_report_validation_rejects_more_than_three_action_cards():
 
     assert result["ok"] is False
     assert "too_many_action_cards" in result["errors"]
+
+
+def test_report_validation_does_not_require_unchanged_targets_in_change_list():
+    content = """
+## 今日可操作结论
+今日结论：不买
+账户：可用现金 ¥800.00
+完成评分 1 只
+最接近触发：平安银行(000001)
+### 今日变化
+无新增、降级或剔除。
+### 管线状态
+完整
+""".strip()
+
+    result = validate_report(
+        content,
+        pipeline_result={
+            "metrics": {"scored_count": 1},
+            "scorecards": [{"code": "000001", "action": "watch"}],
+            "lifecycle_events": [
+                {"code": "000001", "event": "retained"}
+            ],
+        },
+    )
+
+    assert result["ok"] is True

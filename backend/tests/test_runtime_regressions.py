@@ -26,17 +26,22 @@ def test_v9_runtime_identity_is_single_source(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_health_endpoint_uses_runtime_identity(monkeypatch):
+async def test_health_endpoint_uses_runtime_identity(monkeypatch, tmp_path):
     from app.routers import market
 
     async def unavailable():
         return False
 
     monkeypatch.setattr(market._cloud, "is_available", unavailable)
+    monkeypatch.setenv(
+        "CONGXI_PIPELINE_DATABASE_PATH",
+        str(tmp_path / "pipeline.db"),
+    )
     result = await market.health_check()
 
     assert result["runtime"]["product_version"] == "v9.0.0-dev"
     assert result["version"] == result["runtime"]["product_version"]
+    assert "opportunity_pipeline" in result
 
 
 def test_database_creates_missing_parent_directory(tmp_path):

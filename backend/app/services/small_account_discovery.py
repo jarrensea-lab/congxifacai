@@ -43,7 +43,12 @@ def _money_to_yuan(value: Any) -> float:
     return _to_float(text) * multiplier
 
 
-def _executable_budget(*, available_cash: float, total_assets: float) -> float:
+def build_account_budget_snapshot(
+    *,
+    available_cash: float,
+    total_assets: float,
+) -> dict[str, float]:
+    """Return the shared account reserve and one-name execution budget."""
     profile = get_strategy_profile()
     assets = _to_float(total_assets, _to_float(available_cash))
     cash = _to_float(available_cash)
@@ -53,7 +58,7 @@ def _executable_budget(*, available_cash: float, total_assets: float) -> float:
         if assets
         else 0
     )
-    return round(
+    executable_budget = round(
         max(
             0.0,
             min(
@@ -63,6 +68,19 @@ def _executable_budget(*, available_cash: float, total_assets: float) -> float:
         ),
         2,
     )
+    return {
+        "available_cash": round(cash, 2),
+        "total_assets": round(assets, 2),
+        "reserve_cash": round(max(0.0, reserve_cash), 2),
+        "executable_budget": executable_budget,
+    }
+
+
+def _executable_budget(*, available_cash: float, total_assets: float) -> float:
+    return build_account_budget_snapshot(
+        available_cash=available_cash,
+        total_assets=total_assets,
+    )["executable_budget"]
 
 
 def discover_affordable_market_candidates(
@@ -71,10 +89,16 @@ def discover_affordable_market_candidates(
     available_cash: float,
     total_assets: float,
     existing_codes: set[str] | None = None,
+    priority_codes: set[str] | None = None,
     max_candidates: int = 30,
 ) -> dict[str, Any]:
     """Scan every supplied A-share row, then rank only currently affordable names."""
     existing = {str(code).strip() for code in existing_codes or set()}
+    priorities = {
+        str(code).strip().zfill(6)
+        for code in priority_codes or set()
+        if str(code).strip()
+    } - existing
     executable_budget = _executable_budget(
         available_cash=available_cash,
         total_assets=total_assets,
@@ -84,6 +108,8 @@ def discover_affordable_market_candidates(
     affordable_count = 0
     budget_blocked = 0
     candidates: list[dict[str, Any]] = []
+    seen_priorities: set[str] = set()
+    priority_budget_blocked: list[dict[str, Any]] = []
     for raw in market_rows or []:
         if not isinstance(raw, dict):
             continue
@@ -107,11 +133,22 @@ def discover_affordable_market_candidates(
         )
         if price <= 0:
             continue
+        if code in priorities:
+            seen_priorities.add(code)
         tradeable_count += 1
         lot_size = lot_size_for_code(code)
         lot_value = round(price * lot_size, 2)
         if lot_value > executable_budget:
             budget_blocked += 1
+            if code in priorities:
+                priority_budget_blocked.append({
+                    "code": code,
+                    "name": name,
+                    "price": price,
+                    "lot_value": lot_value,
+                    "executable_budget": executable_budget,
+                    "reason": "lot_size_exceeded",
+                })
             continue
         affordable_count += 1
         change_pct = _to_float(raw.get("change_pct"))
@@ -150,17 +187,32 @@ def discover_affordable_market_candidates(
             item["code"],
         )
     )
+    limit = max(0, int(max_candidates))
+    selected = candidates[:limit]
+    selected_codes = {item["code"] for item in selected}
+    selected.extend(
+        item
+        for item in candidates
+        if item["code"] in priorities and item["code"] not in selected_codes
+    )
+    priority_missing = [
+        {"code": code, "name": code, "reason": "missing_required_data"}
+        for code in sorted(priorities - seen_priorities)
+    ]
     return {
-        "candidates": candidates[: max(0, int(max_candidates))],
+        "candidates": selected,
         "metrics": {
             "scanned_count": scanned_count,
             "tradeable_count": tradeable_count,
             "affordable_count": affordable_count,
-            "ranked_count": min(len(candidates), max(0, int(max_candidates))),
+            "ranked_count": len(selected),
+            "priority_count": len(priorities),
             "executable_budget": executable_budget,
         },
         "rejected": {
             "budget_blocked": budget_blocked,
+            "priority_budget_blocked": priority_budget_blocked,
+            "priority_missing": priority_missing,
         },
     }
 

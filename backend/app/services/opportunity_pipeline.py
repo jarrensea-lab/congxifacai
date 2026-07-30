@@ -2,15 +2,18 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import hashlib
 import inspect
 import json
 import os
 from datetime import date, datetime
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from app.services.small_account_discovery import (
+    build_account_budget_snapshot,
     discover_affordable_market_candidates,
 )
 from app.version import SCORE_VERSION
@@ -40,6 +43,211 @@ def _digest_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _stored_score(item: dict[str, Any] | None) -> float:
+    payload = item if isinstance(item, dict) else {}
+    scoring = payload.get("scoring_decision")
+    promotion = payload.get("promotion_evidence")
+    try:
+        return float(
+            payload.get("score")
+            or (scoring.get("score") if isinstance(scoring, dict) else 0)
+            or (promotion.get("score") if isinstance(promotion, dict) else 0)
+            or 0
+        )
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _lifecycle_only_scorecards(discovery: dict[str, Any]) -> list[dict[str, Any]]:
+    rejected = discovery.get("rejected")
+    rejected = rejected if isinstance(rejected, dict) else {}
+    rows: list[dict[str, Any]] = []
+    for item in rejected.get("priority_budget_blocked") or []:
+        rows.append({
+            "code": str(item.get("code") or "").strip(),
+            "name": str(item.get("name") or item.get("code") or "").strip(),
+            "score": 0,
+            "grade": "C",
+            "action": "watch",
+            "block_reason": "lot_size_exceeded",
+            "decision_reason": "最小交易单位金额超过当前单票预算",
+            "current_price": item.get("price"),
+            "lifecycle_only": True,
+            "discovery_source": "target_pool_daily_refresh",
+        })
+    for item in rejected.get("priority_missing") or []:
+        rows.append({
+            "code": str(item.get("code") or "").strip(),
+            "name": str(item.get("name") or item.get("code") or "").strip(),
+            "score": 0,
+            "grade": "C",
+            "action": "watch",
+            "block_reason": "missing_required_data",
+            "decision_reason": "今日全市场数据中未找到该标的，不能维持原操作级别",
+            "lifecycle_only": True,
+            "discovery_source": "target_pool_daily_refresh",
+        })
+    return rows
+
+
+def apply_scorecard_lifecycle(
+    store,
+    scorecards: list[dict[str, Any]],
+    *,
+    available_cash: float,
+    total_assets: float,
+) -> list[dict[str, Any]]:
+    """Apply deterministic entry, downgrade, and removal rules in one store write."""
+    from app.services.target_lifecycle_events import classify_lifecycle_event
+
+    payload = store.load()
+    before = payload.get("items", {})
+    before = before if isinstance(before, dict) else {}
+    targets: list[dict[str, Any]] = []
+    applied: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+    for raw in scorecards:
+        scorecard = dict(raw)
+        code = str(scorecard.get("code") or "").strip()
+        if not code:
+            continue
+        previous = before.get(code)
+        previous = previous if isinstance(previous, dict) else None
+        score = float(scorecard.get("score") or 0)
+        block_reason = str(scorecard.get("block_reason") or "").strip()
+        previous_decision = (
+            previous.get("scoring_decision")
+            if isinstance(previous, dict)
+            and isinstance(previous.get("scoring_decision"), dict)
+            else {}
+        )
+        previous_streak = int(previous_decision.get("below_retention_streak") or 0)
+        if previous is None and (
+            score < 65 or block_reason == "long_thesis_broken"
+        ):
+            continue
+        if block_reason == "long_thesis_broken":
+            status = "removed"
+            streak = max(1, previous_streak + 1)
+        elif score < 65:
+            if previous is None:
+                continue
+            streak = previous_streak + 1
+            status = "removed" if streak >= 2 else "watching"
+            if not block_reason:
+                scorecard["block_reason"] = "score_below_retention_threshold"
+        else:
+            streak = 0
+            action = str(scorecard.get("action") or "").strip().lower()
+            status = (
+                "executable"
+                if action in {"buy", "add", "actionable", "executable"}
+                else "watching"
+            )
+        scorecard["below_retention_streak"] = streak
+        name = str(scorecard.get("name") or "").strip()
+        if not name or name == code:
+            name = str((previous or {}).get("name") or code)
+        source = str(
+            (previous or {}).get("source")
+            if scorecard.get("lifecycle_only") and previous
+            else scorecard.get("discovery_source")
+            or (previous or {}).get("source")
+            or "dynamic_market_discovery"
+        )
+        targets.append({
+            "code": code,
+            "name": name,
+            "status": status,
+            "source": source,
+            "evidence": {
+                "decision_reason": scorecard.get("decision_reason", ""),
+                "next_signal": scorecard.get("next_signal", ""),
+            },
+            "promotion_evidence": scorecard.get("promotion_evidence") or {},
+            "scoring_decision": scorecard,
+            "current_price": scorecard.get("current_price")
+            or scorecard.get("entry_price"),
+            "available_cash": available_cash,
+            "total_assets": total_assets,
+        })
+        applied.append((scorecard, previous))
+    if targets:
+        store.upsert_targets(targets, payload=payload)
+    after = payload.get("items", {})
+    events = []
+    for scorecard, previous in applied:
+        code = str(scorecard.get("code") or "").strip()
+        current = dict(scorecard)
+        current["status"] = (after.get(code) or {}).get(
+            "status",
+            scorecard.get("status") or scorecard.get("action"),
+        )
+        previous_event = dict(previous) if isinstance(previous, dict) else None
+        if previous_event is not None:
+            previous_event["score"] = _stored_score(previous)
+        events.append(
+            classify_lifecycle_event(
+                previous=previous_event,
+                current=current,
+            )
+        )
+    return events
+
+
+def build_deduplicating_deliverer(
+    receipt_dir: str | Path,
+    deliverer,
+):
+    """Avoid repeating an already completed delivery for one run and report."""
+    root = Path(receipt_dir)
+
+    async def deliver(content: str, result: dict[str, Any]) -> dict[str, Any]:
+        run_id = str(result.get("run_id") or "")
+        content_digest = _digest_bytes(content.encode("utf-8"))
+        key = _digest_bytes(f"{run_id}:{content_digest}".encode("utf-8"))
+        receipt_path = root / f"{key}.json"
+        if receipt_path.is_file():
+            try:
+                receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                report_path = Path(str(receipt.get("report_path") or ""))
+                if (
+                    report_path.is_file()
+                    and _digest_bytes(report_path.read_bytes())
+                    == str(receipt.get("report_digest") or "")
+                ):
+                    return receipt
+            except (OSError, ValueError, TypeError):
+                pass
+        delivered = await _resolve(deliverer(content, result))
+        if not isinstance(delivered, dict):
+            raise RuntimeError("invalid_delivery_receipt")
+        report_path = Path(str(delivered.get("report_path") or ""))
+        report_digest = str(delivered.get("report_digest") or "")
+        if (
+            not report_path.is_file()
+            or not report_digest
+            or _digest_bytes(report_path.read_bytes()) != report_digest
+        ):
+            raise RuntimeError("delivery_receipt_mismatch")
+        receipt = {
+            **delivered,
+            "run_id": run_id,
+            "pipeline_report_digest": content_digest,
+        }
+        receipt_path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = receipt_path.with_name(
+            f".{receipt_path.name}.{os.getpid()}.tmp"
+        )
+        temporary.write_text(
+            json.dumps(receipt, ensure_ascii=False, sort_keys=True),
+            encoding="utf-8",
+        )
+        temporary.replace(receipt_path)
+        return receipt
+
+    return deliver
+
+
 class OpportunityPipeline:
     """Discover, score, report, and recover from the first incomplete stage."""
 
@@ -60,6 +268,7 @@ class OpportunityPipeline:
         delivery_verifier=None,
         sleeper=asyncio.sleep,
         max_fetch_attempts: int = 3,
+        max_enrichment_concurrency: int = 4,
     ):
         self.discovery_source = discovery_source
         self.fallback_source = fallback_source
@@ -75,6 +284,10 @@ class OpportunityPipeline:
         self.delivery_verifier = delivery_verifier
         self.sleeper = sleeper
         self.max_fetch_attempts = max(1, int(max_fetch_attempts))
+        self.max_enrichment_concurrency = max(
+            1,
+            int(max_enrichment_concurrency),
+        )
 
     @staticmethod
     def _promotion_evidence(
@@ -139,6 +352,37 @@ class OpportunityPipeline:
                 failed += 1
         return scorecards, failed
 
+    async def _enrich_candidates(
+        self,
+        candidates: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], int]:
+        semaphore = asyncio.Semaphore(self.max_enrichment_concurrency)
+
+        async def enrich(candidate: dict[str, Any]):
+            async with semaphore:
+                try:
+                    snapshot = await _resolve(self.snapshot_builder(candidate))
+                except Exception:
+                    return None
+                if not isinstance(snapshot, dict) or not snapshot:
+                    return None
+                snapshot.setdefault("code", candidate["code"])
+                snapshot.setdefault("name", candidate["name"])
+                snapshot.setdefault(
+                    "market_evidence",
+                    candidate["market_evidence"],
+                )
+                snapshot["discovery_source"] = candidate["source"]
+                return snapshot
+
+        resolved = await asyncio.gather(
+            *(enrich(candidate) for candidate in candidates)
+        )
+        snapshots = [
+            snapshot for snapshot in resolved if isinstance(snapshot, dict)
+        ]
+        return snapshots, len(candidates) - len(snapshots)
+
     async def evaluate(
         self,
         *,
@@ -146,6 +390,7 @@ class OpportunityPipeline:
         available_cash: float,
         total_assets: float,
         existing_codes: set[str] | None = None,
+        priority_codes: set[str] | None = None,
     ) -> dict[str, Any]:
         """Non-persistent evaluation retained for focused callers and tests."""
         market_rows = (
@@ -156,6 +401,7 @@ class OpportunityPipeline:
             available_cash=available_cash,
             total_assets=total_assets,
             existing_codes=existing_codes,
+            priority_codes=priority_codes,
             max_candidates=self.max_candidates,
         )
         metrics = {**discovery["metrics"], "enriched_count": 0, "scored_count": 0}
@@ -167,27 +413,16 @@ class OpportunityPipeline:
                 "rejected": discovery["rejected"],
                 "health": {"status": "failed", "error_code": "empty_market_universe"},
             }
-        snapshots: list[dict[str, Any]] = []
-        enrichment_failed = 0
-        for candidate in discovery["candidates"]:
-            try:
-                snapshot = await _resolve(self.snapshot_builder(candidate))
-                if not isinstance(snapshot, dict) or not snapshot:
-                    enrichment_failed += 1
-                    continue
-                snapshot.setdefault("code", candidate["code"])
-                snapshot.setdefault("name", candidate["name"])
-                snapshot.setdefault("market_evidence", candidate["market_evidence"])
-                snapshot["discovery_source"] = candidate["source"]
-                snapshots.append(snapshot)
-            except Exception:
-                enrichment_failed += 1
+        snapshots, enrichment_failed = await self._enrich_candidates(
+            discovery["candidates"]
+        )
         metrics["enriched_count"] = len(snapshots)
         scorecards, scoring_failed = await self._score_snapshots(
             snapshots,
             available_cash=available_cash,
             total_assets=total_assets,
         )
+        scorecards.extend(_lifecycle_only_scorecards(discovery))
         for scorecard in scorecards:
             scorecard["discovery_source"] = next(
                 (
@@ -197,7 +432,9 @@ class OpportunityPipeline:
                 ),
                 "dynamic_market_discovery",
             )
-        metrics["scored_count"] = len(scorecards)
+        metrics["scored_count"] = sum(
+            not bool(item.get("lifecycle_only")) for item in scorecards
+        )
         rejected = {
             **discovery["rejected"],
             "enrichment_failed": enrichment_failed,
@@ -227,8 +464,41 @@ class OpportunityPipeline:
             sort_keys=True,
             default=str,
         ).encode("utf-8")
-        path.write_bytes(payload)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        temporary.write_bytes(payload)
+        temporary.replace(path)
         return str(path), _digest_bytes(payload)
+
+    @contextmanager
+    def _run_lock(self, run_id: str):
+        lock_path = self._artifact_path(run_id, "pipeline_run").with_suffix(
+            ".lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_path.open("a+")
+        acquired = False
+        try:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                acquired = True
+            except BlockingIOError:
+                pass
+            yield acquired
+        finally:
+            if acquired:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            handle.close()
+
+    def _busy_result(self, run_id: str) -> dict[str, Any]:
+        return {
+            "run_id": run_id,
+            "status": "running",
+            "health": {
+                "status": "degraded",
+                "error_code": "pipeline_run_already_active",
+            },
+            "stages": self.run_store.stages_for_run(run_id),
+        }
 
     def _read_artifact(self, stage: dict[str, Any]) -> Any:
         path = Path(str(stage.get("artifact_path") or ""))
@@ -362,6 +632,7 @@ class OpportunityPipeline:
         available_cash = float(context["account_snapshot"]["available_cash"])
         total_assets = float(context["account_snapshot"]["total_assets"])
         existing_codes = set(context["account_snapshot"].get("existing_codes") or [])
+        priority_codes = set(context["account_snapshot"].get("priority_codes") or [])
 
         for stage_name in STAGES[start_index:]:
             if stage_name == "account_snapshot":
@@ -392,6 +663,7 @@ class OpportunityPipeline:
                         available_cash=available_cash,
                         total_assets=total_assets,
                         existing_codes=existing_codes,
+                        priority_codes=priority_codes,
                         max_candidates=self.max_candidates,
                     )
                     context["metrics"] = {
@@ -401,21 +673,14 @@ class OpportunityPipeline:
                     }
                 elif stage_name == "data_enrichment":
                     input_value = context["affordability_filter"]["candidates"]
-                    value = []
-                    for candidate in input_value:
-                        try:
-                            snapshot = await _resolve(self.snapshot_builder(candidate))
-                        except Exception:
-                            continue
-                        if isinstance(snapshot, dict) and snapshot:
-                            snapshot.setdefault("code", candidate["code"])
-                            snapshot.setdefault("name", candidate["name"])
-                            snapshot.setdefault(
-                                "market_evidence",
-                                candidate["market_evidence"],
-                            )
-                            value.append(snapshot)
+                    value, enrichment_failed = (
+                        await self._enrich_candidates(input_value)
+                    )
                     context["metrics"]["enriched_count"] = len(value)
+                    context["rejected"] = {
+                        **context["affordability_filter"].get("rejected", {}),
+                        "enrichment_failed": enrichment_failed,
+                    }
                 elif stage_name == "scoring":
                     input_value = context["data_enrichment"]
                     value, failed = await self._score_snapshots(
@@ -423,7 +688,14 @@ class OpportunityPipeline:
                         available_cash=available_cash,
                         total_assets=total_assets,
                     )
-                    context["metrics"]["scored_count"] = len(value)
+                    value.extend(
+                        _lifecycle_only_scorecards(
+                            context["affordability_filter"]
+                        )
+                    )
+                    context["metrics"]["scored_count"] = sum(
+                        not bool(item.get("lifecycle_only")) for item in value
+                    )
                     context["rejected"] = {
                         **context["affordability_filter"].get("rejected", {}),
                         "scoring_failed": failed,
@@ -476,7 +748,11 @@ class OpportunityPipeline:
                             ".md"
                         )
                         report_path.parent.mkdir(parents=True, exist_ok=True)
-                        report_path.write_text(input_value, encoding="utf-8")
+                        temporary = report_path.with_name(
+                            f".{report_path.name}.{os.getpid()}.tmp"
+                        )
+                        temporary.write_text(input_value, encoding="utf-8")
+                        temporary.replace(report_path)
                         value = {
                             "report_path": str(report_path),
                             "report_digest": _digest_bytes(
@@ -538,6 +814,7 @@ class OpportunityPipeline:
         available_cash: float,
         total_assets: float,
         existing_codes: set[str] | None = None,
+        priority_codes: set[str] | None = None,
     ) -> dict[str, Any]:
         if self.run_store is None:
             raise RuntimeError("pipeline_run_store_required")
@@ -546,30 +823,40 @@ class OpportunityPipeline:
         stages = self.run_store.stages_for_run(run_id)
         if stages:
             return await self.recover(run_id)
-        account = {
-            "available_cash": float(available_cash),
-            "total_assets": float(total_assets),
-            "reserve_cash": round(max(0.0, float(total_assets) * 0.1), 2),
-            "executable_budget": round(
-                max(0.0, min(float(available_cash) - float(total_assets) * 0.1, float(total_assets) * 0.5)),
-                2,
-            ),
-            "existing_codes": sorted(existing_codes or set()),
-        }
-        stage = self.run_store.start_stage(run_id, "account_snapshot")
-        self._finish(
-            run_id,
-            "account_snapshot",
-            stage["attempt"],
-            account,
-            output_count=1,
-        )
-        context = {"trade_date": trade_date, "account_snapshot": account}
-        return await self._execute_from(run_id, 1, context)
+        with self._run_lock(run_id) as acquired:
+            if not acquired:
+                return self._busy_result(run_id)
+            stages = self.run_store.stages_for_run(run_id)
+            if stages:
+                return await self._recover_unlocked(run_id)
+            account = {
+                **build_account_budget_snapshot(
+                    available_cash=available_cash,
+                    total_assets=total_assets,
+                ),
+                "existing_codes": sorted(existing_codes or set()),
+                "priority_codes": sorted(priority_codes or set()),
+            }
+            stage = self.run_store.start_stage(run_id, "account_snapshot")
+            self._finish(
+                run_id,
+                "account_snapshot",
+                stage["attempt"],
+                account,
+                output_count=1,
+            )
+            context = {"trade_date": trade_date, "account_snapshot": account}
+            return await self._execute_from(run_id, 1, context)
 
     async def recover(self, run_id: str) -> dict[str, Any]:
         if self.run_store is None:
             raise RuntimeError("pipeline_run_store_required")
+        with self._run_lock(run_id) as acquired:
+            if not acquired:
+                return self._busy_result(run_id)
+            return await self._recover_unlocked(run_id)
+
+    async def _recover_unlocked(self, run_id: str) -> dict[str, Any]:
         stages = self.run_store.stages_for_run(run_id)
         context: dict[str, Any] = {
             "trade_date": run_id.rsplit(":", 1)[-1],
@@ -589,7 +876,10 @@ class OpportunityPipeline:
                 elif stage_name == "data_enrichment":
                     context["metrics"]["enriched_count"] = len(context[stage_name])
                 elif stage_name == "scoring":
-                    context["metrics"]["scored_count"] = len(context[stage_name])
+                    context["metrics"]["scored_count"] = sum(
+                        not bool(item.get("lifecycle_only"))
+                        for item in context[stage_name]
+                    )
                 if stage.get("status") == "degraded":
                     context["health"] = {
                         "status": "degraded",
@@ -599,10 +889,22 @@ class OpportunityPipeline:
             start_index = index
             break
         if "account_snapshot" not in context:
-            raise RuntimeError("account_snapshot_missing")
+            account = self._load_service_account()
+            stage = self._start_stage(run_id, "account_snapshot")
+            self._finish(
+                run_id,
+                "account_snapshot",
+                stage["attempt"],
+                account,
+                recovery_action="reload_portfolio_snapshot",
+            )
+            context["account_snapshot"] = account
+            start_index = 1
         return await self._execute_from(run_id, start_index, context)
 
-    async def run_for_service_date(self) -> dict[str, Any]:
+    def _load_service_account(self) -> dict[str, Any]:
+        from app.services.quant_lifecycle import TargetPoolStore
+
         portfolio_path = Path(
             os.getenv("CONGXI_PORTFOLIO_PATH", "data/user_portfolio.json")
         )
@@ -621,20 +923,49 @@ class OpportunityPipeline:
             float(item.get("current_value") or item.get("market_value") or 0)
             for item in positions
         )
-        total_assets = float(
-            portfolio.get("total_assets")
-            or portfolio.get("total_value")
-            or cash + market_value
+        reported_assets = float(portfolio.get("total_assets") or 0)
+        holdings_value = float(
+            portfolio.get("total_value")
+            if portfolio.get("total_value") is not None
+            else market_value
         )
-        return await self.run(
-            os.getenv("CONGXI_REPORT_DATE") or date.today().isoformat(),
-            available_cash=cash,
-            total_assets=total_assets,
-            existing_codes={
+        total_assets = reported_assets or cash + holdings_value
+        pool_items = TargetPoolStore().load().get("items", {})
+        priority_codes = {
+            str(code).strip()
+            for code, item in pool_items.items()
+            if isinstance(item, dict)
+            and str(item.get("status") or "").strip().lower()
+            not in {"removed", "expired", "position"}
+        }
+        protected_codes = {
+            str(code).strip()
+            for code, item in pool_items.items()
+            if isinstance(item, dict)
+            and str(item.get("status") or "").strip().lower()
+            in {"removed", "expired"}
+        }
+        return {
+            **build_account_budget_snapshot(
+                available_cash=cash,
+                total_assets=total_assets,
+            ),
+            "existing_codes": sorted({
                 str(item.get("code") or "").strip()
                 for item in positions
                 if str(item.get("code") or "").strip()
-            },
+            } | protected_codes),
+            "priority_codes": sorted(priority_codes),
+        }
+
+    async def run_for_service_date(self) -> dict[str, Any]:
+        account = self._load_service_account()
+        return await self.run(
+            os.getenv("CONGXI_REPORT_DATE") or date.today().isoformat(),
+            available_cash=account["available_cash"],
+            total_assets=account["total_assets"],
+            existing_codes=set(account["existing_codes"]),
+            priority_codes=set(account["priority_codes"]),
         )
 
     async def recover_due_run(self) -> dict[str, Any]:
@@ -673,25 +1004,71 @@ def build_default_pipeline() -> OpportunityPipeline:
             self.client = AKShareMarketClient()
             self.fund_flows = None
             self.northbound = None
+            self.fund_flow_lock = asyncio.Lock()
+            self.northbound_lock = asyncio.Lock()
 
         async def fetch_fund_flow_individual(self):
-            if self.fund_flows is None:
-                self.fund_flows = (
-                    await self.client.fetch_fund_flow_individual()
-                )
+            if not self.fund_flows:
+                async with self.fund_flow_lock:
+                    if not self.fund_flows:
+                        self.fund_flows = (
+                            await self.client.fetch_fund_flow_individual()
+                        )
             return self.fund_flows
 
         async def fetch_hsgt_flow(self):
             if self.northbound is None:
-                self.northbound = await self.client.fetch_hsgt_flow()
+                async with self.northbound_lock:
+                    if self.northbound is None:
+                        self.northbound = await self.client.fetch_hsgt_flow()
             return self.northbound
 
     market_source = CachedMarketSource()
     quote_source = FastRealtimeMarketDataSource()
     news_source = AKShareNewsClient()
+    market_regime_cache = None
+    market_regime_lock = asyncio.Lock()
+
+    async def current_market_regime() -> dict[str, Any]:
+        nonlocal market_regime_cache
+        if market_regime_cache is not None:
+            return market_regime_cache
+        async with market_regime_lock:
+            if market_regime_cache is not None:
+                return market_regime_cache
+            codes = ("sh000001", "sz399001", "sz399006")
+            try:
+                quotes = await quote_source.fetch_batch(list(codes))
+            except Exception:
+                quotes = {}
+            changes = [
+                float((quotes.get(code) or {}).get("change_pct") or 0)
+                for code in codes
+                if (quotes.get(code) or {}).get("price")
+            ]
+            if not changes:
+                market_regime_cache = {
+                    "status": "missing",
+                    "label": "data_unavailable",
+                    "reason": "主要指数行情缺失，新开仓安全阻断。",
+                }
+            else:
+                average_change = sum(changes) / len(changes)
+                market_regime_cache = {
+                    "status": "ok",
+                    "label": (
+                        "panic"
+                        if min(changes) <= -2.0
+                        else "downtrend"
+                        if average_change <= -1.5
+                        else "neutral"
+                    ),
+                    "index_change_pct": round(average_change, 2),
+                }
+            return market_regime_cache
 
     async def snapshot_builder(candidate: dict[str, Any]) -> dict[str, Any]:
-        return await build_target_snapshot(
+        snapshot = await build_target_snapshot(
             candidate["code"],
             name=candidate.get("name", ""),
             quote_source=quote_source,
@@ -699,8 +1076,10 @@ def build_default_pipeline() -> OpportunityPipeline:
             news_source=news_source,
             financial_fetcher=fetch_financial_evidence,
         )
+        snapshot["market_regime"] = dict(await current_market_regime())
+        return snapshot
 
-    async def deliver(_content: str, result: dict[str, Any]) -> dict[str, Any]:
+    async def deliver_once(_content: str, result: dict[str, Any]) -> dict[str, Any]:
         from scripts import daily_report
 
         report_path = await daily_report.main(v9_pipeline_result=result)
@@ -714,10 +1093,8 @@ def build_default_pipeline() -> OpportunityPipeline:
 
     def apply_lifecycle(scorecards: list[dict[str, Any]]) -> list[dict[str, Any]]:
         from app.services.quant_lifecycle import TargetPoolStore
-        from app.services.target_lifecycle_events import classify_lifecycle_event
 
         store = TargetPoolStore()
-        before = store.load().get("items", {})
         portfolio_path = Path(
             os.getenv("CONGXI_PORTFOLIO_PATH", "data/user_portfolio.json")
         )
@@ -725,63 +1102,29 @@ def build_default_pipeline() -> OpportunityPipeline:
         available_cash = float(
             portfolio.get("available_cash") or portfolio.get("cash") or 0
         )
-        total_assets = float(
-            portfolio.get("total_assets")
-            or portfolio.get("total_value")
-            or available_cash
+        reported_assets = float(portfolio.get("total_assets") or 0)
+        holdings_value = float(portfolio.get("total_value") or 0)
+        total_assets = reported_assets or available_cash + holdings_value
+        return apply_scorecard_lifecycle(
+            store,
+            scorecards,
+            available_cash=available_cash,
+            total_assets=total_assets,
         )
-        targets = []
-        for scorecard in scorecards:
-            action = str(scorecard.get("action") or "").strip().lower()
-            status = (
-                "executable"
-                if action in {"buy", "add", "actionable", "executable"}
-                else "watching"
-            )
-            targets.append({
-                "code": str(scorecard.get("code") or "").strip(),
-                "name": str(scorecard.get("name") or "").strip(),
-                "status": status,
-                "source": str(
-                    scorecard.get("discovery_source")
-                    or "dynamic_market_discovery"
-                ),
-                "evidence": {
-                    "decision_reason": scorecard.get("decision_reason", ""),
-                    "next_signal": scorecard.get("next_signal", ""),
-                },
-                "promotion_evidence": scorecard.get("promotion_evidence") or {},
-                "scoring_decision": scorecard,
-                "current_price": scorecard.get("current_price")
-                or scorecard.get("entry_price"),
-                "available_cash": available_cash,
-                "total_assets": total_assets,
-            })
-        if targets:
-            store.upsert_targets(targets)
-        after = store.load().get("items", {})
-        events = []
-        for scorecard in scorecards:
-            code = str(scorecard.get("code") or "").strip()
-            current = dict(scorecard)
-            current["status"] = (after.get(code) or {}).get(
-                "status",
-                scorecard.get("status") or scorecard.get("action"),
-            )
-            events.append(
-                classify_lifecycle_event(
-                    previous=before.get(code),
-                    current=current,
-                )
-            )
-        return events
 
     state_dir = resolve_runtime_state_dir()
+    deliver = build_deduplicating_deliverer(
+        state_dir / "delivery_receipts",
+        deliver_once,
+    )
     return OpportunityPipeline(
         discovery_source=market_source,
         snapshot_builder=snapshot_builder,
         max_candidates=int(
             os.getenv("CONGXI_OPPORTUNITY_MAX_CANDIDATES", "30")
+        ),
+        max_enrichment_concurrency=int(
+            os.getenv("CONGXI_ENRICHMENT_CONCURRENCY", "4")
         ),
         run_store=PipelineRunStore(resolve_runtime_pipeline_db_path()),
         artifact_dir=state_dir / "pipeline_artifacts",

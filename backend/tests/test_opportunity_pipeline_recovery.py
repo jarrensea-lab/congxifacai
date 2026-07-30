@@ -136,3 +136,114 @@ async def test_watchdog_resumes_render_stage_without_reapplying_lifecycle(tmp_pa
     assert first["stages"]["report_render"]["status"] == "failed"
     assert second["stages"]["report_render"]["status"] == "succeeded"
     assert counts["lifecycle"] == 1
+
+
+@pytest.mark.asyncio
+async def test_overlapping_watchdog_does_not_duplicate_lifecycle_apply(tmp_path):
+    from app.services.opportunity_pipeline import OpportunityPipeline
+    from app.services.pipeline_run_store import PipelineRunStore
+
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    lifecycle_calls = 0
+
+    async def lifecycle(scorecards):
+        nonlocal lifecycle_calls
+        lifecycle_calls += 1
+        entered.set()
+        await release.wait()
+        return [
+            {
+                "code": scorecards[0]["code"],
+                "name": scorecards[0]["name"],
+                "event": "added",
+                "reason": "首次达到可执行标准",
+            }
+        ]
+
+    pipeline = OpportunityPipeline(
+        discovery_source=SequenceSource([[_market_row()]]),
+        snapshot_builder=_snapshot,
+        scorer=_score,
+        lifecycle_applier=lifecycle,
+        run_store=PipelineRunStore(tmp_path / "pipeline.db"),
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    running = asyncio.create_task(
+        pipeline.run(
+            "2026-07-31",
+            available_cash=800,
+            total_assets=800,
+        )
+    )
+    await entered.wait()
+    overlapping = await pipeline.recover("actionable_pipeline_v1:2026-07-31")
+    release.set()
+    await running
+
+    assert overlapping["status"] == "running"
+    assert lifecycle_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_delivery_receipt_deduplicates_same_run_and_report(tmp_path):
+    from app.services.opportunity_pipeline import build_deduplicating_deliverer
+
+    calls = 0
+    report_path = tmp_path / "report.md"
+
+    async def underlying(content, _result):
+        nonlocal calls
+        calls += 1
+        report_path.write_text(content, encoding="utf-8")
+        import hashlib
+
+        return {
+            "report_path": str(report_path),
+            "report_digest": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        }
+
+    deliver = build_deduplicating_deliverer(
+        tmp_path / "receipts",
+        underlying,
+    )
+    result = {"run_id": "actionable_pipeline_v1:2026-07-31"}
+
+    first = await deliver("same report", result)
+    second = await deliver("same report", result)
+
+    assert first == second
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_rebuilds_incomplete_account_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    import json
+    from app.services.opportunity_pipeline import OpportunityPipeline
+    from app.services.pipeline_run_store import PipelineRunStore
+
+    portfolio = tmp_path / "portfolio.json"
+    portfolio.write_text(
+        json.dumps({"available_cash": 800, "total_assets": 800}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CONGXI_PORTFOLIO_PATH", str(portfolio))
+    store = PipelineRunStore(tmp_path / "pipeline.db")
+    run_id = store.begin_run("2026-07-31")["run_id"]
+    store.start_stage(run_id, "account_snapshot")
+    pipeline = OpportunityPipeline(
+        discovery_source=SequenceSource([[_market_row()]]),
+        snapshot_builder=_snapshot,
+        scorer=_score,
+        run_store=store,
+        artifact_dir=tmp_path / "artifacts",
+    )
+
+    result = await pipeline.recover(run_id)
+
+    assert result["stages"]["account_snapshot"]["status"] == "succeeded"
+    assert result["stages"]["account_snapshot"]["attempt"] == 2

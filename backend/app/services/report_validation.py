@@ -50,14 +50,20 @@ def validate_report(
     ):
         errors.append("no_action_reason_missing")
 
-    for event in lifecycle_events:
+    visible_lifecycle_events = [
+        event
+        for event in lifecycle_events
+        if str(event.get("event") or event.get("event_type") or "").lower()
+        in {"added", "downgraded", "removed"}
+    ]
+    for event in visible_lifecycle_events:
         code = str(event.get("code") or event.get("stock_code") or "").strip()
         if code and code not in content:
             errors.append("lifecycle_change_missing")
             break
 
     scored_count = int(metrics.get("scored_count") or 0)
-    if scored_count > 0 and lifecycle_events and "短线池：暂无" in content:
+    if scored_count > 0 and visible_lifecycle_events and "短线池：暂无" in content:
         errors.append("candidate_visibility_contradiction")
     if scored_count == 0:
         warnings.append("no_scored_candidates")

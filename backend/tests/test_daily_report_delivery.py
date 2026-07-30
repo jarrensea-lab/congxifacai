@@ -126,6 +126,39 @@ def test_v9_no_action_report_explains_counts_and_reason():
     assert "最接近触发" in text
     assert "等待量价突破" in text
     assert "管线状态：降级" in text
+    assert "sentinel_missing" not in text
+    assert "Sentinel 今日研究证据缺失" in text
+
+
+def test_v9_closest_trigger_excludes_lifecycle_only_rows():
+    from scripts.daily_report import build_v9_opportunity_section
+
+    text = "\n".join(build_v9_opportunity_section({
+        "account": {"available_cash": 800, "executable_budget": 640},
+        "metrics": {"scanned_count": 2, "affordable_count": 1, "scored_count": 1},
+        "scorecards": [
+            {
+                "code": "600000",
+                "name": "旧标的",
+                "action": "watch",
+                "score": 99,
+                "lifecycle_only": True,
+                "block_reason": "lot_size_exceeded",
+            },
+            {
+                "code": "000001",
+                "name": "待触发标的",
+                "action": "watch",
+                "score": 70,
+                "next_signal": "等待量价突破",
+            },
+        ],
+        "lifecycle_events": [],
+        "health": {"status": "degraded", "error_code": "no_scored_candidates"},
+    }))
+
+    assert "最接近触发：待触发标的(000001)" in text
+    assert "最接近触发：旧标的(600000)" not in text
 
 
 class _EmptyLongThesisStore:
