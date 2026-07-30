@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.composite_score import build_composite_score, grade_for_score
 from app.services.market_regime import evaluate_market_regime
 from app.services.long_thesis import evaluate_thesis_status
 from app.services.playbook_engine import select_playbook
@@ -231,6 +232,23 @@ def score_target(
         if price > 0
         else {}
     )
+    change_pct = _to_float(quote.get("change_pct"))
+    hard_gates_passed = (
+        price > 0
+        and not missing_data
+        and lot_value <= available_cash
+        and lot_value <= budget
+        and playbook.get("triggered") is True
+        and change_pct < 9
+    )
+    composite = build_composite_score(
+        snapshot,
+        playbook=playbook,
+        entry_price=price,
+        stop_loss=stop_loss,
+        target_price=target_price,
+        all_hard_gates_passed=hard_gates_passed,
+    )
 
     base = {
         "code": code,
@@ -255,11 +273,24 @@ def score_target(
         "executable_budget": budget,
         "next_signal": "",
         "combined_decision_reason": "",
+        "score_version": composite["score_version"],
+        "score_components": composite["components"],
+        "component_source_status": composite["source_status"],
+        "grade": composite["grade"],
+        "top_reasons": composite["top_reasons"],
+        "primary_risk": composite["primary_risk"],
         **long_view,
     }
 
     def finish(updates: dict[str, Any]) -> dict[str, Any]:
         payload = {**base, **updates}
+        payload["grade"] = grade_for_score(
+            _to_float(payload.get("score")),
+            all_hard_gates_passed=(
+                payload.get("action") in {"buy", "add"}
+                and not payload.get("block_reason")
+            ),
+        )
         production_eligibility = (
             snapshot.get("production_eligibility")
             if isinstance(snapshot.get("production_eligibility"), dict)
@@ -329,12 +360,7 @@ def score_target(
             "next_signal": "完成 thesis review，确认红线解除或标的转入 exit_candidate / removed 后再恢复交易评分。",
         })
 
-    technical = _technical_score(snapshot)
-    serenity_score = _to_float((snapshot.get("serenity") or {}).get("score"))
-    long_quality = _to_float(long_view.get("long_quality_score"))
-    research_score = long_quality if long_quality > 0 else serenity_score
-    total_score = round(min(100, technical * 0.7 + research_score * 0.3 + _to_float(playbook.get("score_bonus"))), 1)
-    change_pct = _to_float(quote.get("change_pct"))
+    total_score = composite["total"]
 
     if playbook.get("block_reason") == "blocked_high_position":
         return finish({
