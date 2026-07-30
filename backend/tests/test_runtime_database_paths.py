@@ -45,6 +45,25 @@ def test_runtime_database_state_directory_override_sets_both_paths(monkeypatch, 
     assert Path(paths.scheduler) == state_dir / "scheduler_jobs.db"
 
 
+def test_runtime_pipeline_database_defaults_to_state_directory(monkeypatch, tmp_path):
+    from app.config import resolve_runtime_pipeline_db_path
+
+    state_dir = tmp_path / "runtime-state"
+    monkeypatch.setenv("CONGXI_STATE_DIR", str(state_dir))
+    monkeypatch.delenv("CONGXI_PIPELINE_DATABASE_PATH", raising=False)
+
+    assert resolve_runtime_pipeline_db_path() == state_dir / "pipeline_runs.db"
+
+
+def test_runtime_pipeline_database_override_is_respected(monkeypatch, tmp_path):
+    from app.config import resolve_runtime_pipeline_db_path
+
+    pipeline_db = tmp_path / "pipeline" / "runs.db"
+    monkeypatch.setenv("CONGXI_PIPELINE_DATABASE_PATH", str(pipeline_db))
+
+    assert resolve_runtime_pipeline_db_path() == pipeline_db
+
+
 def test_runtime_yitaojin_defaults_use_local_state_directory(monkeypatch, tmp_path):
     """Catches broker state leaking into the repository checkout."""
     from app.config import resolve_runtime_yitaojin_paths

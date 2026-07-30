@@ -53,6 +53,14 @@ def resolve_runtime_database_paths() -> RuntimeDatabasePaths:
     return RuntimeDatabasePaths(business=str(business), scheduler=str(scheduler))
 
 
+def resolve_runtime_pipeline_db_path() -> Path:
+    """Resolve the v9 pipeline ledger onto the local mutable state disk."""
+    return Path(
+        os.getenv("CONGXI_PIPELINE_DATABASE_PATH")
+        or resolve_runtime_state_dir() / "pipeline_runs.db"
+    ).expanduser()
+
+
 def resolve_runtime_yitaojin_paths() -> RuntimeYitaojinPaths:
     """Resolve broker-integration artifacts onto the local state disk."""
     state_dir = resolve_runtime_state_dir()
