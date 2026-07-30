@@ -19,9 +19,9 @@ def test_bridge_runs_typed_json_request_and_returns_data(tmp_path):
 
     executable = _write_executable(
         tmp_path / "fake-bridge",
-        """#!/bin/zsh
+        """#!/bin/sh
 read request
-command=$(printf '%s' "$request" | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["command"])')
+command=$(printf '%s' "$request" | python3 -c 'import json,sys; print(json.load(sys.stdin)["command"])')
 printf '{"schemaVersion":1,"ok":true,"command":"%s","capturedAt":"2026-07-26T09:30:05+08:00","data":{"codes":["000001"]}}\\n' "$command"
 """,
     )
@@ -41,7 +41,7 @@ def test_bridge_timeout_is_fail_closed(tmp_path):
 
     executable = _write_executable(
         tmp_path / "slow-bridge",
-        "#!/bin/zsh\nsleep 2\n",
+        "#!/bin/sh\nsleep 2\n",
     )
 
     with pytest.raises(BridgeUnavailableError, match="timed out"):
@@ -68,7 +68,7 @@ def test_bridge_maps_structured_safety_errors(
 
     executable = _write_executable(
         tmp_path / f"error-{error_code}",
-        f"""#!/bin/zsh
+        f"""#!/bin/sh
 printf '%s\\n' '{{"schemaVersion":1,"ok":false,"command":"probe","capturedAt":"2026-07-26T09:30:05+08:00","error":{{"code":"{error_code}","message":"blocked"}}}}'
 exit 2
 """,
@@ -89,7 +89,7 @@ def test_bridge_never_includes_stderr_contents_in_exception(tmp_path):
 
     executable = _write_executable(
         tmp_path / "stderr-bridge",
-        "#!/bin/zsh\nprint -u2 'SENSITIVE_ACCOUNT_TEXT'\nexit 3\n",
+        "#!/bin/sh\nprintf '%s\\n' 'SENSITIVE_ACCOUNT_TEXT' >&2\nexit 3\n",
     )
 
     with pytest.raises(BridgeUnavailableError) as captured:
@@ -117,7 +117,7 @@ def test_bridge_rejects_empty_malformed_or_mismatched_envelopes(tmp_path, stdout
 
     executable = _write_executable(
         tmp_path / "invalid-bridge",
-        f"#!/bin/zsh\nprintf '%s' {json.dumps(stdout)}\n",
+        f"#!/bin/sh\nprintf '%s' {json.dumps(stdout)}\n",
     )
 
     with pytest.raises(BridgeUnavailableError):
@@ -129,7 +129,7 @@ def test_bridge_rejects_symlink_executable(tmp_path):
     from app.integrations.yitaojin.bridge import YitaojinBridge
     from app.integrations.yitaojin.models import BridgeUnavailableError
 
-    target = _write_executable(tmp_path / "target", "#!/bin/zsh\n")
+    target = _write_executable(tmp_path / "target", "#!/bin/sh\n")
     link = tmp_path / "bridge-link"
     link.symlink_to(target)
 
