@@ -8,6 +8,17 @@ from threading import Barrier, Event, Thread
 import pytest
 
 
+def test_daily_report_discovers_before_scoring():
+    import inspect
+    from scripts import daily_report
+
+    source = inspect.getsource(daily_report.main)
+
+    assert source.index("build_refreshed_outside_pool_scan_for_report") < source.index(
+        "build_target_scores_for_report"
+    )
+
+
 class _EmptyLongThesisStore:
     def get(self, symbol):
         return None
@@ -1710,7 +1721,7 @@ async def test_discover_small_account_candidates_uses_live_rotating_market_rows(
 
     assert [row["code"] for row in rows] == ["000563"]
     assert rows[0]["source"] == "dynamic_fund_flow_discovery"
-    assert rows[0]["research_only"] is True
+    assert "research_only" not in rows[0]
 
 
 @pytest.mark.asyncio
@@ -1760,7 +1771,7 @@ async def test_refreshed_outside_pool_scan_flows_dynamic_candidate_into_quote_ga
     assert [row["code"] for row in rows] == ["000563"]
     assert rows[0]["affordable"] is True
     assert rows[0]["source"] == "dynamic_fund_flow_discovery"
-    assert "仅进入研究观察" in rows[0]["watch_reason"]
+    assert "一手试错复核" in rows[0]["watch_reason"]
 
 
 def test_dynamic_research_candidate_is_visible_but_never_rendered_as_trade_trigger():

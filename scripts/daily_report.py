@@ -3820,27 +3820,12 @@ async def main():
             "degradation_reasons": ["debate_call_failed"],
         }
 
-    print("🎯 生成标的池评分...", flush=True)
     from app.data_sources.akshare_market import AKShareMarketClient
 
     shared_market_source = AKShareMarketClient()
-    try:
-        target_scores = await build_target_scores_for_report(
-            available_cash=available_cash,
-            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-            market_source=shared_market_source,
-        )
-        if target_scores:
-            decision["target_scores"] = target_scores
-            print(f"   标的评分完成: {len(target_scores)} 个标的", flush=True)
-        else:
-            print("   标的池为空或无可评分标的", flush=True)
-    except Exception as e:
-        print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
-
     print("🔎 生成池外小账户补扫...", flush=True)
     try:
-        existing_codes = collect_outside_pool_exclusions(decision.get("target_scores", []))
+        existing_codes = collect_outside_pool_exclusions([])
         outside_scan = await build_refreshed_outside_pool_scan_for_report(
             available_cash=available_cash,
             total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
@@ -3865,6 +3850,21 @@ async def main():
         )
     except Exception as e:
         print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
+
+    print("🎯 生成标的池评分...", flush=True)
+    try:
+        target_scores = await build_target_scores_for_report(
+            available_cash=available_cash,
+            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+            market_source=shared_market_source,
+        )
+        if target_scores:
+            decision["target_scores"] = target_scores
+            print(f"   标的评分完成: {len(target_scores)} 个标的", flush=True)
+        else:
+            print("   标的池为空或无可评分标的", flush=True)
+    except Exception as e:
+        print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
 
     try:
         from app.services.quant_lifecycle import PositionWatchStore

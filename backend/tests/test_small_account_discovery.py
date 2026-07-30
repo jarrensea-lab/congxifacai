@@ -104,7 +104,7 @@ def test_dynamic_small_account_candidates_rotate_from_live_fund_flow_rows():
 
     assert [item["code"] for item in rows] == ["000563", "000597"]
     assert rows[0]["source"] == "dynamic_fund_flow_discovery"
-    assert rows[0]["research_only"] is True
+    assert "research_only" not in rows[0]
     assert rows[0]["max_entry_price"] == 15.05
     assert rows[0]["market_evidence"]["net_flow_yuan"] == 125_000_000
     assert "动态资金流" in rows[0]["watch_reason"]
