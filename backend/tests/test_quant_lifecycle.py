@@ -1789,6 +1789,39 @@ def test_target_pool_batch_upsert_reuses_preloaded_map_without_reloading(
     assert original_load()["items"]["000001"]["source"] == "target_scoring"
 
 
+def test_target_pool_batch_upsert_persists_pool_kind(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+    payload = store.load()
+
+    assert store.upsert_targets(
+        [
+            {
+                "code": "600000",
+                "name": "中长线标的",
+                "status": "research_reference",
+                "pool_kind": "mid_long_term",
+                "source": "target_scoring",
+                "scoring_decision": full_score_decision(action="research_only"),
+            }
+        ],
+        payload=payload,
+    ) == 1
+    assert store.get("600000")["pool_kind"] == "mid_long_term"
+
+
+def test_long_horizon_upsert_defaults_to_mid_long_pool(tmp_path):
+    store = TargetPoolStore(tmp_path / "target_pool.json")
+
+    store.upsert_target(
+        code="600000",
+        name="中长线论文标的",
+        status="long_watch",
+        source="long_horizon",
+    )
+
+    assert store.get("600000")["pool_kind"] == "mid_long_term"
+
+
 def test_target_pool_cooldown_after_loss_is_durable_and_not_scan_active(tmp_path):
     store = TargetPoolStore(tmp_path / "target_pool.json")
     store.upsert_target(

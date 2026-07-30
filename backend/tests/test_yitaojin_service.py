@@ -95,6 +95,7 @@ def _service(
     bridge,
     *,
     write_enabled=True,
+    watchlist_write_enabled=False,
     monotonic_provider=None,
 ):
     from app.integrations.yitaojin.service import YitaojinSyncService
@@ -109,6 +110,8 @@ def _service(
     environment = {"CONGXI_YITAOJIN_ENABLED": "true"}
     if write_enabled:
         environment["CONGXI_YITAOJIN_WRITE_ENABLED"] = "true"
+    if watchlist_write_enabled:
+        environment["CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED"] = "true"
     service = YitaojinSyncService(
         bridge=bridge,
         state_store=state_store,
@@ -241,6 +244,27 @@ def test_watchlist_apply_requires_write_flag_before_any_ui_write(tmp_path):
     assert result.status == "blocked"
     assert result.reasons == ("write_disabled",)
     assert _write_commands(bridge) == []
+
+
+def test_watchlist_apply_accepts_watchlist_specific_write_flag(tmp_path):
+    """Catches the runtime-specific write gate being rejected by the service."""
+    bridge = FakeBridge()
+    service, _, account_path, pool_path = _service(
+        tmp_path,
+        bridge,
+        write_enabled=False,
+        watchlist_write_enabled=True,
+    )
+    _bootstrap(service, account_path, pool_path)
+    _write_pool(
+        pool_path,
+        items={"600000": {"code": "600000", "status": "watching"}},
+    )
+
+    result = service.sync_watchlist(apply=True)
+
+    assert result.status == "applied"
+    assert bridge.codes == {"600000"}
 
 
 def test_confirmed_add_becomes_system_managed(tmp_path):

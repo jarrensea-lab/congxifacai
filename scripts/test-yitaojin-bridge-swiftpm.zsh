@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
 OUTPUT_FILE="${1:?generated-source path is required}"
-EXPECTED_MARKER="49 Swift bridge checks passed"
+EXPECTED_MARKER="74 Swift bridge checks passed"
 
 export CONGXI_YITAOJIN_ENABLED=false
 export CONGXI_YITAOJIN_WRITE_ENABLED=false
@@ -24,7 +24,7 @@ if [[ "${SELF_TEST_OUTPUT}" != *"${EXPECTED_MARKER}"* ]]; then
 fi
 
 mkdir -p "${OUTPUT_FILE:h}"
-GENERATED_TMP="$(mktemp "${OUTPUT_FILE:h}/.YitaojinSafetyChecksPassed49.XXXXXX")"
+GENERATED_TMP="$(mktemp "${OUTPUT_FILE:h}/.YitaojinSafetyChecksPassed74.XXXXXX")"
 trap 'rm -f "${GENERATED_TMP}"' EXIT
 print -r -- '// Generated only after the existing bridge SelfTests pass.
 enum YitaojinSafetyCheckGenerated {}' \

@@ -124,6 +124,7 @@ async def lifespan(app: FastAPI):
             bot_poll=_poll_bot_messages,
             yitaojin_morning=_run_yitaojin_morning_with_status,
             yitaojin_quotes=_run_yitaojin_quotes_with_status,
+            yitaojin_close_account=_run_yitaojin_close_account_with_status,
             yitaojin_evening=_run_yitaojin_evening_with_status,
         ),
         logger=logger,
@@ -1108,6 +1109,10 @@ async def _run_yitaojin_morning_with_status():
 
 async def _run_yitaojin_evening_with_status():
     return await _run_yitaojin_task_with_status("evening")
+
+
+async def _run_yitaojin_close_account_with_status():
+    return await _run_yitaojin_task_with_status("close_account")
 
 
 async def _run_yitaojin_quotes_with_status(task: str = "priority_quotes"):

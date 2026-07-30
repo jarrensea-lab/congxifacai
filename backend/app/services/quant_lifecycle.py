@@ -563,6 +563,7 @@ class TargetPoolStore(CandidatePoolStore):
         code: str,
         name: str,
         status: str = "candidate",
+        pool_kind: str | None = None,
         source: str = "manual",
         evidence_ids: list[str] | None = None,
         current_long_evidence_ids: list[str] | None = None,
@@ -581,6 +582,7 @@ class TargetPoolStore(CandidatePoolStore):
             code=code,
             name=name,
             status=status,
+            pool_kind=pool_kind,
             source=source,
             evidence_ids=evidence_ids,
             current_long_evidence_ids=current_long_evidence_ids,
@@ -825,6 +827,7 @@ class TargetPoolStore(CandidatePoolStore):
         code: str,
         name: str,
         status: str = "candidate",
+        pool_kind: str | None = None,
         source: str = "manual",
         evidence_ids: list[str] | None = None,
         current_long_evidence_ids: list[str] | None = None,
@@ -892,11 +895,22 @@ class TargetPoolStore(CandidatePoolStore):
             *(existing.get("evidence_ids") or []),
             *(evidence_ids or []),
         ]))
+        resolved_pool_kind = (
+            pool_kind
+            or existing.get("pool_kind")
+            or (
+                "mid_long_term"
+                if source == "long_horizon"
+                or normalized_status in LONG_HORIZON_STATUSES
+                else "short_term"
+            )
+        )
         item = {
             **existing,
             "code": clean,
             "name": name or existing.get("name") or clean,
             "status": normalized_status,
+            "pool_kind": resolved_pool_kind,
             "source": source,
             "evidence": {**existing_evidence, **incoming_evidence},
             "evidence_ids": merged_evidence_ids,

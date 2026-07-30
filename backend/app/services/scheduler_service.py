@@ -27,6 +27,7 @@ class SchedulerJobHandlers:
     bot_poll: JobCallable
     yitaojin_morning: JobCallable
     yitaojin_quotes: JobCallable
+    yitaojin_close_account: JobCallable
     yitaojin_evening: JobCallable
 
 
@@ -117,6 +118,16 @@ CRON_JOBS = (
         5,
         "mon-fri",
         3600,
+    ),
+    _CronJob(
+        "yitaojin_close_account",
+        "yitaojin_close_account",
+        "易淘金收盘账户快照",
+        15,
+        10,
+        "mon-fri",
+        900,
+        True,
     ),
     _CronJob(
         "prediction_lab",

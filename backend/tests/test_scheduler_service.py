@@ -17,6 +17,7 @@ EXPECTED_JOB_IDS = {
     "yitaojin_morning",
     "yitaojin_midday_quotes",
     "yitaojin_close_quotes",
+    "yitaojin_close_account",
     "yitaojin_evening",
 }
 
@@ -66,6 +67,7 @@ def _handlers():
             "bot_poll",
             "yitaojin_morning",
             "yitaojin_quotes",
+            "yitaojin_close_account",
             "yitaojin_evening",
         )
     }
@@ -173,6 +175,7 @@ def test_scheduler_preserves_job_options_bot_interval_and_yitaojin_bounds():
         "yitaojin_morning": 300,
         "yitaojin_midday_quotes": 120,
         "yitaojin_close_quotes": 120,
+        "yitaojin_close_account": 900,
         "yitaojin_evening": 900,
     }
     assert {
@@ -187,6 +190,7 @@ def test_scheduler_preserves_job_options_bot_interval_and_yitaojin_bounds():
         "yitaojin_morning",
         "yitaojin_midday_quotes",
         "yitaojin_close_quotes",
+        "yitaojin_close_account",
         "yitaojin_evening",
     ):
         assert by_id[job_id][1]["max_instances"] == 1

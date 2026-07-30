@@ -82,6 +82,77 @@ def test_build_desired_codes_always_includes_real_holdings():
     assert desired == {"600000"}
 
 
+def test_build_desired_codes_includes_both_retained_pool_kinds():
+    """Both formal pools must reach the broker watchlist, regardless of trade status."""
+    from app.integrations.yitaojin.planner import build_desired_codes
+
+    desired = build_desired_codes(
+        {
+            "items": {
+                "000001": {
+                    "code": "000001",
+                    "status": "watching",
+                    "pool_kind": "short_term",
+                    "scoring_decision": {"pool_retained": True},
+                },
+                "600000": {
+                    "code": "600000",
+                    "status": "research_reference",
+                    "pool_kind": "mid_long_term",
+                    "scoring_decision": {"pool_retained": True},
+                },
+                "000002": {
+                    "code": "000002",
+                    "status": "watching",
+                    "pool_kind": "short_term",
+                    "scoring_decision": {"pool_retained": False},
+                },
+            }
+        },
+        [],
+    )
+
+    assert desired == {"000001", "600000"}
+
+
+def test_managed_hints_only_claim_codes_with_explicit_daily_pool_decisions():
+    from app.integrations.yitaojin.planner import build_managed_hint_codes
+
+    hints = build_managed_hint_codes(
+        {
+            "items": {
+                "000001": {
+                    "code": "000001",
+                    "pool_kind": "short_term",
+                    "scoring_decision": {"pool_retained": True},
+                },
+                "000629": {
+                    "code": "000629",
+                    "pool_kind": "short_term",
+                    "scoring_decision": {
+                        "pool_retained": False,
+                        "pool_previously_retained": True,
+                    },
+                },
+                "000002": {
+                    "code": "000002",
+                    "pool_kind": "short_term",
+                    "scoring_decision": {
+                        "pool_retained": False,
+                        "pool_previously_retained": False,
+                    },
+                },
+                "300002": {
+                    "code": "300002",
+                    "status": "research_reference",
+                },
+            }
+        }
+    )
+
+    assert hints == {"000001", "000629"}
+
+
 def test_plan_protects_unmanaged_current_codes_as_manual():
     """Catches an existing user watchlist item being treated as system-owned."""
     from app.integrations.yitaojin.planner import plan_watchlist_sync
@@ -121,6 +192,39 @@ def test_plan_never_removes_a_managed_holding():
     assert outcome.plan.remove == ()
     assert outcome.plan.keep == ("600000",)
     assert outcome.next_state.pending_removal_counts == {}
+
+
+def test_plan_adopts_scored_pool_code_without_claiming_other_manual_symbols():
+    """A previously formal-pool code can leave self-selected after two trusted exits."""
+    from app.integrations.yitaojin.planner import plan_watchlist_sync
+
+    first = plan_watchlist_sync(
+        desired_codes=set(),
+        current_codes={"000629", "300002"},
+        held_codes=set(),
+        managed_hint_codes={"000629"},
+        state=_state(
+            manual_protected_codes=("000629", "300002"),
+            successful_apply_count=3,
+        ),
+        allow_removals=True,
+        source_valid=True,
+    )
+    second = plan_watchlist_sync(
+        desired_codes=set(),
+        current_codes={"000629", "300002"},
+        held_codes=set(),
+        managed_hint_codes={"000629"},
+        state=first.next_state,
+        allow_removals=True,
+        source_valid=True,
+    )
+
+    assert first.plan.remove == ()
+    assert first.next_state.managed_codes == ("000629",)
+    assert first.next_state.manual_protected_codes == ("300002",)
+    assert second.plan.remove == ("000629",)
+    assert "300002" in second.plan.keep
 
 
 def test_plan_requires_two_post_warmup_confirmations_before_removal():

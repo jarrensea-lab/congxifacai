@@ -17,7 +17,7 @@ struct YitaojinSafetyCheckPlugin: BuildToolPlugin {
             .appending(path: "scripts", directoryHint: .isDirectory)
             .appending(path: "test-yitaojin-bridge.sh")
         let outputFile = context.pluginWorkDirectoryURL
-            .appending(path: "YitaojinSafetyChecksPassed49.swift")
+            .appending(path: "YitaojinSafetyChecksPassed74.swift")
         let sourceDirectories = [
             context.package.directoryURL
                 .appending(path: "Sources/YitaojinBridge", directoryHint: .isDirectory),
@@ -35,7 +35,7 @@ struct YitaojinSafetyCheckPlugin: BuildToolPlugin {
 
         return [
             .buildCommand(
-                displayName: "Verify 49 Swift bridge checks passed",
+                displayName: "Verify 74 Swift bridge checks passed",
                 executable: URL(fileURLWithPath: "/bin/zsh"),
                 arguments: [wrapper.path, outputFile.path],
                 inputFiles: [wrapper, selfTestScript] + sourceFiles.sorted {

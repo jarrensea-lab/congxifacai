@@ -179,7 +179,7 @@ async def test_disabled_runtime_returns_without_building_bridge_or_opening_app(
 
 
 @pytest.mark.asyncio
-async def test_morning_runtime_sequences_account_watchlist_then_quotes_off_loop(
+async def test_morning_runtime_sequences_watchlist_then_quotes_off_loop(
     tmp_path,
     monkeypatch,
 ):
@@ -209,17 +209,16 @@ async def test_morning_runtime_sequences_account_watchlist_then_quotes_off_loop(
     )
 
     assert result["state"] == "success"
-    assert [event[0] for event in events] == ["account", "watchlist", "quotes"]
-    assert events[0] == ("account", False, False)
-    assert events[1] == ("watchlist", False, False)
-    assert events[2][1] == ("600000",)
-    assert "sync_account" in off_loop_calls
+    assert [event[0] for event in events] == ["watchlist", "quotes"]
+    assert events[0] == ("watchlist", False, False)
+    assert events[1][1] == ("600000",)
+    assert "sync_account" not in off_loop_calls
     assert "sync_watchlist" in off_loop_calls
     assert "refresh" in off_loop_calls
 
 
 @pytest.mark.asyncio
-async def test_write_enabled_applies_account_and_watchlist(tmp_path):
+async def test_evening_task_only_applies_watchlist(tmp_path):
     from app.integrations.yitaojin.runtime import run_yitaojin_task
 
     events = []
@@ -236,10 +235,33 @@ async def test_write_enabled_applies_account_and_watchlist(tmp_path):
     )
 
     assert result["state"] == "success"
-    assert events == [
-        ("account", True, False),
-        ("watchlist", True, False),
-    ]
+    assert events == [("watchlist", True, False)]
+
+
+@pytest.mark.asyncio
+async def test_close_account_is_independent_and_uses_account_specific_write_gate(
+    tmp_path,
+):
+    from app.integrations.yitaojin.runtime import run_yitaojin_task
+
+    events = []
+    paths, services = _services(tmp_path, events)
+
+    result = await run_yitaojin_task(
+        "close_account",
+        environment={
+            "CONGXI_YITAOJIN_ENABLED": "true",
+            "CONGXI_YITAOJIN_WRITE_ENABLED": "false",
+            "CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED": "true",
+            "CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED": "false",
+        },
+        paths=paths,
+        services_factory=lambda *_: services,
+    )
+
+    assert result["state"] == "success"
+    assert result["task"] == "close_account"
+    assert events == [("account", True, False)]
 
 
 def test_app_start_uses_fixed_application_path_and_never_shell(monkeypatch):
@@ -369,11 +391,10 @@ async def test_runtime_failure_is_sanitized_and_preserves_last_success(tmp_path)
         }
     )
     failed = await run_yitaojin_task(
-        "morning",
+        "close_account",
         environment={"CONGXI_YITAOJIN_ENABLED": "true"},
         paths=paths,
         services_factory=lambda *_: failed_services,
-        market_source=_FakeMarket(),
     )
     persisted = load_yitaojin_runtime_status(
         paths.runtime_status,
@@ -390,6 +411,23 @@ async def test_runtime_failure_is_sanitized_and_preserves_last_success(tmp_path)
     serialized = json.dumps(persisted)
     assert "sha256:" + "a" * 64 not in serialized
     assert "total_assets" not in serialized
+
+
+def test_runtime_status_reports_specific_watchlist_write_enablement(tmp_path):
+    from app.integrations.yitaojin.runtime import load_yitaojin_runtime_status
+
+    status = load_yitaojin_runtime_status(
+        tmp_path / "missing.json",
+        environment={
+            "CONGXI_YITAOJIN_ENABLED": "true",
+            "CONGXI_YITAOJIN_WRITE_ENABLED": "false",
+            "CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED": "false",
+            "CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED": "true",
+        },
+    )
+
+    assert status["enabled"] is True
+    assert status["write_enabled"] is True
 
 
 @pytest.mark.asyncio
@@ -439,6 +477,7 @@ def test_scheduler_registers_bounded_jobs_without_second_intraday_cron():
         bot_poll=noop,
         yitaojin_morning=noop,
         yitaojin_quotes=noop,
+        yitaojin_close_account=noop,
         yitaojin_evening=noop,
     )
     scheduler = FakeScheduler()
@@ -452,6 +491,7 @@ def test_scheduler_registers_bounded_jobs_without_second_intraday_cron():
     assert "hour='8', minute='55'" in str(by_id["yitaojin_morning"][1])
     assert "hour='11', minute='35'" in str(by_id["yitaojin_midday_quotes"][1])
     assert "hour='14', minute='55'" in str(by_id["yitaojin_close_quotes"][1])
+    assert "hour='15', minute='10'" in str(by_id["yitaojin_close_account"][1])
     assert "hour='20', minute='45'" in str(by_id["yitaojin_evening"][1])
     assert all(item[2]["max_instances"] == 1 for item in by_id.values())
     assert all(item[2]["coalesce"] is True for item in by_id.values())
@@ -593,3 +633,17 @@ def test_runtime_paths_and_launchd_keep_integration_disabled_by_default(
         in launchd
     )
     assert "/Applications/GF-Trader.app" in launchd
+
+
+def test_user_launchd_enables_account_and_watchlist_specific_writes():
+    import plistlib
+
+    launchd_plist = plistlib.loads(Path(
+        "scripts/com.zhuchenyuan.congxicai-v7.plist"
+    ).read_bytes())
+    environment = launchd_plist["EnvironmentVariables"]
+
+    assert environment["CONGXI_YITAOJIN_ENABLED"] == "true"
+    assert environment["CONGXI_YITAOJIN_ACCOUNT_WRITE_ENABLED"] == "true"
+    assert environment["CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED"] == "true"
+    assert environment["CONGXI_YITAOJIN_WRITE_ENABLED"] == "false"

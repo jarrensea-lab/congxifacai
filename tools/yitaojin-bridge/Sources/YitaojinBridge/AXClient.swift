@@ -6,6 +6,57 @@ import Foundation
 final class AXClient {
     static let bundleIdentifier = "cn.com.gf.trader"
     static let expectedApplicationPath = "/Applications/GF-Trader.app"
+    static let snapshotMaxDepth = 24
+    static let snapshotNodeBudget = 7_500
+    static let rowChildLimit = 16
+    static let accountAssetNavigationAttempts = 2
+    static let accountHoldingsNavigationAttempts = 2
+    static let accountHoldingsPollCount = 5
+    static let accountAssetNavigationStages = [
+        ["我的"],
+        ["资产全景"],
+    ]
+    static let accountHoldingsNavigationStages = [
+        ["自选股", "自选"],
+        ["我的持仓"],
+    ]
+    static let watchlistNavigationStages = [
+        ["自选"],
+        ["自选股"],
+    ]
+    static let safeLoginIndicators = ["锁定账号"]
+    static let safeHoldingsLoginLabels = [
+        "普通持仓",
+        "可用数量",
+        "成本价",
+    ]
+
+    static func childTraversalAttributes(forRole role: String) -> [String] {
+        if role == "AXTable" {
+            return [
+                kAXVisibleRowsAttribute as String,
+                kAXRowsAttribute as String,
+                kAXChildrenAttribute as String,
+            ]
+        }
+        return [kAXChildrenAttribute as String]
+    }
+
+    static func navigationTextMatches(
+        _ value: String,
+        labels: [String]
+    ) -> Bool {
+        if labels.contains(value) {
+            return true
+        }
+        guard labels.contains("自选股") else {
+            return false
+        }
+        return value.range(
+            of: #"^自选股(?:\(\d+\))?$"#,
+            options: .regularExpression
+        ) != nil
+    }
 
     private let safetyPolicy = SafetyPolicy()
 
@@ -48,12 +99,39 @@ final class AXClient {
             )
         }
         do {
-            let snapshot = try applicationSnapshot()
+            let root = try applicationElement()
+            let trustedLogin = findElement(
+                in: root,
+                maxDepth: 10,
+                maxNodes: 1_000
+            ) { node in
+                Self.safeLoginIndicators.contains(where: node.text.contains)
+            } != nil
+            let snapshot = try snapshot(
+                root,
+                path: [],
+                depth: 0,
+                nodeBudget: NodeBudget(remaining: Self.snapshotNodeBudget)
+            )
+            var detectedLoginState = trustedLogin
+                ? "logged_in"
+                : loginState(from: snapshot)
+            if detectedLoginState != "logged_in",
+                let holdings = try? snapshotAfterNavigation(
+                    stages: Self.accountHoldingsNavigationStages,
+                    settleSeconds: 0.5
+                ),
+                Self.safeHoldingsLoginLabels.allSatisfy(
+                    holdings.combinedText.contains
+                )
+            {
+                detectedLoginState = "logged_in"
+            }
             return ProbeData(
                 appRunning: true,
                 applicationPathValid: true,
                 accessibilityTrusted: true,
-                loginState: loginState(from: snapshot),
+                loginState: detectedLoginState,
                 interfaceSignature: interfaceSignature(snapshot)
             )
         } catch {
@@ -88,7 +166,14 @@ final class AXClient {
             root,
             path: [],
             depth: 0,
-            nodeBudget: NodeBudget(remaining: 2_500)
+            nodeBudget: NodeBudget(remaining: Self.snapshotNodeBudget)
+        )
+    }
+
+    func snapshotForWatchlist() throws -> AXSnapshotNode {
+        try snapshotAfterNavigation(
+            stages: Self.watchlistNavigationStages,
+            settleSeconds: 0.5
         )
     }
 
@@ -97,31 +182,127 @@ final class AXClient {
             applicationElement(),
             path: [],
             depth: 0,
-            nodeBudget: NodeBudget(remaining: 2_500)
+            nodeBudget: NodeBudget(remaining: Self.snapshotNodeBudget)
         )
+    }
+
+    func snapshotForAccount() throws -> AXSnapshotNode {
+        var assets: AXSnapshotNode?
+        for attempt in 0 ..< Self.accountAssetNavigationAttempts {
+            var candidate = try snapshotAfterNavigation(
+                stages: Self.accountAssetNavigationStages,
+                settleSeconds: attempt == 0 ? 1.5 : 2.5
+            )
+            for _ in 0 ..< 3 where !candidate.combinedText.contains("总资产")
+                && !candidate.combinedText.contains("页面加载失败")
+            {
+                Thread.sleep(forTimeInterval: 1.0)
+                candidate = try applicationSnapshot()
+            }
+            if candidate.combinedText.contains("页面加载失败") {
+                let root = try applicationElement()
+                if let reload = safeNavigationAction(
+                    in: root,
+                    labels: ["重新加载"],
+                    maxDepth: Self.snapshotMaxDepth,
+                    maxNodes: Self.snapshotNodeBudget
+                ) {
+                    try safetyPolicy.assertReadable(path: [reload.label])
+                    try press(reload.target)
+                }
+                Thread.sleep(forTimeInterval: 2.5)
+                candidate = try applicationSnapshot()
+            }
+            assets = candidate
+            if candidate.combinedText.contains("总资产") {
+                break
+            }
+        }
+        guard let assets, assets.combinedText.contains("总资产") else {
+            throw BridgeFailure(
+                "account_page_incomplete",
+                "The read-only account overview did not expose required totals"
+            )
+        }
+        var holdings: AXSnapshotNode?
+        for attempt in 0 ..< Self.accountHoldingsNavigationAttempts {
+            var candidate = try snapshotAfterNavigation(
+                stages: Self.accountHoldingsNavigationStages,
+                settleSeconds: attempt == 0 ? 0.8 : 1.5
+            )
+            for _ in 0 ..< Self.accountHoldingsPollCount
+                where !Self.holdingsSnapshotReady(candidate)
+            {
+                Thread.sleep(forTimeInterval: 1.0)
+                candidate = try applicationSnapshot()
+            }
+            holdings = candidate
+            if Self.holdingsSnapshotReady(candidate) {
+                break
+            }
+        }
+        guard let holdings else {
+            throw BridgeFailure(
+                "account_holdings_incomplete",
+                "The read-only holdings page did not expose a snapshot"
+            )
+        }
+        return AXSnapshotNode(
+            summary: AXNodeSummary(
+                role: "AXGroup",
+                title: "易淘金账户",
+                label: nil,
+                value: nil
+            ),
+            children: [assets, holdings]
+        )
+    }
+
+    private static func holdingsSnapshotReady(
+        _ snapshot: AXSnapshotNode
+    ) -> Bool {
+        let text = snapshot.combinedText
+        let populated = Self.safeHoldingsLoginLabels.allSatisfy(
+            text.contains
+        ) && !YitaojinReader.stockCodes(in: text).isEmpty
+        return populated
+            || text.contains("暂无持仓")
+            || text.contains("持仓数量 0")
     }
 
     private func navigateToWatchlist() throws -> (
         root: AXUIElement,
         navigation: AXNodeSummary
     ) {
-        let root = try applicationElement()
-        guard let navigation = findNavigationElement(
-            in: root,
-            labels: ["自选股", "自选"],
-            maxDepth: 10,
-            maxNodes: 1_500
-        ) else {
+        var navigationSummary: AXNodeSummary?
+        for labels in Self.watchlistNavigationStages {
+            let root = try applicationElement()
+            guard let action = safeNavigationAction(
+                in: root,
+                labels: labels,
+                maxDepth: 14,
+                maxNodes: 2_500
+            ) else {
+                throw BridgeFailure(
+                    "watchlist_page_unavailable",
+                    "The self-selected list navigation target is unavailable"
+                )
+            }
+            try safetyPolicy.assertReadable(path: [action.label])
+            try press(action.target)
+            Thread.sleep(forTimeInterval: 0.5)
+            navigationSummary = action.label
+        }
+        guard let navigationSummary else {
             throw BridgeFailure(
                 "watchlist_page_unavailable",
                 "The self-selected list navigation target is unavailable"
             )
         }
-        let navigationSummary = summary(of: navigation)
-        try safetyPolicy.assertReadable(path: [navigationSummary])
-        try press(navigation)
-        Thread.sleep(forTimeInterval: 0.35)
-        return (root: root, navigation: navigationSummary)
+        return (
+            root: try applicationElement(),
+            navigation: navigationSummary
+        )
     }
 
     private func findSearchField(in root: AXUIElement) -> AXUIElement? {
@@ -238,7 +419,12 @@ final class AXClient {
 
     private func loginState(from snapshot: AXSnapshotNode) -> String {
         let text = snapshot.combinedText
-        if text.contains("总资产") || text.contains("可用资金") || text.contains("我的持仓") {
+        if text.contains("退出交易账号")
+            || text.contains("锁定账号")
+            || text.contains("总资产")
+            || text.contains("可用资金")
+            || text.contains("我的持仓")
+        {
             return "logged_in"
         }
         if text.contains("登录") || text.contains("账号登录") {
@@ -276,6 +462,63 @@ final class AXClient {
             return exactTexts.contains(where: labels.contains)
                 && hasPressableRole(node)
         }
+    }
+
+    private func snapshotAfterNavigation(
+        stages: [[String]],
+        settleSeconds: TimeInterval
+    ) throws -> AXSnapshotNode {
+        for labels in stages {
+            let root = try applicationElement()
+            guard let action = safeNavigationAction(
+                in: root,
+                labels: labels,
+                maxDepth: 14,
+                maxNodes: 2_500
+            ) else {
+                throw BridgeFailure(
+                    "page_navigation_unavailable",
+                    "No exact labeled safe page navigation target is available"
+                )
+            }
+            try safetyPolicy.assertReadable(path: [action.label])
+            try press(action.target)
+            Thread.sleep(forTimeInterval: settleSeconds)
+        }
+        return try applicationSnapshot()
+    }
+
+    private func safeNavigationAction(
+        in root: AXUIElement,
+        labels: [String],
+        maxDepth: Int,
+        maxNodes: Int
+    ) -> (target: AXUIElement, label: AXNodeSummary)? {
+        let matches = findElements(
+            in: root,
+            maxDepth: maxDepth,
+            maxNodes: maxNodes
+        ) { node in
+            [node.title, node.label, node.value]
+                .compactMap { $0 }
+                .contains {
+                    Self.navigationTextMatches($0, labels: labels)
+                }
+        }
+        for match in matches {
+            let label = summary(of: match)
+            var target: AXUIElement? = match
+            for _ in 0 ..< 3 {
+                guard let candidate = target else {
+                    break
+                }
+                if supportsPress(candidate) {
+                    return (target: candidate, label: label)
+                }
+                target = parent(of: candidate)
+            }
+        }
+        return nil
     }
 
     private func hasPressableRole(_ node: AXNodeSummary) -> Bool {
@@ -354,13 +597,24 @@ final class AXClient {
         }
     }
 
+    private func supportsPress(_ element: AXUIElement) -> Bool {
+        var rawActions: CFArray?
+        guard
+            AXUIElementCopyActionNames(element, &rawActions) == .success,
+            let actions = rawActions as? [String]
+        else {
+            return false
+        }
+        return actions.contains(kAXPressAction as String)
+    }
+
     private func snapshot(
         _ element: AXUIElement,
         path: [AXNodeSummary],
         depth: Int,
         nodeBudget: NodeBudget
     ) throws -> AXSnapshotNode {
-        guard depth <= 14 else {
+        guard depth <= Self.snapshotMaxDepth else {
             return AXSnapshotNode(summary: summary(of: element), children: [])
         }
         guard nodeBudget.take() else {
@@ -397,18 +651,30 @@ final class AXClient {
     }
 
     private func children(of element: AXUIElement) -> [AXUIElement] {
-        var rawValue: CFTypeRef?
-        guard
-            AXUIElementCopyAttributeValue(
-                element,
-                kAXChildrenAttribute as CFString,
-                &rawValue
-            ) == .success,
-            let children = rawValue as? [AXUIElement]
-        else {
-            return []
+        let role = stringAttribute(element, kAXRoleAttribute) ?? "AXUnknown"
+        var result: [AXUIElement] = []
+        for attribute in Self.childTraversalAttributes(forRole: role) {
+            var rawValue: CFTypeRef?
+            guard
+                AXUIElementCopyAttributeValue(
+                    element,
+                    attribute as CFString,
+                    &rawValue
+                ) == .success,
+                let children = rawValue as? [AXUIElement]
+            else {
+                continue
+            }
+            for child in children where !result.contains(
+                where: { CFEqual($0, child) }
+            ) {
+                result.append(child)
+            }
         }
-        return children
+        if role == "AXRow" {
+            return Array(result.prefix(Self.rowChildLimit))
+        }
+        return result
     }
 
     private func parent(of element: AXUIElement) -> AXUIElement? {
@@ -453,7 +719,7 @@ final class AXClient {
 
 extension AXClient: WatchlistUiClient {
     func readWatchlistCodes() throws -> Set<String> {
-        let snapshot = try snapshotForPage(labels: ["自选股", "自选"])
+        let snapshot = try snapshotForWatchlist()
         return Set(YitaojinReader.parseWatchlist(from: snapshot).codes)
     }
 

@@ -8,8 +8,8 @@ swift test --package-path tools/yitaojin-bridge
 ```
 
 正式、无测试框架依赖的 test target 通过确定性的 build-tool gate 调用唯一的
-49 项 `SelfTests`。所有声明输入均未变化时，SwiftPM 可能复用上次成功结果。
-需要无条件重新执行全部 49 项检查时，运行：
+74 项 `SelfTests`。所有声明输入均未变化时，SwiftPM 可能复用上次成功结果。
+需要无条件重新执行全部 74 项检查时，运行：
 
 ```zsh
 zsh scripts/test-yitaojin-bridge.sh

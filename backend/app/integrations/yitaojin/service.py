@@ -24,6 +24,7 @@ from app.integrations.yitaojin.models import (
 )
 from app.integrations.yitaojin.planner import (
     build_desired_codes,
+    build_managed_hint_codes,
     plan_watchlist_sync,
     validate_candidate_pool_freshness,
 )
@@ -115,7 +116,10 @@ class YitaojinSyncService:
                 mode=mode,
                 input_payload={},
             )
-        if apply and not self._enabled("CONGXI_YITAOJIN_WRITE_ENABLED"):
+        if apply and not (
+            self._enabled("CONGXI_YITAOJIN_WRITE_ENABLED")
+            or self._enabled("CONGXI_YITAOJIN_WATCHLIST_WRITE_ENABLED")
+        ):
             return self._result(
                 status="blocked",
                 reasons=("write_disabled",),
@@ -212,6 +216,7 @@ class YitaojinSyncService:
         try:
             current = self._read_watchlist()
             desired = build_desired_codes(pool, account.positions)
+            managed_hints = build_managed_hint_codes(pool)
         except (YitaojinError, SnapshotValidationError) as exc:
             return self._result(
                 status="blocked",
@@ -227,6 +232,7 @@ class YitaojinSyncService:
             desired_codes=desired,
             current_codes=current,
             held_codes=held,
+            managed_hint_codes=managed_hints,
             state=state,
             allow_removals=state.successful_apply_count >= 3,
             source_valid=True,

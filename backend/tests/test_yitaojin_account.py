@@ -31,6 +31,19 @@ class FailingBridge:
         raise self.error
 
 
+class FlakyBridge:
+    def __init__(self, error, payload: dict):
+        self.error = error
+        self.payload = payload
+        self.calls = []
+
+    def run(self, command, payload=None, *, timeout=15.0):
+        self.calls.append((command, payload, timeout))
+        if len(self.calls) == 1:
+            raise self.error
+        return deepcopy(self.payload)
+
+
 def _valid_payload() -> dict:
     return json.loads(
         (FIXTURE_ROOT / "account_snapshot_valid.json").read_text(encoding="utf-8")
@@ -87,6 +100,7 @@ def test_account_dry_run_bootstrap_writes_isolated_snapshot_not_portfolio(tmp_pa
 
     assert result.status == "validated"
     assert result.applied is False
+    assert service.bridge.calls[0][2] == 45.0
     assert json.loads(portfolio_path.read_text(encoding="utf-8")) == original
     assert (tmp_path / "account.json").exists()
     salt_path = tmp_path / "fingerprint-salt"
@@ -149,6 +163,27 @@ def test_account_sync_converts_login_failure_to_blocked_result(tmp_path):
 
     assert result.status == "blocked"
     assert result.reasons == ("AppNotLoggedInError",)
+    assert json.loads(portfolio_path.read_text(encoding="utf-8")) == original
+
+
+def test_account_sync_retries_one_transient_bridge_failure(tmp_path):
+    """Catches the first read-only page load miss aborting the close snapshot."""
+    from app.integrations.yitaojin.models import BridgeUnavailableError
+
+    portfolio_path = tmp_path / "portfolio.json"
+    original = _portfolio()
+    portfolio_path.write_text(json.dumps(original), encoding="utf-8")
+    bridge = FlakyBridge(
+        BridgeUnavailableError("account page incomplete"),
+        _valid_payload(),
+    )
+    service = _service(tmp_path, bridge, portfolio_path)
+
+    result = service.sync_account(apply=False, bootstrap=True)
+
+    assert result.status == "validated"
+    assert len(bridge.calls) == 2
+    assert all(call[2] == 45.0 for call in bridge.calls)
     assert json.loads(portfolio_path.read_text(encoding="utf-8")) == original
 
 
