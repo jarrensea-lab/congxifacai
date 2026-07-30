@@ -780,6 +780,9 @@ def build_default_pipeline() -> OpportunityPipeline:
     return OpportunityPipeline(
         discovery_source=market_source,
         snapshot_builder=snapshot_builder,
+        max_candidates=int(
+            os.getenv("CONGXI_OPPORTUNITY_MAX_CANDIDATES", "30")
+        ),
         run_store=PipelineRunStore(resolve_runtime_pipeline_db_path()),
         artifact_dir=state_dir / "pipeline_artifacts",
         lifecycle_applier=apply_lifecycle,

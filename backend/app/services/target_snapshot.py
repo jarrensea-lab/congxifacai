@@ -13,6 +13,23 @@ def _missing(reason: str, **payload: Any) -> dict[str, Any]:
     return {"status": "missing", "reason": reason, **payload}
 
 
+def normalize_optional_evidence(payload: Any) -> dict[str, Any]:
+    """Keep explicit source health and reject empty placeholders as healthy."""
+    if payload in (None, {}, []):
+        return _missing("empty_payload")
+    if isinstance(payload, dict):
+        status = str(payload.get("status") or "").strip().lower()
+        if status in {"failed", "stale", "missing"}:
+            return dict(payload)
+        cleaned = {key: value for key, value in payload.items() if key != "status"}
+        if not any(value not in (None, "", {}, []) for value in cleaned.values()):
+            return _missing("empty_payload")
+        return _ok(**cleaned)
+    if isinstance(payload, list):
+        return _ok(items=payload)
+    return _missing("unsupported_payload")
+
+
 async def _call(coro: Awaitable[Any], fallback: Any) -> Any:
     try:
         return await coro
@@ -142,6 +159,6 @@ async def build_target_snapshot(
         else:
             snapshot["financial"] = _missing("financial_not_found")
 
-    snapshot["sentinel"] = _ok(**sentinel) if isinstance(sentinel, dict) else _missing("sentinel_evidence_missing")
-    snapshot["serenity"] = _ok(**serenity) if isinstance(serenity, dict) else _missing("serenity_report_missing")
+    snapshot["sentinel"] = normalize_optional_evidence(sentinel)
+    snapshot["serenity"] = normalize_optional_evidence(serenity)
     return snapshot

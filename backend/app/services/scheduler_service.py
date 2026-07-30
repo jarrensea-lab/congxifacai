@@ -6,6 +6,8 @@ from typing import Any, Callable
 
 from apscheduler.triggers.cron import CronTrigger
 
+from app.version import PRODUCT_VERSION
+
 
 JobCallable = Callable[..., Any]
 MARKET_TIMEZONE = "Asia/Shanghai"
@@ -270,7 +272,7 @@ def start_scheduler_service(
             pass
     if logger is not None:
         logger.info(
-            "恭喜发财 v9.0.0-dev 调度器已启动 "
+            f"恭喜发财 {PRODUCT_VERSION} 调度器已启动 "
             "(次日主报告 + 断点恢复 + 交付验真 + 盘前校准 + 盘中5分钟事件扫描 + "
             "预测账本 + Sentinel研究/复盘 + 易淘金受控桥接 + Bot轮询)"
         )

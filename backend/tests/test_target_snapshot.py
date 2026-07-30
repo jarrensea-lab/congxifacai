@@ -87,3 +87,20 @@ async def test_build_target_snapshot_uses_quote_name_when_pool_name_is_code():
     )
 
     assert snapshot["name"] == "测试标的"
+
+
+def test_empty_research_payload_is_missing_not_ok():
+    from app.services.target_snapshot import normalize_optional_evidence
+
+    assert normalize_optional_evidence({}) == {
+        "status": "missing",
+        "reason": "empty_payload",
+    }
+    assert normalize_optional_evidence([]) == {
+        "status": "missing",
+        "reason": "empty_payload",
+    }
+    assert normalize_optional_evidence({"status": "ok"})["status"] == "missing"
+    assert normalize_optional_evidence(
+        {"status": "stale", "reason": "expired"}
+    ) == {"status": "stale", "reason": "expired"}
