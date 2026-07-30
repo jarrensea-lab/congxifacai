@@ -30,6 +30,18 @@ def _number(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def _money_yuan(value: Any) -> float:
+    text = str(value or "").strip().replace(",", "")
+    multiplier = 1.0
+    if text.endswith("亿"):
+        text = text[:-1]
+        multiplier = 100_000_000
+    elif text.endswith("万"):
+        text = text[:-1]
+        multiplier = 10_000
+    return _number(text) * multiplier
+
+
 def _source_status(payload: Any) -> str:
     if not isinstance(payload, dict) or not payload:
         return "missing"
@@ -83,10 +95,26 @@ def _fund_flow(snapshot: dict[str, Any]) -> tuple[float, str, str]:
         else {}
     )
     status = _source_status(payload)
+    lhb = snapshot.get("lhb") if isinstance(snapshot.get("lhb"), dict) else {}
+    big_deals = (
+        snapshot.get("big_deals")
+        if isinstance(snapshot.get("big_deals"), dict)
+        else {}
+    )
+    lhb_positive = (
+        _source_status(lhb) == "ok"
+        and _money_yuan(lhb.get("net")) > 0
+    )
+    big_deal_buying = (
+        _source_status(big_deals) == "ok"
+        and "买" in str(big_deals.get("direction") or "")
+    )
     if status != "ok":
+        if lhb_positive or big_deal_buying:
+            return 14.0, "个股资金流缺失，但龙虎榜或大单买盘提供补充确认", "ok"
         return 0.0, "个股资金流缺失", status
     text = " ".join(str(value) for value in payload.values())
-    net = _number(
+    net = _money_yuan(
         payload.get("main_net_amount_wan")
         or payload.get("main_net_wan")
         or payload.get("net_amount_wan")
@@ -97,6 +125,10 @@ def _fund_flow(snapshot: dict[str, Any]) -> tuple[float, str, str]:
     if "收敛" in text:
         return 14.0, "资金流出正在收敛，尚需继续确认", "ok"
     if "净流出" in text or net < 0:
+        if lhb_positive and big_deal_buying:
+            return 18.0, "日内资金偏弱，但龙虎榜净买入与大单买盘形成交叉确认", "ok"
+        if lhb_positive or big_deal_buying:
+            return 12.0, "日内资金偏弱，但龙虎榜或大单买盘提供部分确认", "ok"
         return 0.0, "主动资金仍在净流出", "ok"
     return 10.0, "资金流数据可用但方向不够明确", "ok"
 

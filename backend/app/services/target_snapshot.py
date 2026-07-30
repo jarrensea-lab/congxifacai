@@ -52,6 +52,24 @@ def _match_by_code(rows: Any, code: str) -> dict[str, Any] | None:
     return None
 
 
+def _match_by_code_or_name(
+    rows: Any,
+    code: str,
+    name: str,
+) -> dict[str, Any] | None:
+    if not isinstance(rows, list):
+        return None
+    clean_name = str(name or "").strip()
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("code", "")).strip() == code:
+            return row
+        if clean_name and str(row.get("name", "")).strip() == clean_name:
+            return row
+    return None
+
+
 async def build_target_snapshot(
     code: str,
     *,
@@ -105,6 +123,8 @@ async def build_target_snapshot(
     if market_source is None:
         snapshot["fund_flow"] = _missing("market_source_missing")
         snapshot["northbound"] = _missing("market_source_missing")
+        snapshot["lhb"] = _missing("market_source_missing")
+        snapshot["big_deals"] = _missing("market_source_missing")
     else:
         if hasattr(market_source, "fetch_fund_flow_individual"):
             flows = await _call(market_source.fetch_fund_flow_individual(), [])
@@ -130,6 +150,43 @@ async def build_target_snapshot(
                 snapshot["northbound"] = _missing("northbound_not_found")
         else:
             snapshot["northbound"] = _missing("northbound_method_missing")
+
+        if hasattr(market_source, "fetch_lhb_stats"):
+            lhb_rows = await _call(market_source.fetch_lhb_stats(), [])
+            error = _extract_error(lhb_rows)
+            matched_lhb = _match_by_code_or_name(
+                lhb_rows,
+                clean_code,
+                str(snapshot.get("name") or name),
+            )
+            if error:
+                snapshot["lhb"] = _missing("lhb_fetch_failed", error=error)
+            elif matched_lhb:
+                snapshot["lhb"] = _ok(**matched_lhb)
+            else:
+                snapshot["lhb"] = _missing("lhb_not_found")
+        else:
+            snapshot["lhb"] = _missing("lhb_method_missing")
+
+        if hasattr(market_source, "fetch_big_deals"):
+            big_deal_rows = await _call(market_source.fetch_big_deals(), [])
+            error = _extract_error(big_deal_rows)
+            matched_big_deal = _match_by_code_or_name(
+                big_deal_rows,
+                clean_code,
+                str(snapshot.get("name") or name),
+            )
+            if error:
+                snapshot["big_deals"] = _missing(
+                    "big_deals_fetch_failed",
+                    error=error,
+                )
+            elif matched_big_deal:
+                snapshot["big_deals"] = _ok(**matched_big_deal)
+            else:
+                snapshot["big_deals"] = _missing("big_deals_not_found")
+        else:
+            snapshot["big_deals"] = _missing("big_deals_method_missing")
 
     if news_source is None or not hasattr(news_source, "fetch_stock_news"):
         snapshot["news"] = _missing("news_source_missing")

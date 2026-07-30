@@ -61,6 +61,14 @@ def _stored_score(item: dict[str, Any] | None) -> float:
 def _lifecycle_only_scorecards(discovery: dict[str, Any]) -> list[dict[str, Any]]:
     rejected = discovery.get("rejected")
     rejected = rejected if isinstance(rejected, dict) else {}
+    metrics = discovery.get("metrics")
+    metrics = metrics if isinstance(metrics, dict) else {}
+    scanned_count = int(metrics.get("scanned_count") or 0)
+    universe_label = (
+        f"全市场{scanned_count}只清单"
+        if scanned_count > 0
+        else "全市场清单"
+    )
     rows: list[dict[str, Any]] = []
     for item in rejected.get("priority_budget_blocked") or []:
         rows.append({
@@ -81,9 +89,12 @@ def _lifecycle_only_scorecards(discovery: dict[str, Any]) -> list[dict[str, Any]
             "name": str(item.get("name") or item.get("code") or "").strip(),
             "score": 0,
             "grade": "C",
-            "action": "watch",
-            "block_reason": "missing_required_data",
-            "decision_reason": "今日全市场数据中未找到该标的，不能维持原操作级别",
+            "action": "remove",
+            "block_reason": "not_in_market_universe",
+            "decision_reason": (
+                f"今日{universe_label}中未找到该代码，"
+                "按无效或不可交易标的自动剔除"
+            ),
             "lifecycle_only": True,
             "discovery_source": "target_pool_daily_refresh",
         })
@@ -121,11 +132,15 @@ def apply_scorecard_lifecycle(
             else {}
         )
         previous_streak = int(previous_decision.get("below_retention_streak") or 0)
+        action = str(scorecard.get("action") or "").strip().lower()
         if previous is None and (
             score < 65 or block_reason == "long_thesis_broken"
         ):
             continue
-        if block_reason == "long_thesis_broken":
+        if (
+            block_reason in {"long_thesis_broken", "not_in_market_universe"}
+            or action in {"remove", "removed"}
+        ):
             status = "removed"
             streak = max(1, previous_streak + 1)
         elif score < 65:
@@ -137,7 +152,6 @@ def apply_scorecard_lifecycle(
                 scorecard["block_reason"] = "score_below_retention_threshold"
         else:
             streak = 0
-            action = str(scorecard.get("action") or "").strip().lower()
             status = (
                 "executable"
                 if action in {"buy", "add", "actionable", "executable"}
@@ -719,6 +733,10 @@ class OpportunityPipeline:
                     else:
                         value = await _resolve(self.lifecycle_applier(input_value))
                 elif stage_name == "report_render":
+                    context.setdefault(
+                        "health",
+                        {"status": "succeeded", "error_code": ""},
+                    )
                     input_value = self._result(run_id, context)
                     if self.renderer is None:
                         from scripts.daily_report import build_v9_opportunity_section
@@ -1004,8 +1022,12 @@ def build_default_pipeline() -> OpportunityPipeline:
             self.client = AKShareMarketClient()
             self.fund_flows = None
             self.northbound = None
+            self.lhb = None
+            self.big_deals = None
             self.fund_flow_lock = asyncio.Lock()
             self.northbound_lock = asyncio.Lock()
+            self.lhb_lock = asyncio.Lock()
+            self.big_deals_lock = asyncio.Lock()
 
         async def fetch_fund_flow_individual(self):
             if not self.fund_flows:
@@ -1022,6 +1044,20 @@ def build_default_pipeline() -> OpportunityPipeline:
                     if self.northbound is None:
                         self.northbound = await self.client.fetch_hsgt_flow()
             return self.northbound
+
+        async def fetch_lhb_stats(self):
+            if self.lhb is None:
+                async with self.lhb_lock:
+                    if self.lhb is None:
+                        self.lhb = await self.client.fetch_lhb_stats()
+            return self.lhb
+
+        async def fetch_big_deals(self):
+            if self.big_deals is None:
+                async with self.big_deals_lock:
+                    if self.big_deals is None:
+                        self.big_deals = await self.client.fetch_big_deals()
+            return self.big_deals
 
     market_source = CachedMarketSource()
     quote_source = FastRealtimeMarketDataSource()

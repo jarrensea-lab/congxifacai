@@ -56,6 +56,32 @@ async def test_fetch_fund_flow_individual_normalizes_unpadded_stock_codes(monkey
 
 
 @pytest.mark.asyncio
+async def test_fetch_lhb_stats_normalizes_unpadded_stock_codes(monkeypatch):
+    pd = pytest.importorskip("pandas")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "akshare",
+        SimpleNamespace(
+            stock_lhb_ggtj_sina=lambda: pd.DataFrame([
+                {
+                    "股票代码": 2131,
+                    "股票名称": "利欧股份",
+                    "上榜次数": 2,
+                    "累积购买额": "1亿",
+                    "累积卖出额": "6400万",
+                    "净额": "3600万",
+                }
+            ])
+        ),
+    )
+
+    rows = await AKShareMarketClient().fetch_lhb_stats()
+
+    assert rows[0]["code"] == "002131"
+
+
+@pytest.mark.asyncio
 async def test_fetch_fund_flow_individual_reuses_one_client_snapshot(monkeypatch):
     pd = pytest.importorskip("pandas")
     calls = 0

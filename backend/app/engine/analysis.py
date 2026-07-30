@@ -50,6 +50,9 @@ async def run_analysis(market_data: dict) -> dict:
         "total_assets": market_data.get("total_assets", 0),
         "strategy_profile": market_data.get("strategy_profile", {}),
         "news": market_data.get("news", []),
+        "sectors": market_data.get("sectors", []),
+        "lhb": market_data.get("lhb", []),
+        "big_deals": market_data.get("big_deals", []),
         "sentinel_evidence": market_data.get("sentinel_evidence", ""),
     }
 
@@ -103,9 +106,13 @@ async def _analyze_fundamental(data: dict) -> dict:
 async def _analyze_capital_flow(data: dict) -> dict:
     """资金面分析 → qwen3.5:9b (本地)"""
     sectors = json.dumps(data.get("sectors", []), ensure_ascii=False)
+    lhb = json.dumps(data.get("lhb", []), ensure_ascii=False)
+    big_deals = json.dumps(data.get("big_deals", []), ensure_ascii=False)
     prompt = f"""你是一位资金面分析师。请基于以下数据分析资金流向。
 
 板块资金: {sectors}
+龙虎榜: {lhb}
+大单追踪: {big_deals}
 
 请输出 JSON:
 {{

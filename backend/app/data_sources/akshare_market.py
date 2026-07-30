@@ -241,7 +241,7 @@ class AKShareMarketClient:
             results = []
             for _, row in df.head(20).iterrows():
                 results.append({
-                    'code': str(row.get('股票代码', '')),
+                    'code': _normalize_stock_code(row.get('股票代码', '')),
                     'name': str(row.get('股票名称', '')),
                     'count': str(row.get('上榜次数', '')),
                     'buy': str(row.get('累积购买额', '')),

@@ -37,6 +37,7 @@ from app.services.market_data_health import (
     EXPECTED_MARKET_INDEX_CODES,
     aggregate_market_quote_truth,
     is_recent_market_cutoff,
+    parse_aware_market_timestamp,
 )
 from app.services.sentinel_input_gate import (
     classify_sentinel_package as _sentinel_package_freshness,
@@ -321,6 +322,44 @@ def load_sentinel_research_package(report_date: str) -> dict | None:
     )
 
 
+async def _fetch_quotes_with_recovery(
+    source,
+    codes: list[str],
+    *,
+    max_attempts: int = 3,
+    sleeper=asyncio.sleep,
+) -> dict[str, dict]:
+    """Retry missing batch quotes, then recover remaining symbols individually."""
+    ordered_codes = list(dict.fromkeys(str(code) for code in codes if code))
+    quotes: dict[str, dict] = {}
+    pending = ordered_codes
+    for attempt in range(max(1, int(max_attempts))):
+        try:
+            batch = await source.fetch_batch(pending)
+        except Exception:
+            batch = {}
+        if isinstance(batch, dict):
+            quotes.update(
+                (code, item)
+                for code, item in batch.items()
+                if code in pending and isinstance(item, dict) and item.get("price")
+            )
+        pending = [code for code in ordered_codes if code not in quotes]
+        if not pending:
+            return quotes
+        if attempt + 1 < max_attempts:
+            await sleeper(0.2 * (attempt + 1))
+
+    for code in pending:
+        try:
+            item = await source.fetch(code)
+        except Exception:
+            item = None
+        if isinstance(item, dict) and item.get("price"):
+            quotes[code] = item
+    return quotes
+
+
 def _role_excerpt(role_data: dict) -> str:
     for key in ("analysis", "reasoning", "strategy", "position_advice"):
         value = role_data.get(key)
@@ -497,13 +536,20 @@ def build_data_source_audit(
         data_cutoff,
         now=datetime.now().astimezone(),
     )
+    parsed_cutoff = parse_aware_market_timestamp(data_cutoff)
+    official_close_valid = (
+        freshness_status == "valid_close"
+        and parsed_cutoff is not None
+        and parsed_cutoff.date().isoformat() == str(report_date or "")
+    )
+    cutoff_acceptable = cutoff_recent or official_close_valid
     market_ok = (
         market_status.get("status") == "ok"
         and index_keys_complete
         and coverage_complete
         and source_lists_complete
-        and freshness_status in {"fresh", "ok"}
-        and cutoff_recent
+        and freshness_status in {"fresh", "ok", "valid_close"}
+        and cutoff_acceptable
     )
     if market_ok:
         market_detail = (
@@ -527,9 +573,9 @@ def build_data_source_audit(
             failure_reasons.append("missing_or_rejected_sources")
         if not data_cutoff:
             failure_reasons.append("data_cutoff_missing")
-        elif not cutoff_recent:
+        elif not cutoff_acceptable:
             failure_reasons.append("data_cutoff_stale_or_invalid")
-        if freshness_status not in {"fresh", "ok"}:
+        if freshness_status not in {"fresh", "ok", "valid_close"}:
             failure_reasons.append(
                 f"freshness_unproven:{freshness_status or 'missing'}"
             )
@@ -540,6 +586,24 @@ def build_data_source_audit(
             f"{coverage_detail}"
         )
     sentinel_status = (sentinel_package or {}).get("source_status") or {}
+    context_counts = {
+        "sectors": len(market_data.get("sectors") or []),
+        "news": len(market_data.get("news") or []),
+        "lhb": len(market_data.get("lhb") or []),
+        "big_deals": len(market_data.get("big_deals") or []),
+    }
+    if all(context_counts.values()):
+        market_evidence_status = "ok"
+    elif any(context_counts.values()):
+        market_evidence_status = "partial"
+    else:
+        market_evidence_status = "missing"
+    market_evidence_detail = (
+        f"行业/概念 {context_counts['sectors']} 项；"
+        f"市场新闻 {context_counts['news']} 条；"
+        f"龙虎榜 {context_counts['lhb']} 条；"
+        f"大单 {context_counts['big_deals']} 条"
+    )
     sentinel_freshness = _sentinel_package_freshness(
         sentinel_package,
         report_date,
@@ -599,6 +663,7 @@ def build_data_source_audit(
         "| 数据源 | 状态 | 覆盖/说明 |",
         "|---|---|---|",
         f"| 行情数据 | {_status_label('ok' if market_ok else 'degraded')} | {market_detail} |",
+        f"| 市场广度/资金证据 | {_status_label(market_evidence_status)} | {market_evidence_detail} |",
         f"| Tushare 高频新闻 | {_status_label(sentinel_status.get('status', 'missing'))} | 新闻 {(sentinel_package or {}).get('event_count', 0)} 条 |",
         f"| Sentinel 研究包 | {_status_label(sentinel_package_status)} | {sentinel_package_detail} |",
     ]
@@ -700,6 +765,7 @@ def _status_label(value: str) -> str:
         "unavailable": "不可用",
         "unknown": "未知",
         "fresh": "新鲜",
+        "valid_close": "有效收盘",
         "stale": "过期",
         "not_enabled": "未启用",
         "conflict": "数据冲突",
@@ -867,6 +933,7 @@ def _block_reason_label(value: str) -> str:
     labels = {
         "lot_size_exceeded": "买不起最小交易单位",
         "missing_required_data": "关键数据未补齐",
+        "not_in_market_universe": "当日全市场清单未找到，已自动剔除",
         "price_missing": "实时价格缺失",
         "blocked_chasing": "追高风险",
         "blocked_high_position": "近20日区间高位",
@@ -2653,7 +2720,7 @@ def _long_horizon_view(decision: dict) -> list[dict]:
     for item in _target_scores(decision):
         has_long_truth = (
             bool(item.get("thesis_status"))
-            or item.get("long_quality_score") is not None
+            or bool(item.get("long_quality_score"))
             or bool(item.get("red_line_status"))
         )
         if not has_long_truth:
@@ -3146,6 +3213,8 @@ async def build_target_scores_for_report(
             self.client = AKShareMarketClient()
             self._fund_flows = None
             self._northbound = None
+            self._lhb = None
+            self._big_deals = None
 
         async def fetch_fund_flow_individual(self):
             if self._fund_flows is None:
@@ -3156,6 +3225,16 @@ async def build_target_scores_for_report(
             if self._northbound is None:
                 self._northbound = await self.client.fetch_hsgt_flow()
             return self._northbound
+
+        async def fetch_lhb_stats(self):
+            if self._lhb is None:
+                self._lhb = await self.client.fetch_lhb_stats()
+            return self._lhb
+
+        async def fetch_big_deals(self):
+            if self._big_deals is None:
+                self._big_deals = await self.client.fetch_big_deals()
+            return self._big_deals
 
     financial_cache: dict[str, dict] = {}
 
@@ -3843,7 +3922,58 @@ async def finalize_daily_report(
     return filepath
 
 
+async def _load_market_analysis_context(
+    market_client,
+    news_client,
+) -> dict[str, list[dict]]:
+    """Load the market-wide evidence that the analysis engine actually consumes."""
+    async def call_available(source, method_name: str):
+        method = getattr(source, method_name, None)
+        if method is None:
+            return []
+        try:
+            return await method()
+        except Exception:
+            return []
+
+    # AKShare's JavaScript-backed parsers share process-global state and can
+    # terminate the interpreter when initialized concurrently.
+    results = [
+        await call_available(market_client, "fetch_fund_flow_industry"),
+        await call_available(market_client, "fetch_fund_flow_concept"),
+        await call_available(market_client, "fetch_lhb_stats"),
+        await call_available(market_client, "fetch_big_deals"),
+        await call_available(news_client, "fetch_cjzc"),
+        await call_available(news_client, "fetch_global_news"),
+    ]
+
+    def rows(value) -> list[dict]:
+        if isinstance(value, Exception) or not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    industry, concept, lhb, big_deals, breakfast, global_news = map(
+        rows,
+        results,
+    )
+    sectors = [
+        {"kind": "industry", **item}
+        for item in industry
+    ] + [
+        {"kind": "concept", **item}
+        for item in concept
+    ]
+    return {
+        "sectors": sectors,
+        "news": breakfast + global_news,
+        "lhb": lhb,
+        "big_deals": big_deals,
+    }
+
+
 async def main(*, v9_pipeline_result: dict | None = None):
+    from app.data_sources.akshare_market import AKShareMarketClient
+    from app.data_sources.akshare_news import AKShareNewsClient
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
@@ -3892,6 +4022,8 @@ async def main(*, v9_pipeline_result: dict | None = None):
     # ===== 2. 获取行情 =====
     print("📊 获取实时行情...", flush=True)
     tc = FastRealtimeMarketDataSource()
+    shared_market_source = AKShareMarketClient()
+    shared_news_source = AKShareNewsClient()
     market_provider = str(getattr(tc, "name", "fast_realtime_market_data"))
     strategy_profile = get_strategy_profile()
     available_cash = float(portfolio.get("available_cash", portfolio.get("cash", 0)) or 0)
@@ -3916,12 +4048,13 @@ async def main(*, v9_pipeline_result: dict | None = None):
 
     index_codes = list(EXPECTED_MARKET_INDEX_CODES)
     try:
-        raw_indices = await tc.fetch_batch(index_codes)
+        raw_indices = await _fetch_quotes_with_recovery(tc, index_codes)
         aggregate = aggregate_market_quote_truth(
             raw_indices,
             index_codes,
             default_provider=market_provider,
             now=datetime.now().astimezone(),
+            valid_close_date=report_date,
         )
         verified_quotes = aggregate["quotes"]
         normalized_indices = {}
@@ -3947,6 +4080,7 @@ async def main(*, v9_pipeline_result: dict | None = None):
             index_codes,
             default_provider=market_provider,
             now=datetime.now().astimezone(),
+            valid_close_date=report_date,
         )
         market_data["indices"] = {}
         market_data["market_source_status"] = aggregate["market_source_status"]
@@ -3956,7 +4090,7 @@ async def main(*, v9_pipeline_result: dict | None = None):
         codes = [p["code"] for p in positions]
         formatted = [f"sh{c}" if c.startswith("6") else f"sz{c}" for c in codes]
         try:
-            quotes = await tc.fetch_batch(formatted)
+            quotes = await _fetch_quotes_with_recovery(tc, formatted)
             for p in positions:
                 q = quotes.get(formatted[codes.index(p["code"])], {})
                 _apply_position_quote(p, q, service_date=target_date)
@@ -4000,6 +4134,19 @@ async def main(*, v9_pipeline_result: dict | None = None):
 
     # ===== 3. 分析 + 辩论 =====
     print("📊 构建市场数据摘要...", flush=True)
+    market_context = await _load_market_analysis_context(
+        shared_market_source,
+        shared_news_source,
+    )
+    market_data.update(market_context)
+    print(
+        "   市场证据接入: "
+        f"{len(market_context['sectors'])} 个板块/概念, "
+        f"{len(market_context['news'])} 条新闻, "
+        f"{len(market_context['lhb'])} 条龙虎榜, "
+        f"{len(market_context['big_deals'])} 条大单",
+        flush=True,
+    )
     report = await run_analysis(market_data)
 
     print("🧠 AI 辩论中...", flush=True)
@@ -4026,9 +4173,6 @@ async def main(*, v9_pipeline_result: dict | None = None):
             "degradation_reasons": ["debate_call_failed"],
         }
 
-    from app.data_sources.akshare_market import AKShareMarketClient
-
-    shared_market_source = AKShareMarketClient()
     if isinstance(v9_pipeline_result, dict):
         decision["v9_pipeline_result"] = v9_pipeline_result
         decision["target_scores"] = list(
