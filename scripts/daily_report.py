@@ -3822,7 +3822,7 @@ async def finalize_daily_report(
     return filepath
 
 
-async def main():
+async def main(*, v9_pipeline_result: dict | None = None):
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
@@ -4008,48 +4008,59 @@ async def main():
     from app.data_sources.akshare_market import AKShareMarketClient
 
     shared_market_source = AKShareMarketClient()
-    print("🔎 生成池外小账户补扫...", flush=True)
-    try:
-        existing_codes = collect_outside_pool_exclusions([])
-        outside_scan = await build_refreshed_outside_pool_scan_for_report(
-            available_cash=available_cash,
-            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-            existing_codes=existing_codes,
-            market_source=shared_market_source,
+    if isinstance(v9_pipeline_result, dict):
+        decision["v9_pipeline_result"] = v9_pipeline_result
+        decision["target_scores"] = list(
+            v9_pipeline_result.get("scorecards") or []
         )
-        decision["outside_pool_scan"] = outside_scan
-        promoted = persist_outside_pool_scan_to_target_pool(
-            outside_scan,
-            available_cash=available_cash,
-            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-        )
-        dynamic_codes = {
-            str(row.get("code") or "").strip()
-            for row in outside_scan
-            if row.get("source") == "dynamic_fund_flow_discovery"
-        }
-        expired = rotate_dynamic_discovery_targets(dynamic_codes) if dynamic_codes else 0
         print(
-            f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警, {expired} 个旧动态候选过期",
+            "🎯 使用 v9 同轮发现与评分结果: "
+            f"{len(decision['target_scores'])} 个标的",
             flush=True,
         )
-    except Exception as e:
-        print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
+    else:
+        print("🔎 生成池外小账户补扫...", flush=True)
+        try:
+            existing_codes = collect_outside_pool_exclusions([])
+            outside_scan = await build_refreshed_outside_pool_scan_for_report(
+                available_cash=available_cash,
+                total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+                existing_codes=existing_codes,
+                market_source=shared_market_source,
+            )
+            decision["outside_pool_scan"] = outside_scan
+            promoted = persist_outside_pool_scan_to_target_pool(
+                outside_scan,
+                available_cash=available_cash,
+                total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+            )
+            dynamic_codes = {
+                str(row.get("code") or "").strip()
+                for row in outside_scan
+                if row.get("source") == "dynamic_fund_flow_discovery"
+            }
+            expired = rotate_dynamic_discovery_targets(dynamic_codes) if dynamic_codes else 0
+            print(
+                f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警, {expired} 个旧动态候选过期",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
 
-    print("🎯 生成标的池评分...", flush=True)
-    try:
-        target_scores = await build_target_scores_for_report(
-            available_cash=available_cash,
-            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-            market_source=shared_market_source,
-        )
-        if target_scores:
-            decision["target_scores"] = target_scores
-            print(f"   标的评分完成: {len(target_scores)} 个标的", flush=True)
-        else:
-            print("   标的池为空或无可评分标的", flush=True)
-    except Exception as e:
-        print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
+        print("🎯 生成标的池评分...", flush=True)
+        try:
+            target_scores = await build_target_scores_for_report(
+                available_cash=available_cash,
+                total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+                market_source=shared_market_source,
+            )
+            if target_scores:
+                decision["target_scores"] = target_scores
+                print(f"   标的评分完成: {len(target_scores)} 个标的", flush=True)
+            else:
+                print("   标的池为空或无可评分标的", flush=True)
+        except Exception as e:
+            print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
 
     try:
         from app.services.quant_lifecycle import PositionWatchStore

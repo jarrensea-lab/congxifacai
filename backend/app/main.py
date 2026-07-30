@@ -121,6 +121,8 @@ async def lifespan(app: FastAPI):
             prediction_lab=_run_prediction_lab_with_status,
             sentinel_research=_run_sentinel_research_with_status,
             main_report=_run_daily_report_with_status,
+            opportunity_recovery=_recover_opportunity_pipeline_with_status,
+            opportunity_delivery_verify=_verify_opportunity_delivery_with_status,
             sentinel_review=_run_sentinel_review_with_status,
             bot_poll=_poll_bot_messages,
             yitaojin_morning=_run_yitaojin_morning_with_status,
@@ -1074,15 +1076,45 @@ async def _run_daily_report_with_status():
     try:
         logger.info(schedule_reason("main_report"))
         logger.info("=== 次日投资策略主报告 ===")
-        from scripts import daily_report
+        from app.services.opportunity_pipeline import build_default_pipeline
 
-        report_path = await daily_report.main()
+        result = await build_default_pipeline().run_for_service_date()
+        report_path = (result.get("delivery") or {}).get("report_path")
         if report_path:
-            logger.info(f"=== 次日投资策略主报告完成: {report_path} ===")
+            logger.info(f"=== v9 次日投资策略主报告完成: {report_path} ===")
         else:
-            logger.warning("次日投资策略主报告结束但未返回报告路径")
+            logger.warning(
+                "v9 次日投资策略主报告未完成: "
+                f"{(result.get('health') or {}).get('error_code', 'unknown')}"
+            )
     except Exception as e:
         logger.error(f"次日投资策略主报告异常: {e}", exc_info=True)
+
+
+async def _recover_opportunity_pipeline_with_status():
+    """Resume the first incomplete v9 stage without duplicating prior writes."""
+    try:
+        from app.services.opportunity_pipeline import build_default_pipeline
+
+        result = await build_default_pipeline().recover_due_run()
+        logger.info(f"v9 管线恢复检查: {result.get('status', 'completed')}")
+        return result
+    except Exception as exc:
+        logger.error(f"v9 管线恢复异常: {exc}", exc_info=True)
+        return {"status": "failed", "error_code": exc.__class__.__name__}
+
+
+async def _verify_opportunity_delivery_with_status():
+    """Verify the report artifact and resume delivery when needed."""
+    try:
+        from app.services.opportunity_pipeline import build_default_pipeline
+
+        result = await build_default_pipeline().verify_due_delivery()
+        logger.info(f"v9 报告交付验真: {result.get('status', 'unknown')}")
+        return result
+    except Exception as exc:
+        logger.error(f"v9 报告交付验真异常: {exc}", exc_info=True)
+        return {"status": "failed", "error_code": exc.__class__.__name__}
 
 
 async def _run_yitaojin_task_with_status(task: str) -> dict:
@@ -1291,6 +1323,13 @@ async def _startup_health_check():
     except Exception as e:
         logger.warning(f"行情检测失败: {e}")
         issues.append(f"行情: {e}")
+
+    recovery = await _recover_opportunity_pipeline_with_status()
+    if recovery.get("status") == "failed":
+        issues.append(
+            "v9 策略报告恢复失败："
+            f"{recovery.get('error_code', 'unknown')}"
+        )
 
     if issues:
         _feishu_webhook_push(

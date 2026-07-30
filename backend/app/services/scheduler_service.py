@@ -29,6 +29,8 @@ class SchedulerJobHandlers:
     yitaojin_quotes: JobCallable
     yitaojin_close_account: JobCallable
     yitaojin_evening: JobCallable
+    opportunity_recovery: JobCallable | None = None
+    opportunity_delivery_verify: JobCallable | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +101,7 @@ CRON_JOBS = (
         0,
         "mon-fri",
         3600,
+        True,
     ),
     _CronJob(
         "yitaojin_quotes",
@@ -155,6 +158,7 @@ CRON_JOBS = (
         30,
         "mon-fri",
         3600,
+        True,
     ),
     _CronJob(
         "main_report",
@@ -164,6 +168,7 @@ CRON_JOBS = (
         30,
         "sun",
         3600,
+        True,
     ),
     _CronJob(
         "yitaojin_evening",
@@ -183,6 +188,26 @@ CRON_JOBS = (
         0,
         None,
         3600,
+    ),
+    _CronJob(
+        "opportunity_recovery",
+        "opportunity_recovery",
+        "v9机会管线断点恢复",
+        20,
+        45,
+        "mon-fri,sun",
+        1800,
+        True,
+    ),
+    _CronJob(
+        "opportunity_delivery_verify",
+        "opportunity_delivery_verify",
+        "v9策略报告交付验真",
+        21,
+        15,
+        "mon-fri,sun",
+        1800,
+        True,
     ),
 )
 
@@ -208,8 +233,11 @@ def register_scheduler_jobs(
         }
         if spec.bounded:
             job_options.update(max_instances=1, coalesce=True)
+        handler = getattr(handlers, spec.handler)
+        if handler is None:
+            continue
         scheduler.add_job(
-            getattr(handlers, spec.handler),
+            handler,
             CronTrigger(**trigger_options),
             **job_options,
         )
@@ -242,7 +270,7 @@ def start_scheduler_service(
             pass
     if logger is not None:
         logger.info(
-            "恭喜发财 v8.2.0-dev 调度器已启动 "
-            "(次日主报告 + 盘前校准 + 盘中5分钟事件扫描 + "
+            "恭喜发财 v9.0.0-dev 调度器已启动 "
+            "(次日主报告 + 断点恢复 + 交付验真 + 盘前校准 + 盘中5分钟事件扫描 + "
             "预测账本 + Sentinel研究/复盘 + 易淘金受控桥接 + Bot轮询)"
         )

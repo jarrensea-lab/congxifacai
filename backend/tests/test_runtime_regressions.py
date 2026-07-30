@@ -102,8 +102,8 @@ def test_daily_report_queries_risk_alerts_by_timestamp():
         db.close()
 
 
-def test_scheduler_main_report_runs_next_day_strategy_script_not_closing_placeholder():
-    """The scheduled main report must run the next-day strategy pipeline."""
+def test_scheduler_main_report_runs_v9_opportunity_pipeline_not_placeholder():
+    """The scheduled main report must run the durable v9 pipeline."""
     source = Path("backend/app/main.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     function = next(
@@ -114,7 +114,8 @@ def test_scheduler_main_report_runs_next_day_strategy_script_not_closing_placeho
     )
     function_source = ast.get_source_segment(source, function) or ""
 
-    assert "daily_report.main" in function_source
+    assert "build_default_pipeline" in function_source
+    assert "run_for_service_date" in function_source
     assert "push_closing" not in function_source
     assert "明日关注标的待生成" not in function_source
 

@@ -293,3 +293,15 @@ class PipelineRunStore:
             for stage_name in expected
             if stages.get(stage_name, {}).get("status") not in TERMINAL_STAGE_STATUSES
         ]
+
+    def run_id_for_trade_date(self, trade_date: str) -> str:
+        """Return the existing id without creating a due run."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT run_id FROM pipeline_runs
+                WHERE trade_date = ? AND pipeline_version = ?
+                """,
+                (trade_date, PIPELINE_VERSION),
+            ).fetchone()
+        return str(row["run_id"]) if row is not None else ""
