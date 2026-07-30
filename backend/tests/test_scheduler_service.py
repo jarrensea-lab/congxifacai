@@ -12,6 +12,8 @@ EXPECTED_JOB_IDS = {
     "sentinel_research",
     "main_report",
     "sunday_main_report",
+    "opportunity_recovery",
+    "opportunity_delivery_verify",
     "sentinel_review",
     "bot_poll",
     "yitaojin_morning",
@@ -63,6 +65,8 @@ def _handlers():
             "prediction_lab",
             "sentinel_research",
             "main_report",
+            "opportunity_recovery",
+            "opportunity_delivery_verify",
             "sentinel_review",
             "bot_poll",
             "yitaojin_morning",
@@ -127,6 +131,16 @@ def test_scheduler_evening_sequence_and_timezone_are_explicit():
             "minute": "30",
             "day_of_week": "sun",
         },
+        "opportunity_recovery": {
+            "hour": "20",
+            "minute": "45",
+            "day_of_week": "mon-fri,sun",
+        },
+        "opportunity_delivery_verify": {
+            "hour": "21",
+            "minute": "15",
+            "day_of_week": "mon-fri,sun",
+        },
         "yitaojin_evening": {
             "hour": "20",
             "minute": "45",
@@ -148,6 +162,7 @@ def test_scheduler_evening_sequence_and_timezone_are_explicit():
     assert ids.index("sentinel_research") < ids.index("main_report")
     assert ids.index("main_report") < ids.index("yitaojin_evening")
     assert ids.index("yitaojin_evening") < ids.index("sentinel_review")
+    assert ids.index("sentinel_review") < ids.index("opportunity_delivery_verify")
 
 
 def test_scheduler_preserves_job_options_bot_interval_and_yitaojin_bounds():
@@ -171,6 +186,8 @@ def test_scheduler_preserves_job_options_bot_interval_and_yitaojin_bounds():
         "sentinel_research": 3600,
         "main_report": 3600,
         "sunday_main_report": 3600,
+        "opportunity_recovery": 1800,
+        "opportunity_delivery_verify": 1800,
         "sentinel_review": 3600,
         "yitaojin_morning": 300,
         "yitaojin_midday_quotes": 120,
@@ -192,6 +209,10 @@ def test_scheduler_preserves_job_options_bot_interval_and_yitaojin_bounds():
         "yitaojin_close_quotes",
         "yitaojin_close_account",
         "yitaojin_evening",
+        "main_report",
+        "sunday_main_report",
+        "opportunity_recovery",
+        "opportunity_delivery_verify",
     ):
         assert by_id[job_id][1]["max_instances"] == 1
         assert by_id[job_id][1]["coalesce"] is True
@@ -209,7 +230,7 @@ def test_start_scheduler_service_registers_starts_then_cleans_stale_job():
     assert scheduler.events[-2:] == ["start", "remove:daily_report"]
     assert scheduler.events.count("start") == 1
     assert any("daily_report" in message for message in logger.messages)
-    assert any("v8.2.0-dev" in message for message in logger.messages)
+    assert any("v9.0.0-dev" in message for message in logger.messages)
 
 
 def test_stale_job_absence_does_not_abort_scheduler_start():

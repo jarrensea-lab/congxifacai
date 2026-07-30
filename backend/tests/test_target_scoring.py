@@ -69,6 +69,11 @@ def test_score_target_returns_buy_for_low_price_volume_breakout():
     assert result["risk_amount"] == 96.0
     assert result["playbook"] == "breakout_entry"
     assert result["missing_data"] == []
+    assert result["score_version"] == "composite_score_v1"
+    assert len(result["score_components"]) == 6
+    assert len(result["top_reasons"]) == 3
+    assert result["grade"] in {"S", "A"}
+    assert result["primary_risk"]
 
 
 def test_score_target_caps_research_only_provenance_even_when_buy_trigger_fires():
@@ -155,6 +160,25 @@ def test_score_target_blocks_dip_entry_when_market_regime_is_bad():
     assert result["playbook"] == "dip_entry"
 
 
+def test_score_target_blocks_breakout_when_market_regime_is_panic():
+    snapshot = _base_snapshot(code="002123", price=3.2)
+    snapshot["market_regime"] = {
+        "label": "panic",
+        "index_change_pct": -2.4,
+        "breadth": 0.18,
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
+
+    assert result["action"] == "watch"
+    assert result["block_reason"] == "regime_blocks_buy"
+    assert "市场环境恢复前不新开仓" in result["decision_reason"]
+
+
 def test_score_target_checks_affordability_before_missing_data():
     snapshot = _base_snapshot(code="002371", price=935.36)
     snapshot["fund_flow"] = {"status": "missing", "reason": "fund_flow_not_found"}
@@ -219,7 +243,7 @@ def test_score_target_carries_long_thesis_quality_without_overriding_trade_trigg
     assert long_quality["valuation_zone"] == "accumulation_zone"
 
 
-def test_unknown_long_thesis_cannot_lift_target_over_buy_threshold():
+def test_unknown_long_thesis_cannot_lift_composite_score():
     snapshot = _base_snapshot(code="002123", price=3.2)
     snapshot["serenity"] = {"status": "ok", "score": 0}
     unknown_thesis = {
@@ -235,13 +259,17 @@ def test_unknown_long_thesis_cannot_lift_target_over_buy_threshold():
         total_assets=6085.61,
         long_thesis=unknown_thesis,
     )
+    baseline = score_target(
+        snapshot,
+        available_cash=6085.61,
+        total_assets=6085.61,
+    )
 
     assert long_quality["thesis_status"] == "unknown"
     assert long_quality["long_quality_score"] == 0
     assert long_quality["long_horizon_reason"] == "thesis_status_unknown"
-    assert result["score"] < 70
-    assert result["action"] == "watch"
-    assert result["block_reason"] == "price_not_triggered"
+    assert result["score"] == baseline["score"]
+    assert result["action"] == baseline["action"]
 
 
 def test_unknown_long_thesis_does_not_block_independently_qualified_tactical_buy():

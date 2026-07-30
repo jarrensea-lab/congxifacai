@@ -10,6 +10,40 @@ from datetime import date, datetime, timedelta
 import pytest
 
 
+def test_v9_runtime_identity_is_single_source(monkeypatch):
+    monkeypatch.setenv("CONGXI_BUILD_COMMIT", "abc1234")
+    from app.version import build_runtime_identity
+
+    identity = build_runtime_identity(started_at="2026-07-31T08:00:00+08:00")
+
+    assert identity == {
+        "product_version": "v9.0.0-dev",
+        "pipeline_version": "actionable_pipeline_v1",
+        "score_version": "composite_score_v1",
+        "commit": "abc1234",
+        "started_at": "2026-07-31T08:00:00+08:00",
+    }
+
+
+@pytest.mark.asyncio
+async def test_health_endpoint_uses_runtime_identity(monkeypatch, tmp_path):
+    from app.routers import market
+
+    async def unavailable():
+        return False
+
+    monkeypatch.setattr(market._cloud, "is_available", unavailable)
+    monkeypatch.setenv(
+        "CONGXI_PIPELINE_DATABASE_PATH",
+        str(tmp_path / "pipeline.db"),
+    )
+    result = await market.health_check()
+
+    assert result["runtime"]["product_version"] == "v9.0.0-dev"
+    assert result["version"] == result["runtime"]["product_version"]
+    assert "opportunity_pipeline" in result
+
+
 def test_database_creates_missing_parent_directory(tmp_path):
     """Runtime SQLite startup should create the parent directory before connecting."""
     db_path = tmp_path / "missing" / "nested" / "stock_data.db"
@@ -73,8 +107,8 @@ def test_daily_report_queries_risk_alerts_by_timestamp():
         db.close()
 
 
-def test_scheduler_main_report_runs_next_day_strategy_script_not_closing_placeholder():
-    """The scheduled main report must run the next-day strategy pipeline."""
+def test_scheduler_main_report_runs_v9_opportunity_pipeline_not_placeholder():
+    """The scheduled main report must run the durable v9 pipeline."""
     source = Path("backend/app/main.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     function = next(
@@ -85,7 +119,8 @@ def test_scheduler_main_report_runs_next_day_strategy_script_not_closing_placeho
     )
     function_source = ast.get_source_segment(source, function) or ""
 
-    assert "daily_report.main" in function_source
+    assert "build_default_pipeline" in function_source
+    assert "run_for_service_date" in function_source
     assert "push_closing" not in function_source
     assert "明日关注标的待生成" not in function_source
 

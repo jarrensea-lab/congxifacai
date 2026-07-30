@@ -28,6 +28,7 @@ from app.services.long_horizon_transaction import (
     transaction_lock_path_for_store,
     writer_transaction_guard,
 )
+from app.version import SCORE_VERSION
 
 
 def default_candidate_pool_path() -> Path:
@@ -424,6 +425,54 @@ def target_production_eligibility(
         # Fail closed instead of accepting caller-provided identity strings.
         return {}
 
+    def deterministic_score_promotion(
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        evidence = (
+            payload.get("promotion_evidence")
+            if isinstance(payload.get("promotion_evidence"), dict)
+            else {}
+        )
+        source = str(payload.get("source") or "").strip().lower()
+        status = str(payload.get("status") or "").strip().lower()
+        allowed_sources = {
+            "dynamic_market_discovery",
+            "dynamic_fund_flow_discovery",
+            "small_account_discovery",
+            "target_scoring",
+        }
+        hard_gates = (
+            evidence.get("hard_gates")
+            if isinstance(evidence.get("hard_gates"), dict)
+            else {}
+        )
+        required_gates = {
+            "affordable",
+            "data_complete",
+            "risk_ok",
+            "tradeable",
+            "playbook_triggered",
+        }
+        passed_gates = {
+            str(key)
+            for key, value in hard_gates.items()
+            if value is True
+        }
+        try:
+            score = float(evidence.get("score") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        valid = (
+            source in allowed_sources
+            and status in {"executable", "actionable"}
+            and evidence.get("score_version") == SCORE_VERSION
+            and score >= 70
+            and required_gates <= passed_gates
+            and bool(str(evidence.get("data_cutoff_at") or "").strip())
+            and bool(str(evidence.get("playbook") or "").strip())
+        )
+        return copy.deepcopy(evidence) if valid else {}
+
     def research_only_marker(payload: dict[str, Any]) -> bool:
         provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
         if payload.get("research_only") is True or provenance.get("research_only") is True:
@@ -477,12 +526,19 @@ def target_production_eligibility(
         and str(prior_provenance.get("original_status") or "").strip().lower()
         in {"watching", "executable", "actionable"}
     )
-    research_only = False if legacy_full_score_reauthorization else (
+    deterministic_approval = deterministic_score_promotion(current)
+    research_only = False if (
+        legacy_full_score_reauthorization or deterministic_approval
+    ) else (
         prior_gate.get("eligible") is False
         or research_only_marker(prior)
         or research_only_marker(current)
     )
-    approval = auditable_approval(current) or auditable_approval(prior)
+    approval = (
+        deterministic_approval
+        or auditable_approval(current)
+        or auditable_approval(prior)
+    )
     status_values = {
         str(current.get("status") or "").strip().lower(),
         str(prior.get("status") or "").strip().lower(),
@@ -508,7 +564,9 @@ def target_production_eligibility(
         "original_status": original_status,
         "original_source": original_source,
         "reason": (
-            "auditable_production_approval"
+            "deterministic_score_promotion"
+            if deterministic_approval
+            else "auditable_production_approval"
             if approval
             else "full_score_reauthorization"
             if legacy_full_score_reauthorization
@@ -571,6 +629,7 @@ class TargetPoolStore(CandidatePoolStore):
         sentinel: dict[str, Any] | None = None,
         serenity: dict[str, Any] | None = None,
         production_approval: dict[str, Any] | None = None,
+        promotion_evidence: dict[str, Any] | None = None,
         scoring_decision: dict[str, Any] | None = None,
         current_price: float | None = None,
         available_cash: float = 0,
@@ -590,6 +649,7 @@ class TargetPoolStore(CandidatePoolStore):
             sentinel=sentinel,
             serenity=serenity,
             production_approval=production_approval,
+            promotion_evidence=promotion_evidence,
             scoring_decision=scoring_decision,
             current_price=current_price,
             available_cash=available_cash,
@@ -835,6 +895,7 @@ class TargetPoolStore(CandidatePoolStore):
         sentinel: dict[str, Any] | None = None,
         serenity: dict[str, Any] | None = None,
         production_approval: dict[str, Any] | None = None,
+        promotion_evidence: dict[str, Any] | None = None,
         scoring_decision: dict[str, Any] | None = None,
         current_price: float | None = None,
         available_cash: float = 0,
@@ -877,6 +938,7 @@ class TargetPoolStore(CandidatePoolStore):
                 "source": source,
                 "evidence": incoming_evidence,
                 "production_approval": production_approval or {},
+                "promotion_evidence": promotion_evidence or {},
                 "scoring_decision": normalized_scoring,
             },
             previous=existing,
@@ -929,6 +991,11 @@ class TargetPoolStore(CandidatePoolStore):
             },
             "production_eligibility": gate,
             "production_approval": gate["approval"],
+            "promotion_evidence": (
+                copy.deepcopy(promotion_evidence)
+                if isinstance(promotion_evidence, dict)
+                else existing.get("promotion_evidence") or {}
+            ),
             "scoring_decision": normalized_scoring,
             "updated_at": _now(),
         }

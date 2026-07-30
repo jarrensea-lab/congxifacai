@@ -902,6 +902,23 @@ def _humanize_reason(value) -> str:
     text = text.replace("dip_entry", "回踩买点")
     text = text.replace("缺少结构化数据项", "缺少关键数据")
     text = text.replace("池外小账户补扫", "小账户低价候选扫描")
+    text = text.replace(
+        "primary_empty_market_universe",
+        "主市场扫描为空，已切换备用数据源",
+    )
+    text = text.replace(
+        "empty_market_universe",
+        "全市场扫描未返回有效股票",
+    )
+    text = text.replace(
+        "no_scored_candidates",
+        "候选补齐数据后仍没有完成评分的标的",
+    )
+    text = text.replace("sentinel_missing", "Sentinel 今日研究证据缺失")
+    text = text.replace(
+        "pipeline_run_already_active",
+        "同一交易日的策略管线仍在运行",
+    )
     text = text.replace("。，", "，").replace("。。", "。")
     return text
 
@@ -910,6 +927,182 @@ def _target_label(item: dict) -> str:
     code = str(item.get("code") or item.get("stock_code") or "").strip()
     name = str(item.get("name") or item.get("stock_name") or code).strip()
     return f"{name}({code})" if code else name
+
+
+def build_v9_opportunity_section(result: dict) -> list[str]:
+    """Render the concise v9 first-screen decision contract."""
+    account = result.get("account") if isinstance(result.get("account"), dict) else {}
+    metrics = result.get("metrics") if isinstance(result.get("metrics"), dict) else {}
+    health = result.get("health") if isinstance(result.get("health"), dict) else {}
+    scorecards = [
+        item
+        for item in result.get("scorecards") or []
+        if isinstance(item, dict)
+    ]
+    events = [
+        item
+        for item in result.get("lifecycle_events") or []
+        if isinstance(item, dict)
+    ]
+    actionable_actions = {"buy", "add", "actionable", "executable", "increase"}
+    actionable = sorted(
+        (
+            item
+            for item in scorecards
+            if str(item.get("action") or "").strip().lower() in actionable_actions
+        ),
+        key=lambda item: float(item.get("score") or 0),
+        reverse=True,
+    )[:3]
+
+    available_cash = float(account.get("available_cash") or 0)
+    cash_reserve = float(
+        account.get("cash_reserve")
+        or account.get("reserve_cash")
+        or 0
+    )
+    buy_budget = float(
+        account.get("buy_budget")
+        or account.get("executable_budget")
+        or max(0.0, available_cash - cash_reserve)
+    )
+    lines = [
+        "## 今日可操作结论",
+        (
+            f"今日结论：可操作 {len(actionable)} 只，按评分顺序只执行满足价格条件的标的。"
+            if actionable
+            else "今日结论：不买。"
+        ),
+        (
+            f"账户：可用现金 {_money(available_cash)}；现金安全垫 "
+            f"{_money(cash_reserve)}；单票预算 {_money(buy_budget)}。"
+        ),
+        (
+            f"扫描 {int(metrics.get('scanned_count') or 0)} 只；"
+            f"买得起 {int(metrics.get('affordable_count') or 0)} 只；"
+            f"完成评分 {int(metrics.get('scored_count') or 0)} 只。"
+        ),
+        "",
+        "### 可操作标的",
+    ]
+
+    if actionable:
+        for index, item in enumerate(actionable, start=1):
+            reasons = [
+                _humanize_reason(reason)
+                for reason in item.get("top_reasons") or []
+                if str(reason).strip()
+            ][:3]
+            while len(reasons) < 3:
+                reasons.append("该维度暂无足够加分证据")
+            shares = int(
+                item.get("shares")
+                or item.get("planned_shares")
+                or item.get("position_shares")
+                or 0
+            )
+            entry_price = float(item.get("entry_price") or item.get("current_price") or 0)
+            planned_amount = float(
+                item.get("planned_amount")
+                or item.get("position_amount")
+                or entry_price * shares
+            )
+            lines.extend(
+                [
+                    f"#### {index}. {_target_label(item)}",
+                    (
+                        f"级别：{_cell(item.get('grade') or 'C')}；"
+                        f"综合评分：{float(item.get('score') or 0):.1f}/100。"
+                    ),
+                    f"推荐原因：{'；'.join(reasons)}。",
+                    f"主要风险：{_humanize_reason(item.get('primary_risk') or '暂无明确风险证据')}。",
+                    (
+                        f"操作：入场价 {_money(entry_price)}；{shares} 股；"
+                        f"计划金额 {_money(planned_amount)}。"
+                    ),
+                    (
+                        f"止损 {_money(item.get('stop_loss'))}；"
+                        f"目标 {_money(item.get('target_price'))}；"
+                        f"最大计划亏损："
+                        f"{_money(item.get('max_planned_loss') or item.get('risk_amount'))}。"
+                    ),
+                    "",
+                ]
+            )
+    else:
+        reason = str(
+            health.get("message")
+            or health.get("error_code")
+            or "没有标的同时通过账户、数据、风控和买点闸门"
+        )
+        lines.append(f"没有买入建议的原因：{_humanize_reason(reason)}。")
+        closest = max(
+            (
+                item
+                for item in scorecards
+                if not item.get("lifecycle_only")
+            ),
+            key=lambda item: float(item.get("score") or 0),
+            default=None,
+        )
+        if closest:
+            wait_for = (
+                closest.get("wait_for")
+                or closest.get("next_trigger")
+                or closest.get("next_signal")
+                or closest.get("block_reason")
+                or closest.get("primary_risk")
+                or "等待量价、资金与价格条件同时触发"
+            )
+            lines.append(
+                f"最接近触发：{_target_label(closest)}，"
+                f"{float(closest.get('score') or 0):.1f}分；"
+                f"{_humanize_reason(wait_for)}。"
+            )
+        lines.append("")
+
+    grouped = {
+        "added": ("今日新增", []),
+        "downgraded": ("今日降级", []),
+        "removed": ("今日剔除", []),
+    }
+    for event in events:
+        event_name = str(event.get("event") or event.get("event_type") or "").lower()
+        if event_name in grouped:
+            grouped[event_name][1].append(event)
+    lines.append("### 今日变化")
+    if not any(rows for _, rows in grouped.values()):
+        lines.extend(["无新增、降级或剔除。", ""])
+    else:
+        for _, (heading, rows) in grouped.items():
+            if not rows:
+                continue
+            lines.append(f"#### {heading}")
+            for item in rows:
+                reason = (
+                    item.get("reason")
+                    or item.get("reason_text")
+                    or item.get("change_reason")
+                    or "生命周期规则触发"
+                )
+                lines.append(f"- {_target_label(item)}：{_humanize_reason(reason)}")
+        lines.append("")
+
+    health_status = str(health.get("status") or "degraded").lower()
+    health_label = {
+        "succeeded": "完整",
+        "complete": "完整",
+        "ok": "完整",
+        "degraded": "降级",
+        "failed": "失败",
+    }.get(health_status, "降级")
+    lines.extend(
+        [
+            "### 管线状态",
+            f"管线状态：{health_label}。{_humanize_reason(health.get('error_code') or '')}".rstrip("。"),
+        ]
+    )
+    return lines
 
 
 def _target_scores(decision: dict) -> list[dict]:
@@ -2785,7 +2978,7 @@ def build_next_day_strategy_sections(
             report_date,
         ),
     ]
-    return render_next_day_sections({
+    rendered = render_next_day_sections({
         "target_date": target_date,
         "hard_risk_lines": hard_risk_lines,
         "holdings": _holding_action_view(
@@ -2822,6 +3015,19 @@ def build_next_day_strategy_sections(
         ),
         "review_lines": review_lines,
     })
+    pipeline_result = decision.get("v9_pipeline_result")
+    if isinstance(pipeline_result, dict):
+        pipeline_result = dict(pipeline_result)
+        pipeline_result.setdefault(
+            "account",
+            {
+                "available_cash": available_cash,
+                "reserve_cash": max(0.0, available_cash - buy_budget),
+                "executable_budget": buy_budget,
+            },
+        )
+        return [*build_v9_opportunity_section(pipeline_result), "", *rendered]
+    return rendered
 
 
 def save_report_to_obsidian(
@@ -3637,7 +3843,7 @@ async def finalize_daily_report(
     return filepath
 
 
-async def main():
+async def main(*, v9_pipeline_result: dict | None = None):
     from app.data_sources.realtime_market_data import FastRealtimeMarketDataSource
     from app.engine.analysis import run_analysis
     from app.engine.workshop import run_debate
@@ -3820,51 +4026,62 @@ async def main():
             "degradation_reasons": ["debate_call_failed"],
         }
 
-    print("🎯 生成标的池评分...", flush=True)
     from app.data_sources.akshare_market import AKShareMarketClient
 
     shared_market_source = AKShareMarketClient()
-    try:
-        target_scores = await build_target_scores_for_report(
-            available_cash=available_cash,
-            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-            market_source=shared_market_source,
+    if isinstance(v9_pipeline_result, dict):
+        decision["v9_pipeline_result"] = v9_pipeline_result
+        decision["target_scores"] = list(
+            v9_pipeline_result.get("scorecards") or []
         )
-        if target_scores:
-            decision["target_scores"] = target_scores
-            print(f"   标的评分完成: {len(target_scores)} 个标的", flush=True)
-        else:
-            print("   标的池为空或无可评分标的", flush=True)
-    except Exception as e:
-        print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
-
-    print("🔎 生成池外小账户补扫...", flush=True)
-    try:
-        existing_codes = collect_outside_pool_exclusions(decision.get("target_scores", []))
-        outside_scan = await build_refreshed_outside_pool_scan_for_report(
-            available_cash=available_cash,
-            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-            existing_codes=existing_codes,
-            market_source=shared_market_source,
-        )
-        decision["outside_pool_scan"] = outside_scan
-        promoted = persist_outside_pool_scan_to_target_pool(
-            outside_scan,
-            available_cash=available_cash,
-            total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
-        )
-        dynamic_codes = {
-            str(row.get("code") or "").strip()
-            for row in outside_scan
-            if row.get("source") == "dynamic_fund_flow_discovery"
-        }
-        expired = rotate_dynamic_discovery_targets(dynamic_codes) if dynamic_codes else 0
         print(
-            f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警, {expired} 个旧动态候选过期",
+            "🎯 使用 v9 同轮发现与评分结果: "
+            f"{len(decision['target_scores'])} 个标的",
             flush=True,
         )
-    except Exception as e:
-        print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
+    else:
+        print("🔎 生成池外小账户补扫...", flush=True)
+        try:
+            existing_codes = collect_outside_pool_exclusions([])
+            outside_scan = await build_refreshed_outside_pool_scan_for_report(
+                available_cash=available_cash,
+                total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+                existing_codes=existing_codes,
+                market_source=shared_market_source,
+            )
+            decision["outside_pool_scan"] = outside_scan
+            promoted = persist_outside_pool_scan_to_target_pool(
+                outside_scan,
+                available_cash=available_cash,
+                total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+            )
+            dynamic_codes = {
+                str(row.get("code") or "").strip()
+                for row in outside_scan
+                if row.get("source") == "dynamic_fund_flow_discovery"
+            }
+            expired = rotate_dynamic_discovery_targets(dynamic_codes) if dynamic_codes else 0
+            print(
+                f"   池外补扫完成: {len(outside_scan)} 个候选, {promoted} 个入池预警, {expired} 个旧动态候选过期",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"   ⚠️ 池外补扫失败，报告降级继续: {e}", flush=True)
+
+        print("🎯 生成标的池评分...", flush=True)
+        try:
+            target_scores = await build_target_scores_for_report(
+                available_cash=available_cash,
+                total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
+                market_source=shared_market_source,
+            )
+            if target_scores:
+                decision["target_scores"] = target_scores
+                print(f"   标的评分完成: {len(target_scores)} 个标的", flush=True)
+            else:
+                print("   标的池为空或无可评分标的", flush=True)
+        except Exception as e:
+            print(f"   ⚠️ 标的评分失败，报告降级继续: {e}", flush=True)
 
     try:
         from app.services.quant_lifecycle import PositionWatchStore

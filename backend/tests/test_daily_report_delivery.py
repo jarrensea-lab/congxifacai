@@ -8,6 +8,159 @@ from threading import Barrier, Event, Thread
 import pytest
 
 
+def test_daily_report_discovers_before_scoring():
+    import inspect
+    from scripts import daily_report
+
+    source = inspect.getsource(daily_report.main)
+
+    assert source.index("build_refreshed_outside_pool_scan_for_report") < source.index(
+        "build_target_scores_for_report"
+    )
+
+
+def test_actionable_report_shows_three_targets_and_all_changes():
+    from scripts.daily_report import build_v9_opportunity_section
+
+    scorecards = []
+    for index in range(4):
+        scorecards.append({
+            "code": f"00000{index + 1}",
+            "name": f"测试{index + 1}",
+            "action": "buy",
+            "score": 88 - index,
+            "grade": "S" if index == 0 else "A",
+            "top_reasons": ["量价改善", "资金流入", "行业催化"],
+            "primary_risk": "板块波动",
+            "entry_price": 6 + index,
+            "position_shares": 100,
+            "position_amount": (6 + index) * 100,
+            "stop_loss": 5.4 + index,
+            "target_price": 7.2 + index,
+            "risk_amount": 60,
+        })
+    lines = build_v9_opportunity_section({
+        "account": {
+            "available_cash": 3000,
+            "reserve_cash": 300,
+            "executable_budget": 1500,
+        },
+        "metrics": {
+            "scanned_count": 5200,
+            "affordable_count": 320,
+            "scored_count": 30,
+        },
+        "scorecards": scorecards,
+        "lifecycle_events": [
+            {
+                "code": "000001",
+                "name": "测试1",
+                "event": "added",
+                "old_score": 0,
+                "new_score": 88,
+                "reason": "量价和资金同步改善",
+            },
+            {
+                "code": "000008",
+                "name": "测试8",
+                "event": "downgraded",
+                "old_score": 78,
+                "new_score": 64,
+                "reason": "资金方向转弱",
+            },
+            {
+                "code": "000009",
+                "name": "测试9",
+                "event": "removed",
+                "old_score": 68,
+                "new_score": 42,
+                "reason": "趋势破坏",
+            },
+        ],
+        "health": {"status": "succeeded"},
+    })
+
+    text = "\n".join(lines)
+    assert text.count("最大计划亏损") == 3
+    assert "测试4" not in text
+    assert "今日新增" in text
+    assert "今日降级" in text
+    assert "今日剔除" in text
+    assert "测试8" in text
+    assert "测试9" in text
+    assert "买不起" not in text
+
+
+def test_v9_no_action_report_explains_counts_and_reason():
+    from scripts.daily_report import build_v9_opportunity_section
+
+    text = "\n".join(build_v9_opportunity_section({
+        "account": {
+            "available_cash": 800,
+            "reserve_cash": 160,
+            "executable_budget": 640,
+        },
+        "metrics": {
+            "scanned_count": 5200,
+            "affordable_count": 120,
+            "scored_count": 20,
+        },
+        "scorecards": [
+            {
+                "code": "000001",
+                "name": "平安银行",
+                "action": "watch",
+                "score": 74,
+                "grade": "B",
+                "next_signal": "等待量价突破",
+            }
+        ],
+        "lifecycle_events": [],
+        "health": {"status": "degraded", "error_code": "sentinel_missing"},
+    }))
+
+    assert "今日结论：不买" in text
+    assert "扫描 5200 只" in text
+    assert "买得起 120 只" in text
+    assert "完成评分 20 只" in text
+    assert "最接近触发" in text
+    assert "等待量价突破" in text
+    assert "管线状态：降级" in text
+    assert "sentinel_missing" not in text
+    assert "Sentinel 今日研究证据缺失" in text
+
+
+def test_v9_closest_trigger_excludes_lifecycle_only_rows():
+    from scripts.daily_report import build_v9_opportunity_section
+
+    text = "\n".join(build_v9_opportunity_section({
+        "account": {"available_cash": 800, "executable_budget": 640},
+        "metrics": {"scanned_count": 2, "affordable_count": 1, "scored_count": 1},
+        "scorecards": [
+            {
+                "code": "600000",
+                "name": "旧标的",
+                "action": "watch",
+                "score": 99,
+                "lifecycle_only": True,
+                "block_reason": "lot_size_exceeded",
+            },
+            {
+                "code": "000001",
+                "name": "待触发标的",
+                "action": "watch",
+                "score": 70,
+                "next_signal": "等待量价突破",
+            },
+        ],
+        "lifecycle_events": [],
+        "health": {"status": "degraded", "error_code": "no_scored_candidates"},
+    }))
+
+    assert "最接近触发：待触发标的(000001)" in text
+    assert "最接近触发：旧标的(600000)" not in text
+
+
 class _EmptyLongThesisStore:
     def get(self, symbol):
         return None
@@ -1710,7 +1863,7 @@ async def test_discover_small_account_candidates_uses_live_rotating_market_rows(
 
     assert [row["code"] for row in rows] == ["000563"]
     assert rows[0]["source"] == "dynamic_fund_flow_discovery"
-    assert rows[0]["research_only"] is True
+    assert "research_only" not in rows[0]
 
 
 @pytest.mark.asyncio
@@ -1760,7 +1913,7 @@ async def test_refreshed_outside_pool_scan_flows_dynamic_candidate_into_quote_ga
     assert [row["code"] for row in rows] == ["000563"]
     assert rows[0]["affordable"] is True
     assert rows[0]["source"] == "dynamic_fund_flow_discovery"
-    assert "仅进入研究观察" in rows[0]["watch_reason"]
+    assert "一手试错复核" in rows[0]["watch_reason"]
 
 
 def test_dynamic_research_candidate_is_visible_but_never_rendered_as_trade_trigger():

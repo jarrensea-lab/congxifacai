@@ -12,6 +12,7 @@ from app.services.quant_lifecycle import (
     evaluate_position_watch,
     lot_size_for_code,
     normalize_alert_level,
+    target_production_eligibility,
 )
 
 
@@ -43,6 +44,104 @@ def full_score_decision(action="buy"):
         },
         "evaluated_at": "2026-07-20 09:40:00",
     }
+
+
+def test_dynamic_candidate_can_promote_with_deterministic_evidence():
+    current = {
+        "source": "dynamic_market_discovery",
+        "status": "executable",
+        "promotion_evidence": {
+            "score_version": "composite_score_v1",
+            "score": 88,
+            "data_cutoff_at": "2026-07-31T15:00:00+08:00",
+            "playbook": "breakout_entry",
+            "hard_gates": {
+                "affordable": True,
+                "data_complete": True,
+                "risk_ok": True,
+                "tradeable": True,
+                "playbook_triggered": True,
+            },
+        },
+    }
+
+    eligibility = target_production_eligibility(
+        current,
+        previous={
+            "source": "dynamic_market_discovery",
+            "status": "research_reference",
+            "research_only": True,
+        },
+    )
+
+    assert eligibility["eligible"] is True
+    assert eligibility["reason"] == "deterministic_score_promotion"
+    assert eligibility["approval"]["score"] == 88
+
+
+def test_incomplete_or_untrusted_promotion_evidence_fails_closed():
+    current = {
+        "source": "sentinel_serenity",
+        "status": "executable",
+        "promotion_evidence": {
+            "score_version": "composite_score_v1",
+            "score": 92,
+            "data_cutoff_at": "2026-07-31T15:00:00+08:00",
+            "playbook": "breakout_entry",
+            "hard_gates": {
+                "affordable": True,
+                "data_complete": True,
+                "risk_ok": True,
+                "tradeable": True,
+                "playbook_triggered": True,
+            },
+        },
+    }
+
+    eligibility = target_production_eligibility(
+        current,
+        previous={"status": "research_reference", "research_only": True},
+    )
+
+    assert eligibility["eligible"] is False
+    assert eligibility["reason"] == "research_only_provenance"
+
+
+def test_target_pool_persists_deterministic_dynamic_promotion(tmp_path):
+    store = TargetPoolStore(tmp_path / "candidate_pool.json")
+    evidence = {
+        "score_version": "composite_score_v1",
+        "score": 88,
+        "data_cutoff_at": "2026-07-31T15:00:00+08:00",
+        "playbook": "breakout_entry",
+        "hard_gates": {
+            "affordable": True,
+            "data_complete": True,
+            "risk_ok": True,
+            "tradeable": True,
+            "playbook_triggered": True,
+        },
+    }
+
+    store.upsert_target(
+        code="000001",
+        name="平安银行",
+        status="executable",
+        source="dynamic_market_discovery",
+        promotion_evidence=evidence,
+        current_price=6.0,
+        available_cash=800,
+        total_assets=1600,
+    )
+
+    item = store.get("000001")
+    assert item["status"] == "executable"
+    assert item["promotion_evidence"] == evidence
+    assert item["production_eligibility"]["eligible"] is True
+    assert (
+        item["production_eligibility"]["reason"]
+        == "deterministic_score_promotion"
+    )
 
 
 def seed_breakout_contract(store, code, price):

@@ -65,6 +65,7 @@ from app.services.visible_decision_gate import (
     filter_alerts_by_visible_decision_gate,
     load_runtime_visible_decision_gate,
 )
+from app.version import PRODUCT_VERSION
 
 # 报告引擎
 from app.report_engine.engine import report_engine
@@ -96,7 +97,7 @@ class FeishuNotifier:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("恭喜发财 v8.2.0-dev 应用启动中...")
+    logger.info(f"恭喜发财 {PRODUCT_VERSION} 应用启动中...")
     init_db()
     logger.info("数据库初始化完成")
 
@@ -120,6 +121,8 @@ async def lifespan(app: FastAPI):
             prediction_lab=_run_prediction_lab_with_status,
             sentinel_research=_run_sentinel_research_with_status,
             main_report=_run_daily_report_with_status,
+            opportunity_recovery=_recover_opportunity_pipeline_with_status,
+            opportunity_delivery_verify=_verify_opportunity_delivery_with_status,
             sentinel_review=_run_sentinel_review_with_status,
             bot_poll=_poll_bot_messages,
             yitaojin_morning=_run_yitaojin_morning_with_status,
@@ -144,7 +147,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="恭喜发财 - A 股智能监控系统",
     description="A 股研究、风控、报告与受控券商桥接系统",
-    version="8.2.0-dev",
+    version=PRODUCT_VERSION.removeprefix("v"),
     lifespan=lifespan,
 )
 
@@ -436,7 +439,7 @@ async def _scan_candidate_pool_and_push(
     )
     deliverable_alerts = notification_gate.filter_alerts(gate_eligible_alerts, stage=stage)
     if deliverable_alerts:
-        title = f"旺财V7.5 候选池提醒 - {stage}"
+        title = f"恭喜发财 {PRODUCT_VERSION} 候选池提醒 - {stage}"
         _feishu_webhook_push(title, _format_lifecycle_alerts(deliverable_alerts))
     logger.info(
         f"{stage}候选池扫描完成: scanned={result.get('scanned', 0)} "
@@ -581,7 +584,10 @@ async def _run_intraday_alert_scan_with_status():
             watch_alerts = evaluate_position_watch(position_watch, position_quotes)
             deliverable_watch_alerts = notification_gate.filter_alerts(watch_alerts, stage="盘中持仓")
             if deliverable_watch_alerts:
-                _feishu_webhook_push("旺财V7.5 盘中持仓触发", _format_lifecycle_alerts(deliverable_watch_alerts))
+                _feishu_webhook_push(
+                    f"恭喜发财 {PRODUCT_VERSION} 盘中持仓触发",
+                    _format_lifecycle_alerts(deliverable_watch_alerts),
+                )
 
             try:
                 await asyncio.wait_for(
@@ -674,7 +680,7 @@ async def _run_premarket_with_status():
     gs["running"] = True
     gs["started_at"] = str(datetime.now())
     try:
-        logger.info("=== 旺财V7 盘前任务启动 ===")
+        logger.info(f"=== 恭喜发财 {PRODUCT_VERSION} 盘前任务启动 ===")
         market_data = await _fetch_market_data()
         try:
             sentinel_report_date = str(date.today())
@@ -751,7 +757,10 @@ async def _run_premarket_with_status():
         )
         if not report_ok:
             logger.warning("报告引擎推送异常，降级为原始webhook推送")
-            _feishu_webhook_push(f"旺财V7 盘前策略 [R{risk}]", summary)
+            _feishu_webhook_push(
+                f"恭喜发财 {PRODUCT_VERSION} 盘前策略 [R{risk}]",
+                summary,
+            )
 
         db = SessionLocal()
         try:
@@ -963,7 +972,10 @@ async def _run_afternoon_with_status():
             if watch_alerts:
                 deliverable_watch_alerts = notification_gate.filter_alerts(watch_alerts, stage="持仓")
                 if deliverable_watch_alerts:
-                    _feishu_webhook_push("旺财V7.5 持仓预警", _format_lifecycle_alerts(deliverable_watch_alerts))
+                    _feishu_webhook_push(
+                        f"恭喜发财 {PRODUCT_VERSION} 持仓预警",
+                        _format_lifecycle_alerts(deliverable_watch_alerts),
+                    )
             acc = db.query(SimAccount).first()
             cash, total_assets = _account_cash_and_total(acc)
             lifecycle_result = await _scan_candidate_pool_and_push(
@@ -1064,15 +1076,45 @@ async def _run_daily_report_with_status():
     try:
         logger.info(schedule_reason("main_report"))
         logger.info("=== 次日投资策略主报告 ===")
-        from scripts import daily_report
+        from app.services.opportunity_pipeline import build_default_pipeline
 
-        report_path = await daily_report.main()
+        result = await build_default_pipeline().run_for_service_date()
+        report_path = (result.get("delivery") or {}).get("report_path")
         if report_path:
-            logger.info(f"=== 次日投资策略主报告完成: {report_path} ===")
+            logger.info(f"=== v9 次日投资策略主报告完成: {report_path} ===")
         else:
-            logger.warning("次日投资策略主报告结束但未返回报告路径")
+            logger.warning(
+                "v9 次日投资策略主报告未完成: "
+                f"{(result.get('health') or {}).get('error_code', 'unknown')}"
+            )
     except Exception as e:
         logger.error(f"次日投资策略主报告异常: {e}", exc_info=True)
+
+
+async def _recover_opportunity_pipeline_with_status():
+    """Resume the first incomplete v9 stage without duplicating prior writes."""
+    try:
+        from app.services.opportunity_pipeline import build_default_pipeline
+
+        result = await build_default_pipeline().recover_due_run()
+        logger.info(f"v9 管线恢复检查: {result.get('status', 'completed')}")
+        return result
+    except Exception as exc:
+        logger.error(f"v9 管线恢复异常: {exc}", exc_info=True)
+        return {"status": "failed", "error_code": exc.__class__.__name__}
+
+
+async def _verify_opportunity_delivery_with_status():
+    """Verify the report artifact and resume delivery when needed."""
+    try:
+        from app.services.opportunity_pipeline import build_default_pipeline
+
+        result = await build_default_pipeline().verify_due_delivery()
+        logger.info(f"v9 报告交付验真: {result.get('status', 'unknown')}")
+        return result
+    except Exception as exc:
+        logger.error(f"v9 报告交付验真异常: {exc}", exc_info=True)
+        return {"status": "failed", "error_code": exc.__class__.__name__}
 
 
 async def _run_yitaojin_task_with_status(task: str) -> dict:
@@ -1282,8 +1324,18 @@ async def _startup_health_check():
         logger.warning(f"行情检测失败: {e}")
         issues.append(f"行情: {e}")
 
+    recovery = await _recover_opportunity_pipeline_with_status()
+    if recovery.get("status") == "failed":
+        issues.append(
+            "v9 策略报告恢复失败："
+            f"{recovery.get('error_code', 'unknown')}"
+        )
+
     if issues:
-        _feishu_webhook_push("旺财V7 启动告警", "\n".join(f"- {i}" for i in issues))
+        _feishu_webhook_push(
+            f"恭喜发财 {PRODUCT_VERSION} 启动告警",
+            "\n".join(f"- {i}" for i in issues),
+        )
 
 
 def _poll_bot_messages():

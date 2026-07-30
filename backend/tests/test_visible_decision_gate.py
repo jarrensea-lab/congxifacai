@@ -670,7 +670,7 @@ async def test_intraday_sync_failure_blocks_candidates_but_still_runs_position_w
     await main_module._run_intraday_alert_scan_with_status()
 
     assert len(watch_calls) == 1
-    assert pushed and pushed[0][0] == "旺财V7.5 盘中持仓触发"
+    assert pushed and pushed[0][0] == "恭喜发财 v9.0.0-dev 盘中持仓触发"
     assert len(scan_calls) == 1
     assert scan_calls[0]["entry_allowed"] is False
     assert scan_calls[0]["reasons"] == ["portfolio_sync_failed"]

@@ -104,7 +104,62 @@ def test_dynamic_small_account_candidates_rotate_from_live_fund_flow_rows():
 
     assert [item["code"] for item in rows] == ["000563", "000597"]
     assert rows[0]["source"] == "dynamic_fund_flow_discovery"
-    assert rows[0]["research_only"] is True
+    assert "research_only" not in rows[0]
     assert rows[0]["max_entry_price"] == 15.05
     assert rows[0]["market_evidence"]["net_flow_yuan"] == 125_000_000
     assert "动态资金流" in rows[0]["watch_reason"]
+
+
+def test_priority_target_is_kept_beyond_normal_ranking_limit():
+    result = small_account_discovery.discover_affordable_market_candidates(
+        market_rows=[
+            {
+                "code": "000001",
+                "name": "高排名",
+                "price": 3,
+                "net_amount": 20_000_000,
+                "amount": 200_000_000,
+            },
+            {
+                "code": "000002",
+                "name": "旧标的",
+                "price": 3,
+                "net_amount": 1,
+                "amount": 1,
+            },
+        ],
+        available_cash=1000,
+        total_assets=1000,
+        priority_codes={"000002"},
+        max_candidates=1,
+    )
+
+    assert [item["code"] for item in result["candidates"]] == [
+        "000001",
+        "000002",
+    ]
+    assert result["metrics"]["ranked_count"] == 2
+
+
+def test_priority_targets_report_budget_block_and_missing_rows():
+    result = small_account_discovery.discover_affordable_market_candidates(
+        market_rows=[
+            {
+                "code": "600000",
+                "name": "超预算旧标的",
+                "price": 12,
+            }
+        ],
+        available_cash=800,
+        total_assets=1600,
+        priority_codes={"600000", "000002"},
+    )
+
+    assert result["rejected"]["priority_budget_blocked"][0]["code"] == "600000"
+    assert result["rejected"]["priority_missing"] == [
+        {
+            "code": "000002",
+            "name": "000002",
+            "reason": "missing_required_data",
+        }
+    ]
