@@ -10,6 +10,35 @@ from datetime import date, datetime, timedelta
 import pytest
 
 
+def test_v9_runtime_identity_is_single_source(monkeypatch):
+    monkeypatch.setenv("CONGXI_BUILD_COMMIT", "abc1234")
+    from app.version import build_runtime_identity
+
+    identity = build_runtime_identity(started_at="2026-07-31T08:00:00+08:00")
+
+    assert identity == {
+        "product_version": "v9.0.0-dev",
+        "pipeline_version": "actionable_pipeline_v1",
+        "score_version": "composite_score_v1",
+        "commit": "abc1234",
+        "started_at": "2026-07-31T08:00:00+08:00",
+    }
+
+
+@pytest.mark.asyncio
+async def test_health_endpoint_uses_runtime_identity(monkeypatch):
+    from app.routers import market
+
+    async def unavailable():
+        return False
+
+    monkeypatch.setattr(market._cloud, "is_available", unavailable)
+    result = await market.health_check()
+
+    assert result["runtime"]["product_version"] == "v9.0.0-dev"
+    assert result["version"] == result["runtime"]["product_version"]
+
+
 def test_database_creates_missing_parent_directory(tmp_path):
     """Runtime SQLite startup should create the parent directory before connecting."""
     db_path = tmp_path / "missing" / "nested" / "stock_data.db"

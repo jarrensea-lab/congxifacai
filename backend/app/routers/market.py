@@ -8,6 +8,7 @@ from app.utils.tiered_cache import tiered_cache
 from app.trading_engine.position import PositionManager
 from app.data_sources.tencent_client import TencentDataSource
 from app.data_sources.eastmoney_client import EastmoneyDataSource
+from app.version import build_runtime_identity
 
 # 需要从主应用注入的数据源实例
 tencent_client: TencentDataSource = None
@@ -20,6 +21,9 @@ import time as _time
 from app.ai.cloud_client import cloud as _cloud
 
 _server_start_time = _time.time()
+_runtime_identity = build_runtime_identity(
+    started_at=datetime.now().astimezone().isoformat()
+)
 
 
 @router.get("/health")
@@ -45,7 +49,8 @@ async def health_check():
         "uptime_seconds": int(_time.time() - _server_start_time),
         "deepseek": "ok" if ds_ok else "unavailable",
         "database": "ok" if db_ok else "error",
-        "version": "v8.2.0-dev",
+        "version": _runtime_identity["product_version"],
+        "runtime": dict(_runtime_identity),
     }
 
 
