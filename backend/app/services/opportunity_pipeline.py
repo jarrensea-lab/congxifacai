@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import inspect
+from datetime import datetime
 from typing import Any, Awaitable, Callable
 
 from app.services.small_account_discovery import (
     discover_affordable_market_candidates,
 )
+from app.version import SCORE_VERSION
 
 
 SnapshotBuilder = Callable[[dict[str, Any]], dict[str, Any] | Awaitable[dict[str, Any]]]
@@ -99,6 +101,37 @@ class OpportunityPipeline:
                 scorecard.setdefault("code", candidate["code"])
                 scorecard.setdefault("name", candidate["name"])
                 scorecard["discovery_source"] = candidate["source"]
+                action = str(scorecard.get("action") or "").strip().lower()
+                block_reason = str(
+                    scorecard.get("block_reason") or ""
+                ).strip()
+                scorecard["promotion_evidence"] = {
+                    "score_version": str(
+                        scorecard.get("score_version") or SCORE_VERSION
+                    ),
+                    "score": float(scorecard.get("score") or 0),
+                    "data_cutoff_at": str(
+                        snapshot.get("generated_at")
+                        or datetime.now().astimezone().isoformat()
+                    ),
+                    "playbook": str(
+                        scorecard.get("playbook") or ""
+                    ),
+                    "hard_gates": {
+                        "affordable": True,
+                        "data_complete": not bool(
+                            scorecard.get("missing_data")
+                        ),
+                        "risk_ok": block_reason
+                        not in {
+                            "risk_budget_too_small",
+                            "lot_size_exceeded",
+                        },
+                        "tradeable": True,
+                        "playbook_triggered": action
+                        in {"buy", "add", "actionable", "executable"},
+                    },
+                }
                 scorecards.append(scorecard)
             except Exception:
                 enrichment_failed += 1

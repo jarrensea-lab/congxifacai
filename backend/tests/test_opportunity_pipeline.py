@@ -102,3 +102,49 @@ async def test_pipeline_records_zero_market_rows_without_falling_back_to_seed_na
     assert result["scorecards"] == []
     assert result["health"]["status"] == "failed"
     assert result["health"]["error_code"] == "empty_market_universe"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_builds_deterministic_promotion_evidence_for_actionable_score():
+    from app.services.opportunity_pipeline import OpportunityPipeline
+
+    source = FakeDiscoverySource([
+        {
+            "code": "000001",
+            "name": "可执行",
+            "price": 6.0,
+            "amount": 200_000_000,
+            "net_amount": 20_000_000,
+        }
+    ])
+
+    async def enrich(row):
+        return complete_snapshot(row["code"], row["name"], row["price"])
+
+    def score(snapshot, **_):
+        return {
+            "code": snapshot["code"],
+            "name": snapshot["name"],
+            "score": 82,
+            "score_version": "composite_score_v1",
+            "action": "buy",
+            "playbook": "breakout_entry",
+            "missing_data": [],
+            "block_reason": "",
+            "risk_amount": 30,
+        }
+
+    result = await OpportunityPipeline(
+        discovery_source=source,
+        snapshot_builder=enrich,
+        scorer=score,
+    ).evaluate(
+        trade_date="2026-07-31",
+        available_cash=800,
+        total_assets=1600,
+    )
+
+    evidence = result["scorecards"][0]["promotion_evidence"]
+    assert evidence["score"] == 82
+    assert all(evidence["hard_gates"].values())
+    assert evidence["data_cutoff_at"]
