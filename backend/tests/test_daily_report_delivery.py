@@ -1327,7 +1327,8 @@ def test_build_next_day_strategy_sections_hides_budget_blocked_research_referenc
     assert "低价突破(002123)" in feishu
     assert "## 二、中长期论文状态" in sections
     assert "澜起科技(688008)" not in feishu
-    assert "澜起科技(688008)" in appendix
+    assert "澜起科技(688008)" not in appendix
+    assert "预算阻断 1 只" in appendix
     assert "预算阻断 1 只" in sections
     assert "数据不足，建议观望" not in sections
 
@@ -1366,7 +1367,8 @@ def test_build_next_day_strategy_sections_explains_long_research_exists_when_bud
     feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
     appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
     assert "澜起科技(688008)" not in feishu
-    assert "澜起科技(688008)" in appendix
+    assert "澜起科技(688008)" not in appendix
+    assert "预算阻断 1 只" in appendix
     assert "中长线研究不是没有" not in sections
     assert "研究层仍有" not in sections
     assert "预算不足本身不构成中长期研究结论" in sections
@@ -1499,7 +1501,8 @@ def test_build_next_day_strategy_sections_does_not_try_unaffordable_outside_scan
     feishu = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[0]
     appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
     assert "润和软件(300339)" not in feishu
-    assert "润和软件(300339)" in appendix
+    assert "润和软件(300339)" not in appendix
+    assert "预算阻断 1 只" in appendix
     assert "预算阻断 1 只" in sections
     assert "一手试错约¥3,933.00" not in sections
     assert "等回落到¥30.42以内" not in feishu
@@ -1631,7 +1634,8 @@ def test_build_next_day_strategy_sections_renders_mid_frequency_strategy_line():
     appendix = sections.split("<!-- FEISHU_SUMMARY_END -->", 1)[1]
     assert "## 二、中长期论文状态" in sections
     assert "北方华创(002371)" not in feishu
-    assert "北方华创(002371)" in appendix
+    assert "北方华创(002371)" not in appendix
+    assert "预算阻断 1 只" in appendix
     assert "预算阻断 1 只" in sections
     assert "¥935.36" not in feishu
     assert "可人工复核买入" not in sections
@@ -3952,7 +3956,8 @@ def test_next_day_report_keeps_research_only_in_appendix_and_budget_is_not_long(
     assert "预算高价股" not in long_section
     assert "中长线研究不是没有" not in sections
     assert "研究层仍有" not in sections
-    assert "预算高价股(688008)" in appendix
+    assert "预算高价股(688008)" not in appendix
+    assert "预算阻断 1 只" in appendix
     assert "研究参照股(002729)" in appendix
     assert "不进入 AI 辩论输入" not in sections
     assert "不进入AI辩论输入" not in sections
@@ -4111,7 +4116,8 @@ def test_budget_blocked_real_long_thesis_remains_visible_as_non_trading_research
     assert "红线触发" in long_section
     assert "风险退出" in long_section
     assert "人工复核买入" not in long_section
-    assert "预算阻断长期样本(688008)" in appendix
+    assert "预算阻断长期样本(688008)" not in appendix
+    assert "预算阻断 1 只" in appendix
 
 
 @pytest.mark.parametrize("thesis_status", ["healthy", "unknown"])
@@ -4430,8 +4436,9 @@ def test_zero_buy_budget_blocks_every_positive_lot_from_main_candidates():
     assert "零预算样本(002123)" not in first_screen
     assert "新开仓结论：不下单" in first_screen
     assert "可执行预算为 ¥0.00" in first_screen
-    assert "零预算样本(002123)" in appendix
-    assert "一手金额 ¥320.00 超过可执行预算 ¥0.00" in appendix
+    assert "零预算样本(002123)" not in appendix
+    assert "预算阻断 1 只" in appendix
+    assert "一手金额 ¥320.00 超过可执行预算 ¥0.00" not in appendix
 
 
 @pytest.mark.parametrize(

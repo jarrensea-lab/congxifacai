@@ -1010,6 +1010,7 @@ def build_v9_opportunity_section(result: dict) -> list[str]:
         item
         for item in result.get("lifecycle_events") or []
         if isinstance(item, dict)
+        and str(item.get("block_reason") or "").strip() != "lot_size_exceeded"
     ]
     actionable_actions = {"buy", "add", "actionable", "executable", "increase"}
     actionable = sorted(

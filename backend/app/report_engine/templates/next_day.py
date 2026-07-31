@@ -141,9 +141,8 @@ def _render_research_appendix(view: Mapping[str, Any]) -> list[str]:
         ),
     ]
     combined: list[tuple[str, Mapping[str, Any]]] = [
-        ("预算阻断", item) for item in budget_rows
+        ("研究参照", item) for item in research_rows
     ]
-    combined.extend(("研究参照", item) for item in research_rows)
     if combined:
         lines.extend([
             "",

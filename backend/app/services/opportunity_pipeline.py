@@ -137,7 +137,10 @@ def apply_scorecard_lifecycle(
             score < 65 or block_reason == "long_thesis_broken"
         ):
             continue
-        if (
+        if block_reason == "lot_size_exceeded":
+            status = "research_reference"
+            streak = 0
+        elif (
             block_reason in {"long_thesis_broken", "not_in_market_universe"}
             or action in {"remove", "removed"}
         ):

@@ -127,6 +127,59 @@ def test_report_exposes_consumed_market_evidence_counts_without_fake_gaps():
     assert "待补信号/数据" not in report
 
 
+def test_budget_blocked_names_are_hidden_from_user_facing_report_sections():
+    from app.report_engine.templates.next_day import render_next_day_sections
+    from scripts.daily_report import build_v9_opportunity_section
+
+    budget_name = "贵州茅台"
+    report = "\n".join(
+        build_v9_opportunity_section({
+            "account": {
+                "available_cash": 1383.25,
+                "cash_reserve": 612.43,
+                "buy_budget": 770.82,
+            },
+            "metrics": {
+                "scanned_count": 5197,
+                "affordable_count": 1281,
+                "scored_count": 33,
+            },
+            "scorecards": [],
+            "lifecycle_events": [{
+                "code": "600519",
+                "name": budget_name,
+                "event": "removed",
+                "block_reason": "lot_size_exceeded",
+                "reason": "最小交易单位金额超过当前单票预算",
+            }],
+            "health": {"status": "succeeded"},
+        })
+    )
+    report += "\n" + "\n".join(
+        render_next_day_sections({
+            "target_date": "2026-07-31",
+            "holdings": [],
+            "candidates": [],
+            "candidate_missing_reason": "68 只候选已按预算过滤",
+            "long_horizon": [],
+            "budget_blocked": [{
+                "label": f"{budget_name}(600519)",
+                "lot_value_text": "¥136,176.00",
+                "reason": "超过预算",
+                "next_signal": "资金增加后重新评分",
+            }],
+            "budget_blocked_count": 68,
+            "research_reference": [],
+            "audit_lines": [],
+            "review_lines": [],
+        })
+    )
+
+    assert "预算阻断 68 只" in report
+    assert budget_name not in report
+    assert "今日剔除" not in report
+
+
 def test_full_market_discovery_recognizes_star_and_chinext_registration_codes():
     from app.services.small_account_discovery import (
         discover_affordable_market_candidates,
@@ -465,6 +518,44 @@ def test_market_universe_miss_removes_existing_target_immediately(tmp_path):
 
     assert events[0]["event"] == "removed"
     assert store.load()["items"]["301707"]["status"] == "removed"
+
+
+def test_budget_blocked_existing_target_becomes_silent_research_reference(tmp_path):
+    from app.services.opportunity_pipeline import apply_scorecard_lifecycle
+    from app.services.quant_lifecycle import TargetPoolStore
+
+    store = TargetPoolStore(tmp_path / "candidate_pool.json")
+    store.save({
+        "version": 1,
+        "items": {
+            "600519": {
+                "code": "600519",
+                "name": "贵州茅台",
+                "status": "watching",
+                "source": "dynamic_market_discovery",
+                "scoring_decision": {"score": 72},
+            },
+        },
+    })
+
+    events = apply_scorecard_lifecycle(
+        store,
+        [{
+            "code": "600519",
+            "name": "贵州茅台",
+            "score": 0,
+            "action": "watch",
+            "block_reason": "lot_size_exceeded",
+            "lifecycle_only": True,
+            "discovery_source": "target_pool_daily_refresh",
+        }],
+        available_cash=1383.25,
+        total_assets=5000,
+    )
+
+    stored = store.load()["items"]["600519"]
+    assert stored["status"] == "research_reference"
+    assert events[0]["block_reason"] == "lot_size_exceeded"
 
 
 def test_sentinel_uses_fallback_events_when_primary_archive_is_empty(
