@@ -6,6 +6,7 @@ from typing import Any
 
 from app.services.quant_lifecycle import lot_size_for_code
 from app.services.strategy_profile import get_strategy_profile
+from app.utils.a_share_codes import validate_a_share_code
 
 
 DEFAULT_SMALL_ACCOUNT_SEEDS: tuple[dict[str, str], ...] = (
@@ -119,9 +120,7 @@ def discover_affordable_market_candidates(
         if (
             code in existing
             or len(code) != 6
-            or not code.startswith(
-                ("000", "001", "002", "003", "300", "600", "601", "603", "605")
-            )
+            or not validate_a_share_code(code)
             or "ST" in name.upper()
             or "退" in name
         ):
@@ -245,7 +244,7 @@ def build_dynamic_small_account_candidates(
         if (
             code in existing
             or len(code) != 6
-            or not code.startswith(("000", "001", "002", "003", "300", "600", "601", "603", "605"))
+            or not validate_a_share_code(code)
             or "ST" in name.upper()
             or "退" in name
         ):

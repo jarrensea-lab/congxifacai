@@ -37,7 +37,7 @@ def test_long_thesis_empty_state_and_unknown_are_distinct_in_code_and_docs():
             **empty,
         }],
     })
-    assert report_rows[0]["thesis_status"] == "未建论文"
+    assert report_rows == []
 
     explicit_states = (
         "unknown",

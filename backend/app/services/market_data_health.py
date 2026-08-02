@@ -1,6 +1,6 @@
 """Pure market-index quote validation and completeness aggregation."""
 from collections.abc import Mapping, Sequence
-from datetime import datetime
+from datetime import date, datetime
 import math
 
 
@@ -48,20 +48,27 @@ def fresh_market_quote_truth(
     *,
     now: datetime,
     max_age_seconds: int = MARKET_DATA_MAX_AGE_SECONDS,
+    valid_close_date: date | None = None,
 ) -> tuple[datetime, str] | None:
     """Return parsed quote time and accepted freshness for a trusted quote."""
     freshness = str(
         quote.get("freshness_status") or quote.get("freshness") or ""
     ).strip().lower()
-    if freshness not in {"fresh", "ok"}:
-        return None
     raw_cutoff = (
         quote.get("data_cutoff")
         or quote.get("quote_timestamp")
         or quote.get("timestamp")
     )
     parsed = parse_aware_market_timestamp(raw_cutoff)
-    if parsed is None or not is_recent_market_cutoff(
+    if parsed is None:
+        return None
+    if (
+        freshness == "valid_close"
+        and valid_close_date is not None
+        and parsed.date() == valid_close_date
+    ):
+        return parsed, freshness
+    if freshness not in {"fresh", "ok"} or not is_recent_market_cutoff(
         parsed,
         now=now,
         max_age_seconds=max_age_seconds,
@@ -77,6 +84,7 @@ def aggregate_market_quote_truth(
     default_provider: str,
     now: datetime,
     max_age_seconds: int = MARKET_DATA_MAX_AGE_SECONDS,
+    valid_close_date: date | None = None,
 ) -> dict:
     """Validate quotes and report exact expected-versus-verified coverage."""
     verified_quotes: dict[str, Mapping] = {}
@@ -106,6 +114,7 @@ def aggregate_market_quote_truth(
             quote,
             now=now,
             max_age_seconds=max_age_seconds,
+            valid_close_date=valid_close_date,
         )
         if not math.isfinite(price) or price <= 0 or quote_truth is None:
             rejected_sources.append(code)
@@ -122,9 +131,12 @@ def aggregate_market_quote_truth(
         source_error = "partial_market_coverage"
     elif verified_quotes:
         source_status = "ok"
-        freshness_status = (
-            "fresh" if accepted_freshness == {"fresh"} else "ok"
-        )
+        if accepted_freshness == {"fresh"}:
+            freshness_status = "fresh"
+        elif accepted_freshness == {"valid_close"}:
+            freshness_status = "valid_close"
+        else:
+            freshness_status = "ok"
         source_error = ""
     else:
         source_status = "failed"

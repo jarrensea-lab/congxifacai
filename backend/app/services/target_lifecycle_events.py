@@ -70,5 +70,6 @@ def classify_lifecycle_event(
         "new_status": new_status,
         "old_score": old_score,
         "new_score": new_score,
+        "block_reason": str(current.get("block_reason") or "").strip(),
         "reason": _reason(current),
     }

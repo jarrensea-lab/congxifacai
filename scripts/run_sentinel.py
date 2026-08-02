@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,7 @@ from app.ai.serenity_financial_evidence import (
     fetch_financial_evidence as default_financial_fetcher,
 )
 from app.data_sources.tencent_client import TencentDataSource
+from app.data_sources.akshare_news import AKShareNewsClient
 from app.data_sources.horizon_news_importer import (
     import_default_tushare_news_events,
     write_sentinel_news_events,
@@ -124,16 +126,117 @@ def _load_account_scale() -> dict[str, Any]:
     }
 
 
+def _fallback_news_themes(content: str) -> list[str]:
+    theme_keywords = (
+        (("人工智能", "AI", "算力"), "AI算力"),
+        (("半导体", "芯片", "集成电路"), "AI半导体"),
+        (("机器人", "具身智能"), "机器人"),
+        (("电网", "特高压"), "电网设备"),
+        (("电力", "储能"), "AI电力"),
+        (("光通信", "光模块", "CPO"), "CPO光通信"),
+        (("稀土", "有色", "黄金"), "资源材料"),
+        (("券商", "银行", "保险"), "金融"),
+        (("医药", "创新药"), "医药"),
+        (("光伏", "新能源", "锂电"), "新能源"),
+    )
+    return [
+        theme
+        for keywords, theme in theme_keywords
+        if any(keyword in content for keyword in keywords)
+    ]
+
+
+def _akshare_fallback_news_events(report_date: str) -> list[dict[str, Any]]:
+    """Fetch a second public news source when the primary archive is empty."""
+
+    async def fetch() -> list[dict[str, Any]]:
+        client = AKShareNewsClient()
+        breakfast, global_news = await asyncio.gather(
+            client.fetch_cjzc(),
+            client.fetch_global_news(),
+        )
+        return [
+            *(
+                {"channel": "finance_breakfast", **item}
+                for item in (breakfast or [])
+            ),
+            *(
+                {"channel": "global_market", **item}
+                for item in (global_news or [])
+            ),
+        ]
+
+    try:
+        raw_items = asyncio.run(fetch())
+    except Exception:
+        return []
+
+    events: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    try:
+        report_day = datetime.strptime(report_date, "%Y-%m-%d").date()
+    except ValueError:
+        report_day = date.today()
+    for index, item in enumerate(raw_items):
+        title = str(item.get("title") or "").strip()
+        summary = str(item.get("summary") or "").strip()
+        content = " — ".join(part for part in (title, summary) if part)
+        if not content:
+            continue
+        digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+        if digest in seen:
+            continue
+        seen.add(digest)
+        published_at = str(item.get("time") or f"{report_date}T20:00:00+08:00")
+        try:
+            published_day = datetime.strptime(
+                published_at[:10],
+                "%Y-%m-%d",
+            ).date()
+        except ValueError:
+            published_day = report_day
+        if not 0 <= (report_day - published_day).days <= 2:
+            continue
+        themes = _fallback_news_themes(content)
+        events.append({
+            "id": f"akshare-{report_date}-{index}-{digest[:12]}",
+            "source": "eastmoney_akshare",
+            "channel": item.get("channel") or "global_market",
+            "published_at": published_at,
+            "fetched_at": datetime.now().astimezone().isoformat(),
+            "content": content,
+            "is_key": bool(themes),
+            "symbols": [],
+            "themes": themes,
+            "dedupe_key": digest,
+            "raw_hash": digest,
+            "evidence_status": "fallback_enriched",
+        })
+    return events
+
+
 def run_news_job(
     report_date: str,
     output_root: str | Path = DEFAULT_OUTPUT_ROOT,
     *,
     quote_fetcher=None,
     financial_fetcher=None,
+    fallback_news_fetcher=None,
 ) -> dict[str, Any]:
     """Import Tushare high-frequency news and persist a Sentinel research package."""
     root = Path(output_root)
     events = import_default_tushare_news_events(report_date)
+    primary_event_count = len(events)
+    fallback_attempted = not events
+    if fallback_attempted:
+        fallback_news_fetcher = (
+            fallback_news_fetcher or _akshare_fallback_news_events
+        )
+        try:
+            events = list(fallback_news_fetcher(report_date) or [])
+        except Exception:
+            events = []
+    fallback_used = bool(events) and fallback_attempted
     news_path = root / "news_events" / f"{report_date}.jsonl"
     write_sentinel_news_events(events, news_path)
     package = build_news_research_package(events, report_date=report_date)
@@ -181,6 +284,9 @@ def run_news_job(
         "mode": "news",
         "date": report_date,
         "event_count": len(events),
+        "primary_event_count": primary_event_count,
+        "fallback_attempted": fallback_attempted,
+        "fallback_used": fallback_used,
         "serenity_deep_dive_count": len(package["serenity_deep_dives"]),
         "account_status": account_status,
         "long_horizon_summary": long_horizon_summary,
@@ -254,6 +360,11 @@ def _sentinel_result_exit_code(result: Any, *, mode: str | None = None) -> int:
         return 1
     if not isinstance(news_result.get("long_horizon_summary"), dict):
         return 1
+    if (
+        "event_count" in news_result
+        and int(news_result.get("event_count") or 0) <= 0
+    ):
+        return 2
 
     statuses: list[str] = []
 

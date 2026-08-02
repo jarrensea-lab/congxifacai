@@ -63,7 +63,7 @@ def _render_candidates(view: Mapping[str, Any]) -> list[str]:
         )
         return lines + [
             "- 新开仓结论：不下单。",
-            f"- 待补信号/数据：{missing}",
+            f"- 当前阻断条件：{missing}",
             "",
         ]
 
@@ -141,9 +141,8 @@ def _render_research_appendix(view: Mapping[str, Any]) -> list[str]:
         ),
     ]
     combined: list[tuple[str, Mapping[str, Any]]] = [
-        ("预算阻断", item) for item in budget_rows
+        ("研究参照", item) for item in research_rows
     ]
-    combined.extend(("研究参照", item) for item in research_rows)
     if combined:
         lines.extend([
             "",
