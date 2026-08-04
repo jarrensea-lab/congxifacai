@@ -84,3 +84,33 @@ def test_s_grade_requires_all_hard_gates_even_for_high_raw_score():
 
     assert score["total"] >= 85
     assert score["grade"] == "A"
+
+
+def test_cyclical_low_pe_only_gets_valuation_credit_after_cash_confirmation():
+    from app.services.composite_score import build_composite_score
+
+    weak = complete_snapshot()
+    weak["financial"] = {
+        "status": "ok",
+        "earnings_profile": "cyclical",
+        "revenue_yoy_pct": 12,
+        "gross_margin_pct": 35,
+        "pe_ttm": 8,
+        "free_cash_flow": -100,
+    }
+    cash_confirmed = complete_snapshot()
+    cash_confirmed["financial"] = {
+        **weak["financial"],
+        "free_cash_flow": 100,
+    }
+
+    weak_score = build_composite_score(weak)
+    confirmed_score = build_composite_score(cash_confirmed)
+
+    assert (
+        confirmed_score["components"]["fundamental_valuation"]
+        > weak_score["components"]["fundamental_valuation"]
+    )
+    assert "周期" in weak_score["primary_risk"] or any(
+        "周期" in reason for reason in weak_score["top_reasons"]
+    )

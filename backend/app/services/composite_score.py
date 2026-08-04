@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.services.financial_quality import assess_financial_quality
 from app.services.playbook_engine import select_playbook
 from app.services.strategy_profile import (
     calculate_stop_loss_price,
@@ -177,18 +178,30 @@ def _fundamental_valuation(snapshot: dict[str, Any]) -> tuple[float, str, str]:
     status = _source_status(payload)
     if status != "ok":
         return 0.0, "财务与估值数据缺失", status
-    points = 5.0
-    revenue_yoy = _number(payload.get("revenue_yoy_pct"))
-    gross_margin = _number(payload.get("gross_margin_pct"))
+    quality = assess_financial_quality(payload)
+    coverage = _number(quality.get("coverage"))
+    confidence = min(1.0, coverage / 0.25) if coverage > 0 else 0.0
+    points = 1.0 + 12.0 * (_number(quality.get("score")) / 100) * confidence
     pe_ttm = _number(payload.get("pe_ttm"))
-    if revenue_yoy > 0:
-        points += 5
-    if gross_margin > 0:
-        points += 3
-    if 0 < pe_ttm <= 30:
-        points += 2
+    if quality.get("valuation_eligible") is True:
+        points += 3 if 0 < pe_ttm <= 20 else 2 if pe_ttm <= 30 else 1 if pe_ttm <= 50 else 0
     points = min(COMPONENT_MAX["fundamental_valuation"], points)
-    return points, f"基本面与估值{points:.0f}/15，营收增速{revenue_yoy:.1f}%", "ok"
+    profile_label = {
+        "cyclical": "周期型",
+        "compounder": "复利型",
+        "unknown": "未分类",
+    }.get(str(quality.get("earnings_profile") or "unknown"), "未分类")
+    flags = [str(flag) for flag in quality.get("flags") or []]
+    flag_text = "、".join(flags) if flags else "无质量红线"
+    return (
+        points,
+        (
+            f"基本面与估值{points:.1f}/15：{profile_label}，"
+            f"质量{_number(quality.get('score')):.1f}分，"
+            f"覆盖率{coverage * 100:.0f}%，{flag_text}"
+        ),
+        "ok",
+    )
 
 
 def _relative_strength(snapshot: dict[str, Any]) -> tuple[float, str, str]:
