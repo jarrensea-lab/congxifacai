@@ -114,3 +114,26 @@ def test_cyclical_low_pe_only_gets_valuation_credit_after_cash_confirmation():
     assert "周期" in weak_score["primary_risk"] or any(
         "周期" in reason for reason in weak_score["top_reasons"]
     )
+
+
+def test_cyclical_cash_confirmation_does_not_award_missing_pe_credit():
+    from app.services.composite_score import build_composite_score
+
+    missing_pe = complete_snapshot()
+    missing_pe["financial"] = {
+        "status": "ok",
+        "earnings_profile": "cyclical",
+        "free_cash_flow": 100,
+        "operating_cashflow_yoy_pct": -40,
+    }
+    low_pe = complete_snapshot()
+    low_pe["financial"] = {
+        **missing_pe["financial"],
+        "pe_ttm": 15,
+    }
+
+    missing_pe_score = build_composite_score(missing_pe)
+    low_pe_score = build_composite_score(low_pe)
+
+    assert missing_pe_score["components"]["fundamental_valuation"] == 7.0
+    assert low_pe_score["components"]["fundamental_valuation"] == 10.0

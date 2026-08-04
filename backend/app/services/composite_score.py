@@ -183,7 +183,7 @@ def _fundamental_valuation(snapshot: dict[str, Any]) -> tuple[float, str, str]:
     confidence = min(1.0, coverage / 0.25) if coverage > 0 else 0.0
     points = 1.0 + 12.0 * (_number(quality.get("score")) / 100) * confidence
     pe_ttm = _number(payload.get("pe_ttm"))
-    if quality.get("valuation_eligible") is True:
+    if quality.get("valuation_eligible") is True and pe_ttm > 0:
         points += 3 if 0 < pe_ttm <= 20 else 2 if pe_ttm <= 30 else 1 if pe_ttm <= 50 else 0
     points = min(COMPONENT_MAX["fundamental_valuation"], points)
     profile_label = {
