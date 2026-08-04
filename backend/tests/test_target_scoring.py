@@ -449,3 +449,58 @@ def test_next_target_status_allows_only_authorized_tactical_buy_and_explicit_rem
         == "executable"
     )
     assert target_scoring.next_target_status("long_watch", "remove", healthy) == "removed"
+
+
+def test_held_buy_is_exposed_as_add_with_position_and_quality_audit():
+    snapshot = _base_snapshot(code="000100", price=3.2)
+    snapshot["financial"].update({
+        "earnings_profile": "cyclical",
+        "free_cash_flow": 100,
+        "pe_ttm": 18,
+    })
+    snapshot["historical_recommendation"] = {
+        "realtime_quote": {"price": 2.5, "trading_date": "2026-08-03"},
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=6281.8,
+        total_assets=10058.8,
+        is_held=True,
+    )
+
+    assert result["action"] == "add"
+    assert result["entry_action"] == "add"
+    assert result["position_context"] == "held"
+    assert result["position_management_required"] is True
+    assert result["risk_per_lot"] > 0
+    assert result["risk_budget_utilization_pct"] > 0
+    assert result["lot_concentration_pct"] > 0
+    assert result["financial_quality_score"] >= 0
+    assert result["financial_quality_coverage"] > 0
+    assert result["earnings_profile"] == "cyclical"
+    assert result["historical_reference_status"] == "stale_divergence"
+    assert result["historical_reference_divergence_pct"] == 28.0
+
+
+def test_research_only_holding_remains_managed_without_entry_authorization():
+    snapshot = _base_snapshot(code="000100", price=3.2)
+    snapshot["production_eligibility"] = {
+        "eligible": False,
+        "research_only": True,
+        "original_status": "research_reference",
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=6281.8,
+        total_assets=10058.8,
+        is_held=True,
+    )
+
+    assert result["action"] == "research_only"
+    assert result["entry_action"] == "research_only"
+    assert result["position_context"] == "held"
+    assert result["position_management_required"] is True
+    assert result["position_amount"] == 0
+    assert result["position_shares"] == 0

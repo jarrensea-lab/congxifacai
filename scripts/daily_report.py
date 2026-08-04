@@ -3187,6 +3187,7 @@ async def build_target_scores_for_report(
     limit: int | None = None,
     market_source=None,
     long_thesis_store=None,
+    held_codes: set[str] | None = None,
 ) -> list[dict]:
     """Score current target-pool items with normalized data snapshots."""
     from contextlib import nullcontext
@@ -3252,6 +3253,11 @@ async def build_target_scores_for_report(
         else LongThesisStore()
     )
     payload = store.load()
+    normalized_held_codes = {
+        str(code).strip()
+        for code in (held_codes or set())
+        if str(code).strip()
+    }
     thesis_preview_payload = {"items": {}}
     if limit is None:
         try:
@@ -3460,6 +3466,11 @@ async def build_target_scores_for_report(
                 snapshot["sentinel"] = item.get("sentinel") or {}
             if "serenity" in item:
                 snapshot["serenity"] = item.get("serenity") or {}
+            snapshot["historical_recommendation"] = (
+                item.get("last_recommendation")
+                if isinstance(item.get("last_recommendation"), dict)
+                else {}
+            )
             evidence = (
                 item.get("evidence")
                 if isinstance(item.get("evidence"), dict)
@@ -3485,6 +3496,7 @@ async def build_target_scores_for_report(
                 available_cash=available_cash,
                 total_assets=total_assets,
                 long_thesis=thesis,
+                is_held=code in normalized_held_codes,
             )
             score["source_status"] = source_status_for(snapshot)
             pool_kind = infer_pool_kind(
@@ -3602,6 +3614,48 @@ async def build_target_scores_for_report(
                         score.get("decision_reason", ""),
                     ),
                     "current_long_evidence_ids": current_long_evidence_ids,
+                    "financial_quality_score": score.get(
+                        "financial_quality_score",
+                        0,
+                    ),
+                    "financial_quality_coverage": score.get(
+                        "financial_quality_coverage",
+                        0,
+                    ),
+                    "financial_quality_flags": score.get(
+                        "financial_quality_flags"
+                    ) or [],
+                    "earnings_profile": score.get(
+                        "earnings_profile",
+                        "unknown",
+                    ),
+                    "risk_per_lot": score.get("risk_per_lot", 0),
+                    "risk_budget_utilization_pct": score.get(
+                        "risk_budget_utilization_pct",
+                        0,
+                    ),
+                    "lot_concentration_pct": score.get(
+                        "lot_concentration_pct",
+                        0,
+                    ),
+                    "position_context": score.get(
+                        "position_context",
+                        "not_held",
+                    ),
+                    "position_management_required": score.get(
+                        "position_management_required"
+                    ) is True,
+                    "entry_action": score.get(
+                        "entry_action",
+                        action or "watch",
+                    ),
+                    "historical_reference_status": score.get(
+                        "historical_reference_status",
+                        "unverifiable",
+                    ),
+                    "historical_reference_divergence_pct": score.get(
+                        "historical_reference_divergence_pct"
+                    ),
                     "evaluated_at": datetime.now().strftime(
                         "%Y-%m-%d %H:%M:%S"
                     ),
@@ -4219,6 +4273,11 @@ async def main(*, v9_pipeline_result: dict | None = None):
                 available_cash=available_cash,
                 total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
                 market_source=shared_market_source,
+                held_codes={
+                    str(position.get("code") or "").strip()
+                    for position in positions
+                    if str(position.get("code") or "").strip()
+                },
             )
             if target_scores:
                 decision["target_scores"] = target_scores
