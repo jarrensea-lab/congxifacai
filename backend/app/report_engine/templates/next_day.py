@@ -90,10 +90,21 @@ def _render_candidates(view: Mapping[str, Any]) -> list[str]:
 def _render_long_horizon(view: Mapping[str, Any]) -> list[str]:
     rows = view.get("long_horizon")
     long_rows = [item for item in rows if isinstance(item, Mapping)] if isinstance(rows, list) else []
+    has_unbuilt_holding_thesis = any(
+        str(item.get("thesis_status") or "").strip() == "未建论文"
+        for item in long_rows
+    )
+    scope_note = (
+        "- 已建立的长期论文与持仓论文缺口都会展示；真实持仓即使未建论文也会显示。"
+        "未建论文不等于长期看多，也不单独触发交易动作。"
+        if has_unbuilt_holding_thesis
+        else "- 这里只展示已建立的长期论文状态，不单独触发交易动作；"
+        "预算不足本身不构成中长期研究结论。"
+    )
     lines = [
         "## 二、中长期论文状态",
         "",
-        "- 这里只展示已建立的长期论文状态，不单独触发交易动作；预算不足本身不构成中长期研究结论。",
+        scope_note,
         "",
     ]
     if not long_rows:

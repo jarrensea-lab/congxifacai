@@ -220,6 +220,66 @@ def test_zero_long_score_without_thesis_is_not_rendered_as_missing_thesis():
     assert rows == []
 
 
+def test_current_stock_holding_without_long_thesis_is_rendered_as_unbuilt():
+    from scripts.daily_report import _long_horizon_view
+
+    rows = _long_horizon_view(
+        {"target_scores": []},
+        positions=[{
+            "code": "600900",
+            "name": "长江电力",
+            "shares": 100,
+        }],
+    )
+
+    assert rows == [{
+        "label": "长江电力(600900)",
+        "thesis_status": "未建论文",
+        "valuation_zone": "待估值",
+        "long_quality_score": "未知",
+        "red_line_status": "红线状态未知",
+        "action_nature": "持仓论文待建",
+        "next_signal": (
+            "当前为真实持仓，但尚未建立可验证的中长期论文；"
+            "下一步补齐盈利质量、自由现金流、负债与分红、行业周期和估值证据。"
+        ),
+    }]
+
+
+def test_current_etf_holding_without_long_thesis_uses_etf_review_evidence():
+    from scripts.daily_report import _long_horizon_view
+
+    rows = _long_horizon_view(
+        {"target_scores": []},
+        positions=[{
+            "code": "159915",
+            "name": "创业板ETF易方达",
+            "shares": 200,
+        }],
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["thesis_status"] == "未建论文"
+    assert "跟踪指数估值、行业权重、波动回撤、费率和流动性" in rows[0]["next_signal"]
+
+
+def test_long_horizon_section_discloses_unbuilt_holding_theses():
+    from app.report_engine.templates.next_day import render_next_day_sections
+
+    rendered = "\n".join(render_next_day_sections({
+        "target_date": "2026-08-06",
+        "holdings": [],
+        "candidates": [],
+        "long_horizon": [{
+            "label": "长江电力(600900)",
+            "thesis_status": "未建论文",
+        }],
+    }))
+
+    assert "真实持仓即使未建论文也会显示" in rendered
+    assert "未建论文不等于长期看多" in rendered
+
+
 def test_empty_sentinel_news_is_degraded_not_success():
     from scripts.run_sentinel import _sentinel_result_exit_code
 

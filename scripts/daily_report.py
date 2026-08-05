@@ -2716,8 +2716,14 @@ def _candidate_view(
     return ordered[:3], _humanize_reason(missing_reason)
 
 
-def _long_horizon_view(decision: dict) -> list[dict]:
+def _long_horizon_view(
+    decision: dict,
+    *,
+    positions: list[dict] | None = None,
+) -> list[dict]:
     rows: list[dict] = []
+    long_truth: list[dict] = []
+    long_truth_by_code: dict[str, dict] = {}
     for item in _target_scores(decision):
         has_long_truth = (
             bool(item.get("thesis_status"))
@@ -2726,6 +2732,60 @@ def _long_horizon_view(decision: dict) -> list[dict]:
         )
         if not has_long_truth:
             continue
+        long_truth.append(item)
+        code = _target_code(item)
+        if code:
+            long_truth_by_code[code] = item
+
+    ordered: list[dict] = []
+    seen_codes: set[str] = set()
+    for position in positions or []:
+        code = _target_code(position)
+        if not code or code in seen_codes:
+            continue
+        if code in long_truth_by_code:
+            ordered.append(long_truth_by_code[code])
+        else:
+            name = str(
+                position.get("name")
+                or position.get("stock_name")
+                or code
+            ).strip()
+            is_etf = (
+                "ETF" in name.upper()
+                or code.startswith((
+                    "159", "510", "511", "512", "513", "515",
+                    "516", "517", "518", "588", "589",
+                ))
+            )
+            evidence = (
+                "跟踪指数估值、行业权重、波动回撤、费率和流动性"
+                if is_etf
+                else "盈利质量、自由现金流、负债与分红、行业周期和估值"
+            )
+            ordered.append({
+                **position,
+                "thesis_status": "",
+                "valuation_zone": "unknown",
+                "red_line_status": "unknown",
+                "action_nature": "持仓论文待建",
+                "missing_long_thesis": True,
+                "long_horizon_reason": (
+                    "当前为真实持仓，但尚未建立可验证的中长期论文；"
+                    f"下一步补齐{evidence}证据。"
+                ),
+            })
+        seen_codes.add(code)
+
+    for item in long_truth:
+        code = _target_code(item)
+        if code and code in seen_codes:
+            continue
+        ordered.append(item)
+        if code:
+            seen_codes.add(code)
+
+    for item in ordered:
         long_quality_score = item.get("long_quality_score")
         long_reason = _humanize_reason(
             item.get("combined_decision_reason")
@@ -2758,6 +2818,8 @@ def _long_horizon_view(decision: dict) -> list[dict]:
                 else long_reason
             ),
         })
+        if item.get("missing_long_thesis") is True:
+            rows[-1]["action_nature"] = "持仓论文待建"
     return rows
 
 
@@ -3058,7 +3120,7 @@ def build_next_day_strategy_sections(
         ),
         "candidates": candidates,
         "candidate_missing_reason": candidate_missing_reason,
-        "long_horizon": _long_horizon_view(decision),
+        "long_horizon": _long_horizon_view(decision, positions=positions),
         "budget_blocked": budget_rows,
         "budget_blocked_count": len(hidden_codes),
         "research_reference": research_rows,
