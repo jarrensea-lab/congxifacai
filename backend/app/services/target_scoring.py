@@ -35,6 +35,15 @@ def _status_ok(payload: dict[str, Any] | None) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "ok"
 
 
+def _required_sources(code: str, name: str) -> tuple[str, ...]:
+    """Return decision inputs that apply to the target's asset class."""
+    clean_name = str(name or "").upper()
+    clean_code = str(code or "").strip()
+    if "ETF" in clean_name or clean_code.startswith(("159", "510", "511", "512", "513", "515", "516", "517", "518", "588", "589")):
+        return tuple(source for source in REQUIRED_SOURCES if source != "financial")
+    return REQUIRED_SOURCES
+
+
 def _buy_budget(available_cash: float, total_assets: float) -> float:
     profile = get_strategy_profile()
     assets = _to_float(total_assets, _to_float(available_cash))
@@ -217,7 +226,11 @@ def score_target(
     lot_size = lot_size_for_code(code)
     lot_value = round(price * lot_size, 2) if price > 0 else 0.0
     budget = _buy_budget(available_cash, total_assets)
-    missing_data = [key for key in REQUIRED_SOURCES if not _status_ok(snapshot.get(key))]
+    missing_data = [
+        key
+        for key in _required_sources(code, name)
+        if not _status_ok(snapshot.get(key))
+    ]
     stop_loss = calculate_stop_loss_price(price, profile)
     target_price = calculate_target_price(price, profile)
     regime = evaluate_market_regime(snapshot)

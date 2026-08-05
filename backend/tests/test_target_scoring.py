@@ -209,6 +209,24 @@ def test_score_target_names_missing_data_instead_of_generic_insufficient():
     assert "补齐" in result["next_signal"]
 
 
+def test_score_target_etf_does_not_require_company_financials():
+    snapshot = _base_snapshot(code="159915", price=3.56)
+    snapshot["name"] = "创业板ETF易方达"
+    snapshot["financial"] = {
+        "status": "unavailable",
+        "reason": "financial_not_applicable_to_etf",
+    }
+
+    result = score_target(
+        snapshot,
+        available_cash=5562.70,
+        total_assets=10024.70,
+        is_held=True,
+    )
+
+    assert "financial" not in result["missing_data"]
+
+
 def test_score_target_carries_long_thesis_quality_without_overriding_trade_trigger():
     snapshot = _base_snapshot(code="002123", price=3.2)
     snapshot["quote"].update({"change_pct": 1.2, "vol_ratio": 1.1, "amount_wan": 8200})
