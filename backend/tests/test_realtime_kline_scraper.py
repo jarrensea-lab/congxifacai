@@ -1,3 +1,6 @@
+import asyncio
+from threading import Barrier
+
 import pytest
 
 from app.data_sources.realtime_kline_scraper import ScraplingRealtimeKlineSource
@@ -40,6 +43,28 @@ async def test_scrapling_realtime_kline_parses_eastmoney_rows(monkeypatch):
     assert result["bars"][-1]["close"] == 8.15
     assert "push2his.eastmoney.com" in captured["url"]
     assert "klt=1" in captured["url"]
+
+
+@pytest.mark.asyncio
+async def test_scrapling_realtime_kline_moves_blocking_fetch_off_event_loop(monkeypatch):
+    """Catches nominally concurrent K-line work executing serially on the event loop."""
+    from scrapling.fetchers import Fetcher
+
+    started = Barrier(2)
+
+    def fake_get(*args, **kwargs):
+        started.wait(timeout=0.2)
+        return FakeScraplingResponse()
+
+    monkeypatch.setattr(Fetcher, "get", fake_get)
+    source = ScraplingRealtimeKlineSource()
+
+    results = await asyncio.gather(
+        source.fetch_kline("000001", period="day", count=2),
+        source.fetch_kline("000002", period="day", count=2),
+    )
+
+    assert [len(result["bars"]) for result in results] == [2, 2]
 
 
 @pytest.mark.asyncio

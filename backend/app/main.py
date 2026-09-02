@@ -1244,62 +1244,77 @@ async def _run_sentinel_review_with_status():
 async def _run_prediction_lab_with_status():
     """Collect prediction samples, then backfill the derived due queue once."""
     if not is_trading_day():
-        return
-    try:
-        import subprocess
-        import sys
-        from app.config import PROJECT_ROOT
+        return {"state": "skipped", "reason": "non_trading_day"}
 
-        project_root = f"{PROJECT_ROOT}/.."
-        script_path = f"{project_root}/scripts/run_prediction_lab.py"
-        today = date.today()
-        report_date = str(today)
-        logger.info("=== 预测账本采集启动 ===")
-        collect = await asyncio.to_thread(
-            subprocess.run,
-            [
-                sys.executable,
-                script_path,
-                "collect",
-                "--date",
-                report_date,
-                "--universe",
-                "target_pool",
-                "--limit",
-                "200",
-            ],
-            cwd=project_root,
-            text=True,
-            capture_output=True,
-            timeout=300,
-        )
-        if collect.returncode != 0:
-            logger.warning(f"预测账本采集失败: {collect.stderr[:800]}")
-        else:
-            logger.info(f"预测账本采集完成: {collect.stdout[:800]}")
+    import subprocess
+    import sys
+    from app.config import PROJECT_ROOT
 
-        result = await asyncio.to_thread(
-            subprocess.run,
-            [
-                sys.executable,
-                script_path,
-                "backfill",
-                "--as-of",
-                report_date,
-                "--limit",
-                "600",
-            ],
-            cwd=project_root,
-            text=True,
-            capture_output=True,
-            timeout=300,
-        )
+    project_root = f"{PROJECT_ROOT}/.."
+    script_path = f"{project_root}/scripts/run_prediction_lab.py"
+    report_date = str(date.today())
+
+    async def run_stage(
+        *,
+        command: list[str],
+        success_label: str,
+        output_limit: int,
+    ) -> dict:
+        logger.info(f"=== {success_label}启动 ===")
+        try:
+            result = await asyncio.to_thread(
+                subprocess.run,
+                command,
+                cwd=project_root,
+                text=True,
+                capture_output=True,
+                timeout=300,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning(f"{success_label}超时: 300s")
+            return {"state": "timed_out", "returncode": None}
+        except Exception as exc:
+            logger.error(f"{success_label}异常: {exc}", exc_info=True)
+            return {
+                "state": "failed",
+                "returncode": None,
+                "error": type(exc).__name__,
+            }
         if result.returncode == 0:
-            logger.info(f"预测账本 due queue 补跑完成: {result.stdout[:500]}")
-        else:
-            logger.warning(f"预测账本 due queue 补跑失败: {result.stderr[:500]}")
-    except Exception as e:
-        logger.error(f"预测账本任务异常: {e}", exc_info=True)
+            logger.info(f"{success_label}完成: {result.stdout[:output_limit]}")
+            return {"state": "succeeded", "returncode": 0}
+        logger.warning(f"{success_label}失败: {result.stderr[:output_limit]}")
+        return {"state": "failed", "returncode": result.returncode}
+
+    collect_status = await run_stage(
+        command=[
+            sys.executable,
+            script_path,
+            "collect",
+            "--date",
+            report_date,
+            "--universe",
+            "target_pool",
+            "--limit",
+            "200",
+        ],
+        success_label="预测账本采集",
+        output_limit=800,
+    )
+    backfill_status = await run_stage(
+        command=[
+            sys.executable,
+            script_path,
+            "backfill",
+            "--as-of",
+            report_date,
+            "--limit",
+            "600",
+        ],
+        success_label="预测账本 due queue 补跑",
+        output_limit=500,
+    )
+    return {"collect": collect_status, "backfill": backfill_status}
 
 
 async def _startup_health_check():

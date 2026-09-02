@@ -10,6 +10,7 @@ from app.utils.trading_calendar import is_trading_day, prev_trading_day
 
 CHINA_TZ = timezone(timedelta(hours=8))
 MAX_FRESH_QUOTE_AGE_SECONDS = 15 * 60
+MAX_QUOTE_BATCH_SIZE = 50
 
 
 class TencentDataSource(BaseDataSource):
@@ -115,29 +116,48 @@ class TencentDataSource(BaseDataSource):
             return None
 
     async def fetch_batch(self, codes: List[str]) -> Dict[str, Dict[str, Any]]:
-        """批量获取多只股票行情 — 单次HTTP请求"""
+        """批量获取多只股票行情，按供应商稳定上限拆分请求。"""
         if not codes:
             return {}
         try:
-            prefixed = ",".join(self._resolve_code(c) for c in codes)
-            url = f"https://qt.gtimg.cn/q={prefixed}"
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                resp.raise_for_status()
-                data = resp.content.decode("gbk")
-
-            results = {}
-            raw_codes = {self._resolve_code(c): c for c in codes}
-            for line in data.strip().split(";"):
-                for prefix, raw_code in raw_codes.items():
-                    if prefix in line:
-                        result = self._parse_one(line, raw_code)
-                        if result:
-                            results[raw_code] = result
-                        break
-            return results
+            return await self._fetch_batch_chunks(codes)
         except Exception:
             return {}
+
+    async def _fetch_batch_chunks(
+        self,
+        codes: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        results: Dict[str, Dict[str, Any]] = {}
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for offset in range(0, len(codes), MAX_QUOTE_BATCH_SIZE):
+                batch = codes[offset : offset + MAX_QUOTE_BATCH_SIZE]
+                raw_codes = {}
+                for code in batch:
+                    try:
+                        raw_codes[self._resolve_code(code)] = code
+                    except ValueError:
+                        continue
+                if not raw_codes:
+                    continue
+                url = f"https://qt.gtimg.cn/q={','.join(raw_codes)}"
+                try:
+                    resp = await client.get(
+                        url,
+                        headers={"User-Agent": "Mozilla/5.0"},
+                    )
+                    resp.raise_for_status()
+                    data = resp.content.decode("gbk")
+                except Exception:
+                    continue
+                for line in data.strip().split(";"):
+                    for prefix, raw_code in raw_codes.items():
+                        if prefix in line:
+                            result = self._parse_one(line, raw_code)
+                            if result:
+                                results[raw_code] = result
+                            break
+        return results
 
     async def fetch_kline(self, stock_code: str, period: str = "day", count: int = 120) -> Dict[str, Any]:
         """获取历史K线数据

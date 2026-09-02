@@ -1,6 +1,7 @@
 """Fast real-time K-line source backed by Scrapling and Eastmoney push2his."""
 from __future__ import annotations
 
+import asyncio
 from time import monotonic
 from typing import Any
 
@@ -102,7 +103,8 @@ class ScraplingRealtimeKlineSource(BaseDataSource):
             from scrapling.fetchers import Fetcher
 
             url = self._url(clean, period=period, count=count)
-            response = Fetcher.get(
+            response = await asyncio.to_thread(
+                Fetcher.get,
                 url,
                 headers={
                     "User-Agent": "Mozilla/5.0",

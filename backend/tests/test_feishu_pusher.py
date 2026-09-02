@@ -56,6 +56,73 @@ async def test_send_feishu_card_falls_back_to_webhook(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_send_feishu_card_retries_transient_api_failure(monkeypatch):
+    """Catches a one-off API failure incorrectly failing the whole report delivery."""
+    api_results = iter((False, True))
+    calls = {"api": 0, "webhook": 0, "sleep": 0}
+
+    async def fake_api(**kwargs):
+        calls["api"] += 1
+        return next(api_results)
+
+    async def fake_webhook(*args, **kwargs):
+        calls["webhook"] += 1
+        return True
+
+    async def fake_sleep(delay):
+        calls["sleep"] += 1
+
+    monkeypatch.setattr(feishu_pusher, "send_api_card", fake_api)
+    monkeypatch.setattr(feishu_pusher, "send_webhook_card", fake_webhook)
+    monkeypatch.setattr(feishu_pusher.asyncio, "sleep", fake_sleep)
+
+    result = await feishu_pusher.send_feishu_card(
+        title="次日策略",
+        content="正文",
+        webhook_url="https://example.test/webhook",
+        app_id="cli_xxx",
+        app_secret="secret",
+        chat_id="oc_xxx",
+    )
+
+    assert result["channel"] == "api"
+    assert result["attempts"] == {"api": 2, "webhook": 0}
+    assert calls == {"api": 2, "webhook": 0, "sleep": 1}
+
+
+@pytest.mark.asyncio
+async def test_send_feishu_card_retries_transient_webhook_failure(monkeypatch):
+    """Catches a one-off Webhook failure being persisted without a bounded retry."""
+    webhook_results = iter((False, True))
+    calls = {"api": 0, "webhook": 0, "sleep": 0}
+
+    async def fake_api(**kwargs):
+        calls["api"] += 1
+        return False
+
+    async def fake_webhook(*args, **kwargs):
+        calls["webhook"] += 1
+        return next(webhook_results)
+
+    async def fake_sleep(delay):
+        calls["sleep"] += 1
+
+    monkeypatch.setattr(feishu_pusher, "send_api_card", fake_api)
+    monkeypatch.setattr(feishu_pusher, "send_webhook_card", fake_webhook)
+    monkeypatch.setattr(feishu_pusher.asyncio, "sleep", fake_sleep)
+
+    result = await feishu_pusher.send_feishu_card(
+        title="次日策略",
+        content="正文",
+        webhook_url="https://example.test/webhook",
+    )
+
+    assert result["channel"] == "webhook"
+    assert result["attempts"] == {"api": 0, "webhook": 2}
+    assert calls == {"api": 0, "webhook": 2, "sleep": 1}
+
+
+@pytest.mark.asyncio
 async def test_send_api_card_uses_feishu_message_api(monkeypatch):
     requests = []
 

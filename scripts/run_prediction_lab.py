@@ -23,6 +23,7 @@ from app.data_sources.offline_market_data import (
     validate_offline_kline_response,
 )
 from app.data_sources.tushare_client import TushareDataSource
+from app.data_sources.tencent_client import TencentDataSource
 from app.services.prediction_lab import (
     PredictionLedger,
     build_prediction_records,
@@ -86,6 +87,31 @@ def _horizon_return(
     if start <= 0 or end <= 0:
         return None
     return round((end - start) / start * 100, 2)
+
+
+def _required_backfill_kline_count(
+    predictions: list[dict],
+    *,
+    as_of: str,
+    minimum_count: int,
+) -> int:
+    prediction_dates = [
+        date.fromisoformat(str(item.get("prediction_date"))[:10])
+        for item in predictions
+        if item.get("prediction_date")
+    ]
+    as_of_date = date.fromisoformat(as_of[:10])
+    earliest_date = min(prediction_dates, default=as_of_date)
+    max_horizon = max(
+        (int(item.get("horizon_days") or 0) for item in predictions),
+        default=0,
+    )
+    return max(
+        minimum_count,
+        (as_of_date - earliest_date).days
+        + max_horizon
+        + BACKFILL_KLINE_SAFETY_DAYS,
+    )
 
 
 async def _evaluate_with_benchmarks(
@@ -160,10 +186,14 @@ async def _evaluate_with_benchmarks(
     return evaluated
 
 
-async def collect_predictions(args: argparse.Namespace) -> dict:
+async def collect_predictions(
+    args: argparse.Namespace,
+    *,
+    quote_source=None,
+) -> dict:
     day = args.date or _today()
     universe = _load_universe(args.universe, args.limit)
-    quote_source = FastRealtimeMarketDataSource()
+    quote_source = quote_source or TencentDataSource()
     ledger = PredictionLedger(args.output_root)
     codes = [item["code"] for item in universe if item.get("code")]
     universe_digest = hashlib.sha256(
@@ -175,20 +205,62 @@ async def collect_predictions(args: argparse.Namespace) -> dict:
     commission_text = os.getenv("CONGXI_COMMISSION_RATE")
     commission_rate = float(commission_text) if commission_text not in (None, "") else None
     quotes = await quote_source.fetch_batch(codes)
-    records: list[dict] = []
-    skipped: list[dict] = []
-    for item in universe:
+    kline_concurrency = max(
+        1,
+        int(
+            getattr(args, "kline_concurrency", None)
+            or os.getenv("CONGXI_PREDICTION_KLINE_CONCURRENCY", "8")
+        ),
+    )
+    kline_timeout = max(
+        0.001,
+        float(
+            getattr(args, "kline_timeout", None)
+            or os.getenv("CONGXI_PREDICTION_KLINE_TIMEOUT_SECONDS", "20")
+        ),
+    )
+    semaphore = asyncio.Semaphore(kline_concurrency)
+
+    async def load_kline(item: dict) -> dict:
         code = item.get("code")
         quote = quotes.get(code) or {}
         price = float(quote.get("price") or 0)
         if price <= 0:
-            skipped.append({"code": code, "reason": "quote_missing"})
-            continue
-        kline = await quote_source.fetch_kline(code, "day", count=args.kline_count)
-        bars = kline.get("bars") or []
+            return {"item": item, "quote": quote, "reason": "quote_missing"}
+        try:
+            async with semaphore:
+                kline = await asyncio.wait_for(
+                    quote_source.fetch_kline(
+                        code,
+                        "day",
+                        count=args.kline_count,
+                    ),
+                    timeout=kline_timeout,
+                )
+        except TimeoutError:
+            return {"item": item, "quote": quote, "reason": "kline_timeout"}
+        except Exception as exc:
+            return {
+                "item": item,
+                "quote": quote,
+                "reason": f"kline_fetch_failed:{type(exc).__name__}",
+            }
+        bars = (kline or {}).get("bars") or []
         if len(bars) < 10:
-            skipped.append({"code": code, "reason": "kline_insufficient"})
+            return {"item": item, "quote": quote, "reason": "kline_insufficient"}
+        return {"item": item, "quote": quote, "bars": bars, "reason": ""}
+
+    loaded = await asyncio.gather(*(load_kline(item) for item in universe))
+    records: list[dict] = []
+    skipped: list[dict] = []
+    for result in loaded:
+        item = result["item"]
+        code = item.get("code")
+        quote = result["quote"]
+        if result["reason"]:
+            skipped.append({"code": code, "reason": result["reason"]})
             continue
+        bars = result["bars"]
         records.extend(
             build_prediction_records(
                 code=code,
@@ -215,6 +287,9 @@ async def collect_predictions(args: argparse.Namespace) -> dict:
         "record_count": len(records),
         "written": written,
         "skipped_count": len(skipped),
+        "skip_reasons": dict(sorted(Counter(item["reason"] for item in skipped).items())),
+        "kline_concurrency": kline_concurrency,
+        "kline_timeout_seconds": kline_timeout,
         "prediction_path": str(ledger.prediction_path(day)),
     }
 
@@ -256,14 +331,14 @@ async def evaluate_predictions(args: argparse.Namespace) -> dict:
 async def backfill_due_predictions(
     args: argparse.Namespace,
     *,
-    quote_source: FastRealtimeMarketDataSource | None = None,
+    quote_source=None,
     offline_source=None,
 ) -> dict:
     """Evaluate every unfinished prediction while reusing one K-line fetch per code."""
     as_of = args.as_of or _today()
     ledger = PredictionLedger(args.output_root)
     predictions = ledger.due_predictions(as_of=as_of, limit=args.limit)
-    source = quote_source or FastRealtimeMarketDataSource()
+    source = quote_source or TencentDataSource()
     offline_initialization_invalid = False
     if offline_source is None and quote_source is None:
         try:
@@ -277,6 +352,64 @@ async def backfill_due_predictions(
     for prediction in predictions:
         by_code.setdefault(str(prediction.get("code") or ""), []).append(prediction)
 
+    required_counts = {
+        code: _required_backfill_kline_count(
+            code_predictions,
+            as_of=as_of,
+            minimum_count=args.kline_count,
+        )
+        for code, code_predictions in by_code.items()
+    }
+    kline_concurrency = max(
+        1,
+        int(
+            getattr(args, "kline_concurrency", None)
+            or os.getenv("CONGXI_PREDICTION_KLINE_CONCURRENCY", "8")
+        ),
+    )
+    kline_timeout = max(
+        0.001,
+        float(
+            getattr(args, "kline_timeout", None)
+            or os.getenv("CONGXI_PREDICTION_KLINE_TIMEOUT_SECONDS", "20")
+        ),
+    )
+    prefetched_remote: dict[str, dict] = {}
+    prefetch_errors: dict[str, str] = {}
+    if offline_source is None and not offline_initialization_invalid:
+        semaphore = asyncio.Semaphore(kline_concurrency)
+
+        async def prefetch_remote(code: str) -> tuple[str, dict | None, str]:
+            try:
+                async with semaphore:
+                    response = await asyncio.wait_for(
+                        source.fetch_kline(
+                            code,
+                            "day",
+                            count=required_counts[code],
+                        ),
+                        timeout=kline_timeout,
+                    )
+            except TimeoutError:
+                return code, None, "kline_timeout"
+            except Exception as exc:
+                return code, None, f"kline_fetch_failed: {type(exc).__name__}"
+            return code, response or {}, ""
+
+        prefetch_codes = [
+            code
+            for code in by_code
+            if required_counts[code] <= BACKFILL_KLINE_PROVIDER_LIMIT
+        ]
+        prefetched = await asyncio.gather(
+            *(prefetch_remote(code) for code in prefetch_codes)
+        )
+        for code, response, reason in prefetched:
+            if reason:
+                prefetch_errors[code] = reason
+            else:
+                prefetched_remote[code] = response or {}
+
     outcomes: list[dict] = []
     bars_by_code: dict[str, list[dict]] = {}
     code_errors: list[dict] = []
@@ -285,21 +418,7 @@ async def backfill_due_predictions(
     offline_history_insufficient_coverage_count = 0
     offline_coverage_fallback_reasons: Counter[str] = Counter()
     for code, code_predictions in by_code.items():
-        prediction_dates = [
-            date.fromisoformat(str(item.get("prediction_date"))[:10])
-            for item in code_predictions
-            if item.get("prediction_date")
-        ]
-        as_of_date = date.fromisoformat(as_of[:10])
-        earliest_date = min(prediction_dates, default=as_of_date)
-        max_horizon = max(
-            (int(item.get("horizon_days") or 0) for item in code_predictions),
-            default=0,
-        )
-        required_count = max(
-            args.kline_count,
-            (as_of_date - earliest_date).days + max_horizon + BACKFILL_KLINE_SAFETY_DAYS,
-        )
+        required_count = required_counts[code]
         if required_count > BACKFILL_KLINE_PROVIDER_LIMIT:
             history_overflow_count += 1
             code_errors.append(
@@ -447,11 +566,35 @@ async def backfill_due_predictions(
                     )
                     continue
             if not kline:
-                kline = await source.fetch_kline(
-                    code,
-                    "day",
-                    count=required_count,
-                )
+                if code in prefetch_errors:
+                    reason = prefetch_errors[code]
+                    outcome_reason = (
+                        "kline_timeout"
+                        if reason == "kline_timeout"
+                        else "kline_fetch_failed"
+                    )
+                    code_errors.append({"code": code, "reason": reason})
+                    outcomes.extend(
+                        {
+                            **evaluate_prediction_record(
+                                prediction,
+                                bars=[],
+                                as_of=as_of,
+                            ),
+                            "status": "unavailable",
+                            "reason": outcome_reason,
+                        }
+                        for prediction in code_predictions
+                    )
+                    continue
+                if code in prefetched_remote:
+                    kline = prefetched_remote[code]
+                else:
+                    kline = await source.fetch_kline(
+                        code,
+                        "day",
+                        count=required_count,
+                    )
             bars = kline.get("bars") or []
             bars_by_code[code] = bars
             outcomes.extend(
@@ -506,6 +649,8 @@ async def backfill_due_predictions(
         "offline_coverage_fallback_reasons": dict(
             sorted(offline_coverage_fallback_reasons.items())
         ),
+        "kline_concurrency": kline_concurrency,
+        "kline_timeout_seconds": kline_timeout,
         "code_errors": code_errors,
         "evaluated_count": len(outcomes),
         "verified_count": sum(item.get("status") == "verified" for item in outcomes),
@@ -524,6 +669,16 @@ async def _main() -> int:
     parser.add_argument("--universe", choices=("target_pool", "tushare_all"), default="target_pool")
     parser.add_argument("--limit", type=int, default=50)
     parser.add_argument("--kline-count", type=int, default=40)
+    parser.add_argument(
+        "--kline-concurrency",
+        type=int,
+        default=int(os.getenv("CONGXI_PREDICTION_KLINE_CONCURRENCY", "8")),
+    )
+    parser.add_argument(
+        "--kline-timeout",
+        type=float,
+        default=float(os.getenv("CONGXI_PREDICTION_KLINE_TIMEOUT_SECONDS", "20")),
+    )
     parser.add_argument("--output-root", default=None)
     args = parser.parse_args()
 

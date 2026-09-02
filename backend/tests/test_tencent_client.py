@@ -123,3 +123,108 @@ async def test_tencent_fetch_batch_preserves_three_market_indices(
     assert requested_urls == [
         "https://qt.gtimg.cn/q=sh000001,sz399001,sz399006"
     ]
+
+
+@pytest.mark.asyncio
+async def test_tencent_fetch_batch_chunks_large_universe(monkeypatch):
+    """Catches Tencent rejecting an oversized quote URL and returning zero quotes."""
+    import app.data_sources.tencent_client as tencent_client
+
+    requested_symbols = []
+
+    class FakeResponse:
+        def __init__(self, symbols):
+            self.content = ";".join(
+                _instrument_quote_line(symbol, symbol) for symbol in symbols
+            ).encode("gbk")
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            symbols = url.split("q=", 1)[1].split(",")
+            requested_symbols.append(symbols)
+            if len(symbols) > 50:
+                raise RuntimeError("vendor rejects oversized quote request")
+            return FakeResponse(symbols)
+
+    monkeypatch.setattr(tencent_client.httpx, "AsyncClient", FakeClient)
+    codes = [f"{index:06d}" for index in range(1, 106)]
+
+    quotes = await TencentDataSource().fetch_batch(codes)
+
+    assert list(quotes) == codes
+    assert [len(batch) for batch in requested_symbols] == [50, 50, 5]
+
+
+@pytest.mark.asyncio
+async def test_tencent_fetch_batch_skips_unsupported_instrument_without_losing_stocks(
+    monkeypatch,
+):
+    """Catches one ETF-like code zeroing every valid stock quote in its batch."""
+    import app.data_sources.tencent_client as tencent_client
+
+    requested_symbols = []
+
+    class FakeResponse:
+        def __init__(self, symbols):
+            self.content = ";".join(
+                _instrument_quote_line(symbol, symbol) for symbol in symbols
+            ).encode("gbk")
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, url, **kwargs):
+            symbols = url.split("q=", 1)[1].split(",")
+            requested_symbols.extend(symbols)
+            return FakeResponse(symbols)
+
+    monkeypatch.setattr(tencent_client.httpx, "AsyncClient", FakeClient)
+
+    quotes = await TencentDataSource().fetch_batch(["000001", "510300", "000002"])
+
+    assert list(quotes) == ["000001", "000002"]
+    assert requested_symbols == ["sz000001", "sz000002"]
+
+
+@pytest.mark.asyncio
+async def test_tencent_fetch_batch_fails_closed_when_client_cannot_start(monkeypatch):
+    """Catches client setup failure escaping a fail-soft market-data boundary."""
+    import app.data_sources.tencent_client as tencent_client
+
+    class BrokenClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            raise RuntimeError("network stack unavailable")
+
+        async def __aexit__(self, *args):
+            return None
+
+    monkeypatch.setattr(tencent_client.httpx, "AsyncClient", BrokenClient)
+
+    assert await TencentDataSource().fetch_batch(["000001"]) == {}

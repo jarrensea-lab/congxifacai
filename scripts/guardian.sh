@@ -26,6 +26,7 @@ CHECK_INTERVAL=1800  # 30分钟
 ENV_FILE="$(dirname "$0")/../.env.local"
 if [ -f "$ENV_FILE" ]; then
     set -a
+    # shellcheck source=/dev/null
     source "$ENV_FILE"
     set +a
 fi
@@ -56,7 +57,8 @@ check_deepseek() {
 # ═══ 日报 ═══
 
 generate_daily_report() {
-    local report_file="$LOG_DIR/daily-$(date '+%Y%m%d').log"
+    local report_file
+    report_file="$LOG_DIR/daily-$(date '+%Y%m%d').log"
     {
         echo "========================================"
         echo " 恭喜发财 运行日报"

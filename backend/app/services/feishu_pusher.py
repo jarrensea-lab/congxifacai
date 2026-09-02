@@ -1,4 +1,5 @@
 """V7 飞书推送 — OpenAPI 优先，Webhook/lark-cli 兜底。"""
+import asyncio
 import subprocess
 import json
 import time
@@ -8,6 +9,8 @@ from app.utils.logger import logger
 LARK_CLI = "/Users/zhuchenyuan/.npm-global/bin/lark-cli"
 CONGXI_CHAT_ID = "oc_c51ef6103f2e0b5b9ed9c40ab86b3e45"
 _TOKEN_CACHE: dict[str, object] = {}
+DELIVERY_MAX_ATTEMPTS = 3
+DELIVERY_RETRY_DELAYS = (0.5, 1.5)
 
 
 def _placeholder(value: str | None) -> bool:
@@ -135,22 +138,51 @@ async def send_feishu_card(
     api_base: str = "https://open.feishu.cn",
 ) -> dict:
     """API 优先、Webhook 兜底发送飞书卡片。"""
-    api_ok = await send_api_card(
-        app_id=app_id,
-        app_secret=app_secret,
-        chat_id=chat_id,
-        title=title,
-        content=content,
-        color=color,
-        api_base=api_base,
+    async def attempt(operation) -> tuple[bool, int]:
+        for attempt_number in range(1, DELIVERY_MAX_ATTEMPTS + 1):
+            if await operation():
+                return True, attempt_number
+            if attempt_number < DELIVERY_MAX_ATTEMPTS:
+                await asyncio.sleep(DELIVERY_RETRY_DELAYS[attempt_number - 1])
+        return False, DELIVERY_MAX_ATTEMPTS
+
+    api_configured = not any(
+        _placeholder(value) for value in (app_id, app_secret, chat_id)
     )
+    api_ok = False
+    api_attempts = 0
+    if api_configured:
+        api_ok, api_attempts = await attempt(
+            lambda: send_api_card(
+                app_id=app_id,
+                app_secret=app_secret,
+                chat_id=chat_id,
+                title=title,
+                content=content,
+                color=color,
+                api_base=api_base,
+            )
+        )
     if api_ok:
-        return {"feishu_api": True, "feishu_webhook": False, "channel": "api", "error": ""}
-    webhook_ok = await send_webhook_card(webhook_url, title, content, color)
+        return {
+            "feishu_api": True,
+            "feishu_webhook": False,
+            "channel": "api",
+            "attempts": {"api": api_attempts, "webhook": 0},
+            "error": "",
+        }
+    webhook_configured = not _placeholder(webhook_url)
+    webhook_ok = False
+    webhook_attempts = 0
+    if webhook_configured:
+        webhook_ok, webhook_attempts = await attempt(
+            lambda: send_webhook_card(webhook_url, title, content, color)
+        )
     return {
         "feishu_api": False,
         "feishu_webhook": webhook_ok,
         "channel": "webhook" if webhook_ok else "",
+        "attempts": {"api": api_attempts, "webhook": webhook_attempts},
         "error": "" if webhook_ok else "Feishu API 未配置/失败，Webhook 也未成功",
     }
 

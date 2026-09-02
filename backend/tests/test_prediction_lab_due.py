@@ -1,5 +1,7 @@
 import argparse
+import asyncio
 import ast
+import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 from pathlib import Path
@@ -396,7 +398,7 @@ async def test_backfill_falls_back_when_optional_registry_is_missing(
 
     monkeypatch.setattr(
         run_prediction_lab,
-        "FastRealtimeMarketDataSource",
+        "TencentDataSource",
         PrimaryQuoteSource,
     )
     monkeypatch.setattr(
@@ -416,6 +418,93 @@ async def test_backfill_falls_back_when_optional_registry_is_missing(
 
     assert provider_calls == [("000001", "day", 55)]
     assert result["verified_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_prefetches_remote_klines_with_bounded_concurrency(tmp_path):
+    """Catches a 100-code backlog exceeding the scheduler budget through serial I/O."""
+    ledger = PredictionLedger(tmp_path)
+    for index in range(1, 5):
+        ledger.append_predictions(
+            _records(
+                code=f"00000{index}",
+                prediction_date="2026-06-01",
+                horizons=(1,),
+            )
+        )
+    active = 0
+    max_active = 0
+
+    class QuoteSource:
+        async def fetch_kline(self, code, period, count):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return {
+                "bars": [
+                    {"date": "2026-06-01", "close": 10},
+                    {"date": "2026-06-02", "close": 11},
+                ]
+            }
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+            kline_concurrency=2,
+            kline_timeout=1.0,
+        ),
+        quote_source=QuoteSource(),
+        offline_source=None,
+    )
+
+    assert max_active == 2
+    assert result["verified_count"] == 4
+
+
+@pytest.mark.asyncio
+async def test_backfill_marks_only_timed_out_code_unavailable(tmp_path):
+    """Catches one slow backlog symbol preventing healthy outcomes from being written."""
+    ledger = PredictionLedger(tmp_path)
+    for code in ("000001", "000002"):
+        ledger.append_predictions(
+            _records(code=code, prediction_date="2026-06-01", horizons=(1,))
+        )
+
+    class QuoteSource:
+        async def fetch_kline(self, code, period, count):
+            if code == "000001":
+                await asyncio.sleep(0.05)
+            return {
+                "bars": [
+                    {"date": "2026-06-01", "close": 10},
+                    {"date": "2026-06-02", "close": 11},
+                ]
+            }
+
+    result = await run_prediction_lab.backfill_due_predictions(
+        argparse.Namespace(
+            output_root=str(tmp_path),
+            as_of="2026-07-15",
+            limit=None,
+            kline_count=40,
+            kline_concurrency=2,
+            kline_timeout=0.01,
+        ),
+        quote_source=QuoteSource(),
+        offline_source=None,
+    )
+
+    outcomes = ledger.read_jsonl(ledger.outcome_path("2026-07-15"))
+    assert result["verified_count"] == 1
+    assert result["code_errors"] == [{"code": "000001", "reason": "kline_timeout"}]
+    assert {item["reason"] for item in outcomes if item["status"] == "unavailable"} == {
+        "kline_timeout"
+    }
 
 
 @pytest.mark.asyncio
@@ -625,6 +714,29 @@ def test_scheduler_runs_one_backfill_subprocess_instead_of_ten_evaluate_processe
     assert "for offset in range" not in function_source
 
 
+@pytest.mark.asyncio
+async def test_scheduler_runs_backfill_even_when_collection_times_out(monkeypatch):
+    """Catches a collection timeout aborting the independent backlog repair stage."""
+    from app import main as main_module
+
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(command)
+        if command[2] == "collect":
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return SimpleNamespace(returncode=0, stdout='{"mode":"backfill"}', stderr="")
+
+    monkeypatch.setattr(main_module, "is_trading_day", lambda: True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = await main_module._run_prediction_lab_with_status()
+
+    assert [command[2] for command in calls] == ["collect", "backfill"]
+    assert result["collect"]["state"] == "timed_out"
+    assert result["backfill"]["state"] == "succeeded"
+
+
 def test_prediction_records_freeze_dual_benchmark_identity_and_data_cutoff():
     records = build_prediction_records(
         code="000001",
@@ -688,7 +800,6 @@ async def test_collect_predictions_freezes_reachable_benchmark_and_cost_contract
                 ]
             }
 
-    monkeypatch.setattr(run_prediction_lab, "FastRealtimeMarketDataSource", QuoteSource)
     args = SimpleNamespace(
         date="2026-07-21",
         universe="target_pool",
@@ -697,7 +808,10 @@ async def test_collect_predictions_freezes_reachable_benchmark_and_cost_contract
         kline_count=40,
     )
 
-    result = await run_prediction_lab.collect_predictions(args)
+    result = await run_prediction_lab.collect_predictions(
+        args,
+        quote_source=QuoteSource(),
+    )
 
     assert result["written"] == 3
     records = PredictionLedger(tmp_path).read_jsonl(
@@ -709,6 +823,132 @@ async def test_collect_predictions_freezes_reachable_benchmark_and_cost_contract
     assert {record["entry_policy"] for record in records} == {"prediction_close"}
     assert {record["exit_policy"] for record in records} == {"horizon_close"}
     assert {record["commission_rate"] for record in records} == {0.00015}
+
+
+@pytest.mark.asyncio
+async def test_collect_predictions_fetches_klines_with_bounded_concurrency(
+    tmp_path, monkeypatch
+):
+    """Catches a regression to serial K-line fetching that exceeds the job budget."""
+    universe = [
+        {"code": f"00000{index}", "name": f"测试{index}"}
+        for index in range(1, 5)
+    ]
+    monkeypatch.setattr(run_prediction_lab, "_load_universe", lambda kind, limit: universe)
+    active = 0
+    max_active = 0
+
+    class QuoteSource:
+        async def fetch_batch(self, codes):
+            return {code: {"price": 10, "name": code} for code in codes}
+
+        async def fetch_kline(self, code, period, count):
+            nonlocal active, max_active
+            active += 1
+            max_active = max(max_active, active)
+            await asyncio.sleep(0.02)
+            active -= 1
+            return {"bars": [{"date": "2026-07-21", "close": 10}] * 10}
+
+    args = SimpleNamespace(
+        date="2026-07-21",
+        universe="target_pool",
+        limit=4,
+        output_root=str(tmp_path),
+        kline_count=40,
+        kline_concurrency=2,
+        kline_timeout=1.0,
+    )
+
+    result = await run_prediction_lab.collect_predictions(
+        args,
+        quote_source=QuoteSource(),
+    )
+
+    assert max_active == 2
+    assert result["written"] == 12
+    assert result["skipped_count"] == 0
+
+
+@pytest.mark.asyncio
+async def test_collect_predictions_skips_only_timed_out_symbol(tmp_path, monkeypatch):
+    """Catches one slow symbol blocking every healthy prediction record."""
+    universe = [
+        {"code": "000001", "name": "慢标的"},
+        {"code": "000002", "name": "正常标的"},
+    ]
+    monkeypatch.setattr(run_prediction_lab, "_load_universe", lambda kind, limit: universe)
+
+    class QuoteSource:
+        async def fetch_batch(self, codes):
+            return {code: {"price": 10, "name": code} for code in codes}
+
+        async def fetch_kline(self, code, period, count):
+            if code == "000001":
+                await asyncio.sleep(0.05)
+            return {"bars": [{"date": "2026-07-21", "close": 10}] * 10}
+
+    args = SimpleNamespace(
+        date="2026-07-21",
+        universe="target_pool",
+        limit=2,
+        output_root=str(tmp_path),
+        kline_count=40,
+        kline_concurrency=2,
+        kline_timeout=0.01,
+    )
+
+    result = await run_prediction_lab.collect_predictions(
+        args,
+        quote_source=QuoteSource(),
+    )
+
+    assert result["written"] == 3
+    assert result["skipped_count"] == 1
+    assert result["skip_reasons"] == {"kline_timeout": 1}
+
+
+@pytest.mark.asyncio
+async def test_collect_predictions_defaults_to_cancellable_tencent_kline_source(
+    tmp_path, monkeypatch
+):
+    """Catches the CLI returning to a blocking Scrapling source for mass collection."""
+    monkeypatch.setattr(
+        run_prediction_lab,
+        "_load_universe",
+        lambda kind, limit: [{"code": "000001", "name": "平安银行"}],
+    )
+
+    class QuoteSource:
+        async def fetch_batch(self, codes):
+            return {"000001": {"price": 10, "name": "平安银行"}}
+
+        async def fetch_kline(self, code, period, count):
+            return {"bars": [{"date": "2026-07-21", "close": 10}] * 10}
+
+    class ForbiddenFastSource:
+        def __init__(self):
+            raise AssertionError("mass collection must use the cancellable HTTP source")
+
+    monkeypatch.setattr(run_prediction_lab, "TencentDataSource", QuoteSource)
+    monkeypatch.setattr(
+        run_prediction_lab,
+        "FastRealtimeMarketDataSource",
+        ForbiddenFastSource,
+    )
+    args = SimpleNamespace(
+        date="2026-07-21",
+        universe="target_pool",
+        limit=1,
+        output_root=str(tmp_path),
+        kline_count=40,
+        kline_concurrency=1,
+        kline_timeout=1.0,
+    )
+
+    result = await run_prediction_lab.collect_predictions(args)
+
+    assert result["written"] == 3
 
 
 @pytest.mark.asyncio
