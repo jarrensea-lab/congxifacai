@@ -12,7 +12,7 @@ aiosqlite
 
 # HTTP 客户端
 httpx>=0.26.0
-scrapling>=0.4.10
+scrapling[fetchers]>=0.4.10
 playwright>=1.61.0
 browserforge>=1.2.4
 
