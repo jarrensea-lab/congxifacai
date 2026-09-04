@@ -2716,8 +2716,14 @@ def _candidate_view(
     return ordered[:3], _humanize_reason(missing_reason)
 
 
-def _long_horizon_view(decision: dict) -> list[dict]:
+def _long_horizon_view(
+    decision: dict,
+    *,
+    positions: list[dict] | None = None,
+) -> list[dict]:
     rows: list[dict] = []
+    long_truth: list[dict] = []
+    long_truth_by_code: dict[str, dict] = {}
     for item in _target_scores(decision):
         has_long_truth = (
             bool(item.get("thesis_status"))
@@ -2726,6 +2732,60 @@ def _long_horizon_view(decision: dict) -> list[dict]:
         )
         if not has_long_truth:
             continue
+        long_truth.append(item)
+        code = _target_code(item)
+        if code:
+            long_truth_by_code[code] = item
+
+    ordered: list[dict] = []
+    seen_codes: set[str] = set()
+    for position in positions or []:
+        code = _target_code(position)
+        if not code or code in seen_codes:
+            continue
+        if code in long_truth_by_code:
+            ordered.append(long_truth_by_code[code])
+        else:
+            name = str(
+                position.get("name")
+                or position.get("stock_name")
+                or code
+            ).strip()
+            is_etf = (
+                "ETF" in name.upper()
+                or code.startswith((
+                    "159", "510", "511", "512", "513", "515",
+                    "516", "517", "518", "588", "589",
+                ))
+            )
+            evidence = (
+                "跟踪指数估值、行业权重、波动回撤、费率和流动性"
+                if is_etf
+                else "盈利质量、自由现金流、负债与分红、行业周期和估值"
+            )
+            ordered.append({
+                **position,
+                "thesis_status": "",
+                "valuation_zone": "unknown",
+                "red_line_status": "unknown",
+                "action_nature": "持仓论文待建",
+                "missing_long_thesis": True,
+                "long_horizon_reason": (
+                    "当前为真实持仓，但尚未建立可验证的中长期论文；"
+                    f"下一步补齐{evidence}证据。"
+                ),
+            })
+        seen_codes.add(code)
+
+    for item in long_truth:
+        code = _target_code(item)
+        if code and code in seen_codes:
+            continue
+        ordered.append(item)
+        if code:
+            seen_codes.add(code)
+
+    for item in ordered:
         long_quality_score = item.get("long_quality_score")
         long_reason = _humanize_reason(
             item.get("combined_decision_reason")
@@ -2758,6 +2818,8 @@ def _long_horizon_view(decision: dict) -> list[dict]:
                 else long_reason
             ),
         })
+        if item.get("missing_long_thesis") is True:
+            rows[-1]["action_nature"] = "持仓论文待建"
     return rows
 
 
@@ -3058,7 +3120,7 @@ def build_next_day_strategy_sections(
         ),
         "candidates": candidates,
         "candidate_missing_reason": candidate_missing_reason,
-        "long_horizon": _long_horizon_view(decision),
+        "long_horizon": _long_horizon_view(decision, positions=positions),
         "budget_blocked": budget_rows,
         "budget_blocked_count": len(hidden_codes),
         "research_reference": research_rows,
@@ -3187,6 +3249,7 @@ async def build_target_scores_for_report(
     limit: int | None = None,
     market_source=None,
     long_thesis_store=None,
+    held_codes: set[str] | None = None,
 ) -> list[dict]:
     """Score current target-pool items with normalized data snapshots."""
     from contextlib import nullcontext
@@ -3252,6 +3315,11 @@ async def build_target_scores_for_report(
         else LongThesisStore()
     )
     payload = store.load()
+    normalized_held_codes = {
+        str(code).strip()
+        for code in (held_codes or set())
+        if str(code).strip()
+    }
     thesis_preview_payload = {"items": {}}
     if limit is None:
         try:
@@ -3460,6 +3528,11 @@ async def build_target_scores_for_report(
                 snapshot["sentinel"] = item.get("sentinel") or {}
             if "serenity" in item:
                 snapshot["serenity"] = item.get("serenity") or {}
+            snapshot["historical_recommendation"] = (
+                item.get("last_recommendation")
+                if isinstance(item.get("last_recommendation"), dict)
+                else {}
+            )
             evidence = (
                 item.get("evidence")
                 if isinstance(item.get("evidence"), dict)
@@ -3485,6 +3558,7 @@ async def build_target_scores_for_report(
                 available_cash=available_cash,
                 total_assets=total_assets,
                 long_thesis=thesis,
+                is_held=code in normalized_held_codes,
             )
             score["source_status"] = source_status_for(snapshot)
             pool_kind = infer_pool_kind(
@@ -3602,6 +3676,48 @@ async def build_target_scores_for_report(
                         score.get("decision_reason", ""),
                     ),
                     "current_long_evidence_ids": current_long_evidence_ids,
+                    "financial_quality_score": score.get(
+                        "financial_quality_score",
+                        0,
+                    ),
+                    "financial_quality_coverage": score.get(
+                        "financial_quality_coverage",
+                        0,
+                    ),
+                    "financial_quality_flags": score.get(
+                        "financial_quality_flags"
+                    ) or [],
+                    "earnings_profile": score.get(
+                        "earnings_profile",
+                        "unknown",
+                    ),
+                    "risk_per_lot": score.get("risk_per_lot", 0),
+                    "risk_budget_utilization_pct": score.get(
+                        "risk_budget_utilization_pct",
+                        0,
+                    ),
+                    "lot_concentration_pct": score.get(
+                        "lot_concentration_pct",
+                        0,
+                    ),
+                    "position_context": score.get(
+                        "position_context",
+                        "not_held",
+                    ),
+                    "position_management_required": score.get(
+                        "position_management_required"
+                    ) is True,
+                    "entry_action": score.get(
+                        "entry_action",
+                        action or "watch",
+                    ),
+                    "historical_reference_status": score.get(
+                        "historical_reference_status",
+                        "unverifiable",
+                    ),
+                    "historical_reference_divergence_pct": score.get(
+                        "historical_reference_divergence_pct"
+                    ),
                     "evaluated_at": datetime.now().strftime(
                         "%Y-%m-%d %H:%M:%S"
                     ),
@@ -4219,6 +4335,11 @@ async def main(*, v9_pipeline_result: dict | None = None):
                 available_cash=available_cash,
                 total_assets=portfolio.get("total_assets", portfolio.get("total_value", 0) + available_cash),
                 market_source=shared_market_source,
+                held_codes={
+                    str(position.get("code") or "").strip()
+                    for position in positions
+                    if str(position.get("code") or "").strip()
+                },
             )
             if target_scores:
                 decision["target_scores"] = target_scores

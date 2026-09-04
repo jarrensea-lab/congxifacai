@@ -4,11 +4,13 @@ from __future__ import annotations
 from typing import Any
 
 from app.services.composite_score import build_composite_score, grade_for_score
+from app.services.financial_quality import assess_financial_quality
 from app.services.market_regime import evaluate_market_regime
 from app.services.long_thesis import evaluate_thesis_status
 from app.services.playbook_engine import select_playbook
 from app.services.position_sizing import calculate_position_size
 from app.services.quant_lifecycle import LONG_HORIZON_STATUSES, lot_size_for_code
+from app.services.recommendation_reference import audit_recommendation_reference
 from app.services.strategy_profile import (
     calculate_stop_loss_price,
     calculate_target_price,
@@ -31,6 +33,15 @@ def _to_float(value: Any, default: float = 0.0) -> float:
 
 def _status_ok(payload: dict[str, Any] | None) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "ok"
+
+
+def _required_sources(code: str, name: str) -> tuple[str, ...]:
+    """Return decision inputs that apply to the target's asset class."""
+    clean_name = str(name or "").upper()
+    clean_code = str(code or "").strip()
+    if "ETF" in clean_name or clean_code.startswith(("159", "510", "511", "512", "513", "515", "516", "517", "518", "588", "589")):
+        return tuple(source for source in REQUIRED_SOURCES if source != "financial")
+    return REQUIRED_SOURCES
 
 
 def _buy_budget(available_cash: float, total_assets: float) -> float:
@@ -204,6 +215,7 @@ def score_target(
     available_cash: float,
     total_assets: float,
     long_thesis: dict[str, Any] | None = None,
+    is_held: bool = False,
 ) -> dict[str, Any]:
     """Return a deterministic score card and action for one target."""
     code = str(snapshot.get("code") or "").strip()
@@ -214,7 +226,11 @@ def score_target(
     lot_size = lot_size_for_code(code)
     lot_value = round(price * lot_size, 2) if price > 0 else 0.0
     budget = _buy_budget(available_cash, total_assets)
-    missing_data = [key for key in REQUIRED_SOURCES if not _status_ok(snapshot.get(key))]
+    missing_data = [
+        key
+        for key in _required_sources(code, name)
+        if not _status_ok(snapshot.get(key))
+    ]
     stop_loss = calculate_stop_loss_price(price, profile)
     target_price = calculate_target_price(price, profile)
     regime = evaluate_market_regime(snapshot)
@@ -231,6 +247,17 @@ def score_target(
         )
         if price > 0
         else {}
+    )
+    financial_quality = assess_financial_quality(
+        snapshot.get("financial")
+        if isinstance(snapshot.get("financial"), dict)
+        else None
+    )
+    historical_reference = audit_recommendation_reference(
+        snapshot.get("historical_recommendation")
+        if isinstance(snapshot.get("historical_recommendation"), dict)
+        else None,
+        current_price=price,
     )
     change_pct = _to_float(quote.get("change_pct"))
     hard_gates_passed = (
@@ -266,6 +293,12 @@ def score_target(
         "position_shares": 0,
         "risk_budget": sizing.get("risk_budget", 0),
         "risk_amount": 0,
+        "risk_per_lot": sizing.get("risk_per_lot", 0),
+        "risk_budget_utilization_pct": sizing.get(
+            "risk_budget_utilization_pct",
+            0,
+        ),
+        "lot_concentration_pct": sizing.get("lot_concentration_pct", 0),
         "playbook": playbook.get("playbook", "watch"),
         "range_position_pct": playbook.get("range_position_pct"),
         "market_regime": regime,
@@ -280,18 +313,33 @@ def score_target(
         "grade": composite["grade"],
         "top_reasons": composite["top_reasons"],
         "primary_risk": composite["primary_risk"],
+        "financial_quality_score": financial_quality["score"],
+        "financial_quality_coverage": financial_quality["coverage"],
+        "financial_quality_flags": financial_quality["flags"],
+        "earnings_profile": financial_quality["earnings_profile"],
+        "financial_valuation_eligible": financial_quality[
+            "valuation_eligible"
+        ],
+        "position_context": "held" if is_held else "not_held",
+        "position_management_required": bool(is_held),
+        "entry_action": "watch",
+        "historical_reference_status": historical_reference["status"],
+        "historical_reference_price": historical_reference[
+            "reference_price"
+        ],
+        "historical_reference_divergence_pct": historical_reference[
+            "divergence_pct"
+        ],
+        "historical_reference_usable": historical_reference[
+            "usable_for_current_action"
+        ],
         **long_view,
     }
 
     def finish(updates: dict[str, Any]) -> dict[str, Any]:
         payload = {**base, **updates}
-        payload["grade"] = grade_for_score(
-            _to_float(payload.get("score")),
-            all_hard_gates_passed=(
-                payload.get("action") in {"buy", "add"}
-                and not payload.get("block_reason")
-            ),
-        )
+        if is_held and payload.get("action") == "buy":
+            payload["action"] = "add"
         production_eligibility = (
             snapshot.get("production_eligibility")
             if isinstance(snapshot.get("production_eligibility"), dict)
@@ -312,6 +360,14 @@ def score_target(
                 ),
                 "next_signal": "完成显式、可审计的生产晋级后，再按账户、剧本和风险门重新评分。",
             })
+        payload["entry_action"] = str(payload.get("action") or "watch")
+        payload["grade"] = grade_for_score(
+            _to_float(payload.get("score")),
+            all_hard_gates_passed=(
+                payload.get("action") in {"buy", "add"}
+                and not payload.get("block_reason")
+            ),
+        )
         decision_reason = str(payload.get("decision_reason") or "")
         long_reason = str(payload.get("long_horizon_reason") or "")
         if decision_reason and long_reason:

@@ -45,6 +45,9 @@ def calculate_position_size(
         "position_amount": 0.0,
         "shares": 0,
         "risk_amount": 0.0,
+        "risk_per_lot": 0.0,
+        "risk_budget_utilization_pct": 0.0,
+        "lot_concentration_pct": 0.0,
         "block_reason": "",
     }
 
@@ -56,6 +59,17 @@ def calculate_position_size(
     lot_value = entry * lot_size
     risk_per_share = entry - stop
     risk_per_lot = risk_per_share * lot_size
+    base.update({
+        "risk_per_lot": round(risk_per_lot, 2),
+        "risk_budget_utilization_pct": round(
+            risk_per_lot / risk_budget * 100,
+            2,
+        ) if risk_budget > 0 else 0.0,
+        "lot_concentration_pct": round(
+            lot_value / assets * 100,
+            2,
+        ) if assets > 0 else 0.0,
+    })
     if risk_budget < risk_per_lot:
         return {**base, "block_reason": "risk_budget_too_small"}
     if lot_value > cash or lot_value > executable_budget:
